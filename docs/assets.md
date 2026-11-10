@@ -23,3 +23,13 @@ The RGB8 transform archive covers 256×256×256 input colors and reconstructs a 
 `tests/fixtures/detection/` contains six small detector input images and three numerical reference catalogues. `tests/fixtures/rendering/` contains 42 expected effect images plus `cases.json`, which records the catalogue and settings for each image.
 
 Published TIFF fixtures retain their original pixel arrays and embedded color profile where present. Incidental TIFF metadata is omitted. Rendering tests consume plain JSON inputs directly; no descriptor parser or offline investigation scripts are required. Historical reports, screenshots, binary descriptor dumps and large generated catalogues are excluded from publication.
+
+## Secondary appearance pattern
+
+`SECONDARY_RAYS` is one ordered table of84 `(angle, weight)` pairs in
+`domain/effects/profiles.py`. Angle units are0.1degree; weights are integer
+percent before conversion to relative amplitudes. Rotation shifts angles and
+preserves weights/order. CPU geometry and GPU instance counts derive from this
+table; the shader's uniform arrays provide capacity for84 directions. This
+pattern controls the look of Secondary rays. It is independent of the detector's
+eight-direction sampling stencil, and is not a polymorphic abstraction.

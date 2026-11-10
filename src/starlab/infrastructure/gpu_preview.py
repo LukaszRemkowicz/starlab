@@ -25,6 +25,7 @@ from shiboken6 import VoidPtr
 
 from ..application.use_cases import Preview
 from ..domain.effects.profiles import (
+    SECONDARY_RAY_COUNT,
     directions,
     gain,
     image_diagonal,
@@ -362,7 +363,7 @@ class GpuPreviewRenderer:
         count = self._effect_buffer(kind, p.quantity, threshold)
         if not count:
             return None
-        rays = p.points if kind == "primary" else 84 if kind == "secondary" else 1
+        rays = p.points if kind == "primary" else SECONDARY_RAY_COUNT if kind == "secondary" else 1
         self._attributes(self.buffers[kind], rays)
         self._effect_uniforms(kind, p, diagonal, threshold, rays)
         self._gpu.glClear(0x4000)

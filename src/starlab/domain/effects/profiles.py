@@ -22,6 +22,8 @@ type ProfileArrays = tuple[IndexArray, IndexArray, FloatArray, FloatArray]
 type SceneArrays = tuple[IndexArray, FloatArray, FloatArray, IndexArray]
 type RawProfile = tuple[IntegerArray, IntegerArray, DoubleArray, DoubleArray]
 
+# Each pair is (direction in tenths of a degree, amplitude in percent).
+# This fixed, ordered appearance pattern is not a detector sampling stencil.
 SECONDARY_RAYS: tuple[tuple[int, int], ...] = (
     (40, 27),
     (75, 9),
@@ -108,6 +110,7 @@ SECONDARY_RAYS: tuple[tuple[int, int], ...] = (
     (3558, 21),
     (3584, 10),
 )
+SECONDARY_RAY_COUNT = len(SECONDARY_RAYS)
 
 
 class ArrayCache[T: CacheValue]:
@@ -189,7 +192,7 @@ def geometry_key(kind: EffectKind, p: EffectParameters) -> CacheKey:
             p.sharpness,
             p.spread,
             p.angle,
-            p.points if kind == "primary" else 84,
+            p.points if kind == "primary" else SECONDARY_RAY_COUNT,
         )
     if kind == "soft":
         return kind, p.size, p.falloff
