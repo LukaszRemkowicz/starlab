@@ -331,14 +331,18 @@ def candidate(
         return None
     # 96EF0: sum annular colors at size, size+1, ...; disk brightness.
     count = 1 - int((size - 1) * -0.5)
-    color = sum(
-        (image.color(x, y, int(4 * size) + 4 * i, "ring") for i in range(count)), start=np.zeros(3)
+    color = cast(
+        DoubleArray,
+        sum(
+            (image.color(x, y, int(4 * size) + 4 * i, "ring") for i in range(count)),
+            start=np.zeros(3),
+        ),
     )
     # 9712B followed by PSHUFD E1 writes GREEN, not red.
     color[1] = 0.4 * color[0] + 0.3 * (color[1] + color[2])
     color /= color.mean()
     brightness = float(image.color(x, y, int(4 * size) + 2).mean())
-    return dict(x=x, y=y, size=size, rgb=color.tolist(), brightness=brightness, count=1)
+    return CandidateRecord(x=x, y=y, size=size, rgb=color.tolist(), brightness=brightness, count=1)
 
 
 def covered(x: float, y: float, records: Sequence[CandidateRecord]) -> bool:
