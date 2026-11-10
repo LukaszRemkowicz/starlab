@@ -149,56 +149,61 @@ class EffectPanel(QWidget):
         spike_box.addWidget(self.spike_selector)
         self.tabs.addTab(spikes, "Spikes")
         for kind in KINDS:
-            scroll = QScrollArea()
-            scroll.setWidgetResizable(True)
-            scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-            body = QWidget()
-            body.setObjectName("parameterBody")
-            box = QVBoxLayout(body)
-            box.setContentsMargins(14, 10, 14, 10)
-            box.setSpacing(8)
-            toggle = QCheckBox(f"Enable {TITLES[kind].lower()}")
-            toggle.toggled.connect(lambda checked, k=kind: self._change(k, "enabled", checked))
-            header = QHBoxLayout()
-            header.addWidget(toggle)
-            header.addStretch()
-            count = QLabel("0 sources")
-            count.setObjectName("muted")
-            count.setToolTip(
-                "Sources receiving this effect / total detected sources. Quantity changes the brightness cutoff."
-                + (
-                    " Soft filter processes measured source stars independently of this halo count."
-                    if kind == "soft"
-                    else ""
-                )
-            )
-            header.addWidget(count)
-            self.source_counts[kind] = count
-            box.addLayout(header)
-            self.enabled[kind] = toggle
-            self.controls[kind] = {}
-            for key in PARAMETERS[kind]:
-                control = ParameterControl(key)
-                control.changed.connect(
-                    lambda value, k=kind, p=key: self._change(
-                        k, p, int(value) if p == "points" else value
-                    )
-                )
-                control.edit_started.connect(self.edit_started)
-                control.edit_finished.connect(self.edit_finished)
-                box.addWidget(control)
-                self.controls[kind][key] = control
-            reset = QPushButton("Reset this group")
-            reset.clicked.connect(lambda checked=False, k=kind: self._reset(k))
-            box.addWidget(reset)
-            box.addStretch()
-            scroll.setWidget(body)
+            scroll = self._effect_group(kind)
             if kind in ("primary", "secondary"):
                 self.spike_selector.addTab(scroll, TITLES[kind])
             else:
                 self.tabs.addTab(scroll, TITLES[kind].title())
         self.basic.toggled.connect(self._mode)
         self.set_settings(self.settings)
+
+    def _effect_group(self, kind: str) -> QScrollArea:
+        """Build one effect group's toggle, source count, parameter controls and reset."""
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        body = QWidget()
+        body.setObjectName("parameterBody")
+        box = QVBoxLayout(body)
+        box.setContentsMargins(14, 10, 14, 10)
+        box.setSpacing(8)
+        toggle = QCheckBox(f"Enable {TITLES[kind].lower()}")
+        toggle.toggled.connect(lambda checked, k=kind: self._change(k, "enabled", checked))
+        header = QHBoxLayout()
+        header.addWidget(toggle)
+        header.addStretch()
+        count = QLabel("0 sources")
+        count.setObjectName("muted")
+        count.setToolTip(
+            "Sources receiving this effect / total detected sources. Quantity changes the brightness cutoff."
+            + (
+                " Soft filter processes measured source stars independently of this halo count."
+                if kind == "soft"
+                else ""
+            )
+        )
+        header.addWidget(count)
+        self.source_counts[kind] = count
+        box.addLayout(header)
+        self.enabled[kind] = toggle
+        self.controls[kind] = {}
+        for key in PARAMETERS[kind]:
+            control = ParameterControl(key)
+            control.changed.connect(
+                lambda value, k=kind, p=key: self._change(
+                    k, p, int(value) if p == "points" else value
+                )
+            )
+            control.edit_started.connect(self.edit_started)
+            control.edit_finished.connect(self.edit_finished)
+            box.addWidget(control)
+            self.controls[kind][key] = control
+        reset = QPushButton("Reset this group")
+        reset.clicked.connect(lambda checked=False, k=kind: self._reset(k))
+        box.addWidget(reset)
+        box.addStretch()
+        scroll.setWidget(body)
+        return scroll
 
     def _change(self, kind: str, key: str, value) -> None:
         group = replace(getattr(self.settings, kind), **{key: value})

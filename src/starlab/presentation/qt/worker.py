@@ -1,7 +1,7 @@
 from collections.abc import Callable
 from threading import Event
 
-from PySide6.QtCore import QObject, QRunnable, QThreadPool, Signal, Slot
+from PySide6.QtCore import QObject, QRunnable, QThreadPool, QTimer, Signal, Slot
 
 from ...domain.imaging import Cancelled
 
@@ -33,6 +33,7 @@ class JobRunner(QObject):
     failed = Signal(str)
     activity = Signal(str)
     idle = Signal()
+    shutdown_finished = Signal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -44,6 +45,9 @@ class JobRunner(QObject):
         self.pending: Job | None = None
         self.serial = 0
         self.closing = False
+        self.shutdown_timer = QTimer(self)
+        self.shutdown_timer.setInterval(25)
+        self.shutdown_timer.timeout.connect(self._check_shutdown)
 
     @property
     def busy(self) -> bool:
@@ -78,7 +82,7 @@ class JobRunner(QObject):
         if self.active is None and self.pending is not None and not self.closing:
             pending, self.pending = self.pending, None
             self._start(pending)
-        if not self.busy:
+        if not self.busy and not self.closing:
             self.idle.emit()
 
     def cancel(self) -> None:
@@ -87,10 +91,23 @@ class JobRunner(QObject):
         if self.active:
             self.active.cancel.set()
 
-    def shutdown(self) -> bool:
-        self.closing = True
-        self.cancel()
-        if self.cleanup is not None:
-            cleanup, self.cleanup = self.cleanup, None
-            self.pool.start(Job(0, "cleanup", lambda cancel: cleanup()))
-        return self.pool.waitForDone(5000)
+    def shutdown(self, timeout_ms: int = 5000) -> bool:
+        """Cancel once, queue thread-owned cleanup once, and notify after a timed-out drain."""
+        if not self.closing:
+            self.closing = True
+            self.cancel()
+            if self.cleanup is not None:
+                cleanup, self.cleanup = self.cleanup, None
+                self.pool.start(Job(0, "cleanup", lambda cancel: cleanup()))
+        finished = self.pool.waitForDone(timeout_ms)
+        if finished:
+            self.shutdown_timer.stop()
+        else:
+            self.shutdown_timer.start()
+        return finished
+
+    def _check_shutdown(self) -> None:
+        """Finish a deferred close only after jobs and GPU cleanup leave the pool."""
+        if self.pool.waitForDone(0):
+            self.shutdown_timer.stop()
+            self.shutdown_finished.emit()

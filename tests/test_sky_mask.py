@@ -20,6 +20,23 @@ def test_mask_samples_native_pixels_and_preserves_unknown_horizon():
     assert not mask.classes.flags.writeable
 
 
+@pytest.mark.parametrize("label", [0.5, 1.5])
+def test_mask_rejects_fractional_class_labels(label):
+    with pytest.raises(ValueError):
+        SkyMask(1, np.array([[label]]), (1, 1))
+
+
+def test_mask_rejects_fractional_cell_stride():
+    with pytest.raises(ValueError):
+        SkyMask(1.5, np.ones((2, 2), np.uint8), (3, 3))
+
+
+def test_mask_does_not_allow_points_outside_the_original_image():
+    mask = SkyMask(2, np.ones((2, 3), np.uint8), (3, 5))
+    points = [(-0.01, 0), (0, -0.01), (5, 0), (0, 3), (4.99, 2.99), (np.nan, 1)]
+    np.testing.assert_array_equal(mask.keep(points), [False, False, False, False, True, False])
+
+
 def test_mask_builder_uses_encoded_block_means_and_bounds_strip_memory():
     rows = []
     image = np.arange(12 * 20 * 3, dtype=np.uint16).reshape(12, 20, 3)

@@ -81,3 +81,36 @@ def test_compiled_coarse_color_mask_and_nonzero_origin_match_reference():
     )
     np.testing.assert_allclose(actual[4:7], expected["rgb"], rtol=0, atol=1e-7)
     image.clear_cache()
+
+
+def test_catalog_join_failure_cancels_workers_and_disposes_prepared_tiles(monkeypatch):
+    from threading import Event
+
+    from starlab.domain.detection import join_fast, pipeline
+
+    images = []
+
+    def prepare(row, column, **kwargs):
+        image = Image(np.zeros((2, 2, 3), np.float32))
+        images.append(image)
+        return image, [], np.zeros(2)
+
+    def qualify(value, **kwargs):
+        image, _, _ = value
+        image.clear_cache()
+        return [], 0, 0, np.zeros(3)
+
+    def fail_join(*args):
+        raise RuntimeError("join failed")
+
+    monkeypatch.setattr(pipeline, "TILE", 4)
+    monkeypatch.setattr(pipeline, "WORKERS", 1)
+    monkeypatch.setattr(pipeline, "_prepare_tile", prepare)
+    monkeypatch.setattr(pipeline, "_qualify_tile", qualify)
+    monkeypatch.setattr(join_fast, "join_catalogs_fast", fail_join)
+    token = Event()
+    with pytest.raises(RuntimeError, match="join failed"):
+        pipeline.scan_compiled(12, 4, None, 0.2, 2, token, False, (), None, 1)
+    assert token.is_set()
+    assert len(images) >= 2
+    assert all(not hasattr(image, "_stats_cached") for image in images)

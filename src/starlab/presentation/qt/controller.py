@@ -2,6 +2,7 @@ from collections.abc import Callable
 from dataclasses import replace
 from math import ceil, floor
 from pathlib import Path
+from threading import Event
 
 import numpy as np
 from PySide6.QtCore import QObject, QSignalBlocker, QTimer
@@ -11,7 +12,10 @@ from ...application.session import Session
 from ...application.use_cases import ImageServices, Preview, render_preview
 from ...domain.effects.render import composite
 from ...domain.effects.settings import KINDS
-from ...domain.stars import DetectionSettings
+from ...domain.imaging import ImageFrame, Pixels
+from ...domain.sky_mask import SkyMask
+from ...domain.stars import DetectionSettings, Star
+from .image_view import ViewState
 from .worker import JobRunner
 
 
@@ -26,6 +30,8 @@ class Controller(QObject):
         self.overview: Preview | None = None
         self.detail_region = None
         self.progressive_open = False
+        self._open_view_state: ViewState | None = None
+        self._open_labels: tuple[tuple[str, str], ...] = ()
         self.count_catalog = None
         self.count_mask = None
         self.mask_preview = None
@@ -61,6 +67,7 @@ class Controller(QObject):
         self.runner.failed.connect(self._failed)
         self.runner.activity.connect(self.activity)
         self.runner.idle.connect(self.idle)
+        self.runner.shutdown_finished.connect(window.close)
 
     def activity(self, kind: str) -> None:
         self.saved_message = ""
@@ -187,110 +194,165 @@ class Controller(QObject):
         self.exclusive = False
         match kind:
             case "open_preview":
-                path, (thumbnail, scale, width, height), read = result
-                scale = max(1, round(1 / scale)) if 0 < scale <= 1 else int(scale)
-                settings = self.session.settings
-                self.session = Session()
-                self.session.set_settings(settings, remember=False)
-                self.source = path
-                self.preview = self.overview = None
-                self.detail_region = None
-                self.mask_preview = None
-                self.progressive_open = True
-                self.window.image_view.fitted = True
-                self.window.image_view.has_image = False
-                self.window.image_view.stars = ()
-                self.window.image_view.set_pixels(
-                    thumbnail.pixels, thumbnail.color_space, scale, width, height
-                )
-                self.window.filename.setText(path.name)
-                self.window.stack.setCurrentIndex(1)
-                self.window.hud.show()
-                self.window.image_info.show()
-                self.window.image_info.setText(
-                    f"{width} × {height} · preparing full-resolution original"
-                )
-                self.runner.submit("open", read)
+                self._complete_open_preview(*result)
             case "open":
-                self.source, frame, self.preview, mask = result
-                self.overview = self.preview
-                self.detail_region = None
-                self.session.open(frame)
-                if mask is not None:
-                    self.session.set_catalog((), sky_mask=mask, remember=False)
-                self.full_resolution = False
-                if not self.progressive_open:
-                    self.window.image_view.fitted = True
-                    self.window.image_view.has_image = False
-                self.progressive_open = False
-                self.window.image_view.stars = ()
-                self.window.filename.setText(frame.name)
-                self.window.filename.setToolTip(frame.name)
-                color_label = frame.color_space
-                if "assumed" in frame.note:
-                    color_label += " (assumed)"
-                elif "near-sRGB" in frame.note:
-                    color_label = "sRGB approximation"
-                self.window.image_info.setText(f"{frame.width} × {frame.height} · {color_label}")
-                self.window.image_info.setToolTip(frame.note)
-                self.window.set_loaded(True)
-                self.window.status_text.setText(frame.note)
-                self.display()
-                if not self.window.image_view.fitted:
-                    self.request_detail()
-                if self.window.auto_detect.isChecked() or self.services.sky_mask is not None:
-                    self.analyze(force=False, detect=self.window.auto_detect.isChecked())
-                else:
-                    self.refresh()
+                self._complete_open(*result)
             case "mask":
-                revision, mask, settings, force, detect = result
-                if revision == self.session.revision:
-                    self.mask_preview = mask
-                    if self.session.sky_mask is None and not self.session.stars:
-                        # The initial mask is independent of detection and survives its cancellation.
-                        self.session.set_catalog(
-                            (), sky_mask=mask, detection_settings=settings, remember=False
-                        )
-                        revision = self.session.revision
-                    if self.window.mode == "mask":
-                        self.display()
-                    if detect:
-                        self._submit_detection(revision, settings, mask, force)
-                    else:
-                        self.mask_preview = None
-                        self.refresh()
+                self._complete_mask(*result)
             case "analyze":
-                revision, stars, mask, settings = result
-                if revision == self.session.revision:
-                    self.session.set_catalog(
-                        stars, reset_edits=True, sky_mask=mask, detection_settings=settings
-                    )
-                    self.mask_preview = None
-                    self._clear_effect_history()
-                    self.refresh()
+                self._complete_analyze(*result)
             case "preview":
-                revision, preview = result
-                preview = self._enabled_preview(preview)
-                if preview.is_region and (
-                    self.detail_region is None or preview.origin != self.detail_region[0][:2]
-                ):
-                    return
-                if self.session.accept_preview(revision, preview.effects):
-                    self.preview = preview
-                    if not preview.is_region:
-                        self.overview = preview
-                    self.display()
-                elif self.dragging:
-                    # Show completed intermediate frames while newer slider values wait.
-                    self.preview = preview
-                    self.display()
-                    self.debounce.start(0)
+                self._complete_preview(*result)
             case "export":
                 self.saved_message = f"Saved: {result}"
                 self.window.status_text.setText(self.saved_message)
 
+    def _complete_open_preview(
+        self,
+        path: Path,
+        thumbnail_info: tuple[ImageFrame, float, int, int],
+        read: Callable[[Event], tuple[Path, ImageFrame, Preview, SkyMask | None]],
+    ) -> None:
+        """Show a temporary thumbnail while preserving the committed document and view."""
+        thumbnail, scale, width, height = thumbnail_info
+        scale = max(1, round(1 / scale)) if 0 < scale <= 1 else int(scale)
+        view = self.window.image_view
+        self._open_view_state = view.capture_state()
+        self._open_labels = tuple(
+            (label.text(), label.toolTip())
+            for label in (self.window.filename, self.window.image_info)
+        )
+        self.progressive_open = True
+        view.fitted, view.has_image, view.stars = True, False, ()
+        view.set_pixels(thumbnail.pixels, thumbnail.color_space, scale, width, height)
+        self.window.filename.setText(path.name)
+        self.window.stack.setCurrentIndex(1)
+        self.window.hud.show()
+        self.window.image_info.show()
+        self.window.image_info.setText(f"{width} × {height} · preparing full-resolution original")
+        self.runner.submit("open", read)
+
+    def _complete_open(
+        self,
+        path: Path,
+        frame: ImageFrame,
+        preview: Preview,
+        mask: SkyMask | None,
+    ) -> None:
+        """Commit a fully decoded document, then prepare its detection and effects."""
+        self.source, self.preview, self.overview = path, preview, preview
+        self.detail_region = None
+        self.session.open(frame)
+        if mask is not None:
+            self.session.set_catalog((), sky_mask=mask, remember=False)
+        self.full_resolution = False
+        if not self.progressive_open:
+            self.window.image_view.fitted = True
+            self.window.image_view.has_image = False
+        self.progressive_open = False
+        self._open_view_state = None
+        self._open_labels = ()
+        self.window.image_view.stars = ()
+        self._show_frame_info(frame)
+        self.window.set_loaded(True)
+        self.window.status_text.setText(frame.note)
+        self.display()
+        if not self.window.image_view.fitted:
+            self.request_detail()
+        if self.window.auto_detect.isChecked() or self.services.sky_mask is not None:
+            self.analyze(force=False, detect=self.window.auto_detect.isChecked())
+        else:
+            self.refresh()
+
+    def _show_frame_info(self, frame: ImageFrame) -> None:
+        """Describe the committed image and its color interpretation."""
+        self.window.filename.setText(frame.name)
+        self.window.filename.setToolTip(frame.name)
+        color_label = frame.color_space
+        if "assumed" in frame.note:
+            color_label += " (assumed)"
+        elif "near-sRGB" in frame.note:
+            color_label = "sRGB approximation"
+        self.window.image_info.setText(f"{frame.width} × {frame.height} · {color_label}")
+        self.window.image_info.setToolTip(frame.note)
+
+    def _restore_open_presentation(self) -> None:
+        """Remove an interrupted thumbnail without changing document history or ROI."""
+        if self._open_view_state is None:
+            return
+        self.progressive_open = False
+        self.window.image_view.restore_state(self._open_view_state)
+        for label, (text, tooltip) in zip(
+            (self.window.filename, self.window.image_info),
+            self._open_labels,
+            strict=True,
+        ):
+            label.setText(text)
+            label.setToolTip(tooltip)
+        self._open_view_state = None
+        self._open_labels = ()
+        self.window.set_loaded(self.session.frame is not None)
+        self.display()
+
+    def _complete_mask(
+        self,
+        revision: int,
+        mask: SkyMask,
+        settings: DetectionSettings,
+        force: bool,
+        detect: bool,
+    ) -> None:
+        """Accept a current mask before starting the optional catalog detection."""
+        if revision != self.session.revision:
+            return
+        self.mask_preview = mask
+        if self.session.sky_mask is None and not self.session.stars:
+            # The initial mask survives cancellation of the subsequent detection.
+            self.session.set_catalog((), sky_mask=mask, detection_settings=settings, remember=False)
+            revision = self.session.revision
+        if self.window.mode == "mask":
+            self.display()
+        if detect:
+            self._submit_detection(revision, settings, mask, force)
+        else:
+            self.mask_preview = None
+            self.refresh()
+
+    def _complete_analyze(
+        self,
+        revision: int,
+        stars: tuple[Star, ...],
+        mask: SkyMask | None,
+        settings: DetectionSettings,
+    ) -> None:
+        """Commit a current catalog together with the mask used to detect it."""
+        if revision == self.session.revision:
+            self.session.set_catalog(
+                stars, reset_edits=True, sky_mask=mask, detection_settings=settings
+            )
+            self.mask_preview = None
+            self._clear_effect_history()
+            self.refresh()
+
+    def _complete_preview(self, revision: int, preview: Preview) -> None:
+        """Accept current preview work, allowing intermediate slider frames while dragging."""
+        preview = self._enabled_preview(preview)
+        if preview.is_region and (
+            self.detail_region is None or preview.origin != self.detail_region[0][:2]
+        ):
+            return
+        if self.session.accept_preview(revision, preview.effects):
+            self.preview = preview
+            if not preview.is_region:
+                self.overview = preview
+            self.display()
+        elif self.dragging:
+            self.preview = preview
+            self.display()
+            self.debounce.start(0)
+
     def request_detail(self) -> None:
-        if self.session.frame is None:
+        if self.session.frame is None or self.progressive_open:
             return
         view = self.window.image_view
         if view.fitted:
@@ -382,7 +444,13 @@ class Controller(QObject):
         )
 
     def display(self, *_args) -> None:
-        if self.preview is None or self.session.frame is None:
+        if self.preview is None or self.session.frame is None or self.progressive_open:
+            return
+        view = self.window.image_view
+        overview = self.overview or (self.preview if not self.preview.is_region else None)
+        if overview is not None:
+            self._show_overview(overview)
+        if view.fitted:
             return
         if self.window.mode in ("original", "mask") and self.detail_region is not None:
             self._show_original_detail()
@@ -392,28 +460,37 @@ class Controller(QObject):
             and self.preview.origin == self.detail_region[0][:2]
             and self.preview.scale == self.detail_region[1]
         )
-        if _args and self.detail_region is not None and not region_ready:
-            self._show_original_detail()
+        if region_ready:
+            view.set_region_pixels(
+                self._mode_pixels(self.preview),
+                self.session.frame.color_space,
+                self.preview.scale,
+                self.preview.origin,
+            )
+        elif _args and self.detail_region is not None:
+            view.clear_detail()
             if not self.exclusive:
                 self.refresh()
-            return
-        preview = (
-            self.overview
-            if self.window.image_view.fitted and self.preview.is_region
-            else self.preview
+
+    def _show_overview(self, preview: Preview) -> None:
+        """Keep the exposed base layer in the same display mode as zoomed detail."""
+        frame = self.session.frame
+        self.window.image_view.set_pixels(
+            self._mode_pixels(preview),
+            frame.color_space,
+            preview.scale,
+            frame.width,
+            frame.height,
+            preserve_detail=not self.window.image_view.fitted,
         )
+
+    def _mode_pixels(self, preview: Preview) -> Pixels:
+        """Convert either image layer with a comparison divider fixed in image coordinates."""
         original = preview.frame.pixels
-        result = composite(
-            preview.frame,
-            preview.effects,
-            reduction=preview.reduction,
-            enlargement=preview.enlargement,
-        )
-        mode = self.window.mode
-        match mode:
+        match self.window.mode:
             case "mask":
                 left, top = preview.origin
-                pixels = self._mask_pixels(
+                return self._mask_pixels(
                     original,
                     (
                         left,
@@ -424,25 +501,24 @@ class Controller(QObject):
                     preview.scale,
                 )
             case "original":
-                pixels = original
+                return original
             case "effects":
-                pixels = preview.effects
-            case "compare":
-                pixels = result.copy()
-                middle = pixels.shape[1] // 2
-                pixels[:, :middle] = original[:, :middle]
-                pixels[:, middle : middle + 1] = 0.5
-            case _:
-                pixels = result
-        frame = self.session.frame
-        if preview.is_region:
-            self.window.image_view.set_region_pixels(
-                pixels, frame.color_space, preview.scale, preview.origin
-            )
-        else:
-            self.window.image_view.set_pixels(
-                pixels, frame.color_space, preview.scale, frame.width, frame.height
-            )
+                return preview.effects
+        result = composite(
+            preview.frame,
+            preview.effects,
+            reduction=preview.reduction,
+            enlargement=preview.enlargement,
+        )
+        if self.window.mode == "compare":
+            result = result.copy()
+            middle = self.session.frame.width // 2
+            columns = preview.origin[0] + np.arange(result.shape[1]) * preview.scale
+            result[:, columns < middle] = original[:, columns < middle]
+            divider = (middle - preview.origin[0]) // preview.scale
+            if 0 <= divider < result.shape[1]:
+                result[:, divider : divider + 1] = 0.5
+        return result
 
     def _mask_pixels(self, pixels, bounds, sampling):
         mask = self.mask_preview if self.mask_preview is not None else self.session.sky_mask
@@ -508,23 +584,6 @@ class Controller(QObject):
             setattr(self, name, filtered)
             changed = True
         if changed:
-            # The overview may be exposed by panning before a new ROI arrives.
-            overview = self.overview
-            if overview is not None and self.preview.is_region:
-                frame = self.session.frame
-                self.window.image_view.set_pixels(
-                    composite(
-                        overview.frame,
-                        overview.effects,
-                        reduction=overview.reduction,
-                        enlargement=overview.enlargement,
-                    ),
-                    frame.color_space,
-                    overview.scale,
-                    frame.width,
-                    frame.height,
-                    preserve_detail=True,
-                )
             self.display()
 
     def _enabled_preview(self, preview):
@@ -628,14 +687,17 @@ class Controller(QObject):
         buttons.accepted.connect(dialog.accept)
         buttons.rejected.connect(dialog.reject)
         form.addRow(buttons)
-        if dialog.exec():
-            self.session.edit_star(
-                star.id,
-                x=fields["x"].value(),
-                y=fields["y"].value(),
-                brightness=fields["brightness"].value(),
-                color=tuple(fields[c].value() for c in ("red", "green", "blue")),
-            )
+        try:
+            if dialog.exec():
+                self.session.edit_star(
+                    star.id,
+                    x=fields["x"].value(),
+                    y=fields["y"].value(),
+                    brightness=fields["brightness"].value(),
+                    color=tuple(fields[c].value() for c in ("red", "green", "blue")),
+                )
+        finally:
+            dialog.deleteLater()
 
     def export_path(self, path: str | Path, effects_only: bool) -> None:
         if self.session.frame is None or self.exclusive:
@@ -687,15 +749,21 @@ class Controller(QObject):
     def cancel(self) -> None:
         self.debounce.stop()
         self.runner.cancel()
+        self._restore_open_presentation()
         self._restore_detection_controls()
         self.window.set_activity("cancel")
 
     def _failed(self, message):
+        self._restore_open_presentation()
         self._restore_detection_controls()
         self.window.show_error(message)
 
     def _restore_detection_controls(self):
         self.mask_preview = None
+        if self.session.frame is None:
+            self.window.star_count.setText("No image loaded")
+        else:
+            self.update_star_count(self.session.stars, self.session.settings)
         w = self.window
         settings = self.session.detection_settings or DetectionSettings(
             sky_only=self.session.sky_mask is not None
@@ -732,6 +800,6 @@ class Controller(QObject):
             frame.height,
         )
 
-    def shutdown(self) -> bool:
+    def shutdown(self, timeout_ms: int = 5000) -> bool:
         self.debounce.stop()
-        return self.runner.shutdown()
+        return self.runner.shutdown(timeout_ms)

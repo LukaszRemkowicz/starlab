@@ -6,11 +6,15 @@ Float image allocations stay tile-sized; seeds and catalogues are global."""
 import logging
 import math
 import time
+from collections.abc import Iterator
+from threading import Event
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy import ndimage
 
-from ..imaging import check_cancel
+from ..imaging import ImageFrame, check_cancel
+from ..sky_mask import SkyMask
 from .numeric import LUMA
 
 logger = logging.getLogger(__name__)
@@ -155,6 +159,127 @@ def _compact_peak(response, x, y):
     return minor > 0.1 * major and major > 0
 
 
+def _component_centers(labels: NDArray[np.int32]) -> Iterator[tuple[float, float]]:
+    """Yield connected-component centroids in label order, retaining subpixel means."""
+    for number, region in enumerate(ndimage.find_objects(labels), start=1):
+        if region is None:
+            continue
+        sy, sx = np.nonzero(labels[region] == number)
+        py, px = sy.mean() + region[0].start, sx.mean() + region[1].start
+        yield px, py
+
+
+def _tile_seeds(
+    frame: ImageFrame,
+    bounds: tuple[int, int, int, int],
+    core_bounds: tuple[int, int, int, int],
+    scales: tuple[float, ...],
+    threshold_sigma: float,
+    sky_mask: SkyMask | None,
+    cancel: Event | None,
+) -> tuple[list[tuple[float, float, float, float]], list[tuple[int, int, float, float]]] | None:
+    """Find scale-space and saturated-plateau seeds for one halo/core tile."""
+    left, top, right, bottom = core_bounds
+    seeds, thresholds = [], []
+    bx, by, ex, ey = bounds
+    channels = frame.pixels[by:ey, bx:ex]
+    luminance = (
+        channels[..., 0].copy()
+        if channels.shape[2] == 1
+        else np.asarray(channels @ np.asarray(LUMA, dtype=np.float32), dtype=np.float32)
+    )
+    support = np.ones(luminance.shape, dtype=bool) if sky_mask is None else sky_mask.region(bounds)
+    core = (slice(top - by, bottom - by), slice(left - bx, right - bx))
+    if not support[core].any():
+        return None
+    if not support.all():
+        # Fill from nearest allowed sky, so bright excluded foreground
+        # cannot leak through a Gaussian kernel across the mask edge.
+        indices = ndimage.distance_transform_edt(
+            ~support, return_distances=False, return_indices=True
+        )
+        luminance[~support] = luminance[tuple(indices[:, ~support])]
+    saturated = (channels.max(axis=2) >= 0.9995) & support
+    sat_labels, _ = ndimage.label(saturated, structure=np.ones((3, 3)))
+    plateaus = []
+    for px, py in _component_centers(sat_labels):
+        px, py = float(px), float(py)
+        if left <= px + bx < right and top <= py + by < bottom:
+            plateaus.append((px, py))
+    previous_broad, previous_sigma = None, None
+    for scale in scales:
+        check_cancel(cancel)
+        # Adjacent geometric scales share exactly the same smoothing.
+        response = (
+            previous_broad
+            if scale == previous_sigma
+            else ndimage.gaussian_filter(luminance, scale, mode="nearest")
+        )
+        previous_broad = ndimage.gaussian_filter(luminance, 2 * scale, mode="nearest")
+        previous_sigma = 2 * scale
+        response -= previous_broad
+        sample = response[core][support[core]]
+        center = float(np.median(sample))
+        noise = float(1.4826 * np.median(np.abs(sample - center)))
+        threshold = max(FLOOR, center + threshold_sigma * noise)
+        thresholds.append((left, top, scale, threshold))
+        selected = (
+            (response == ndimage.maximum_filter(response, size=3, mode="nearest"))
+            & (response > threshold)
+            & support
+            & ~saturated
+        )
+        labels, _ = ndimage.label(selected, structure=np.ones((3, 3)))
+        for px, py in _component_centers(labels):
+            if (
+                left <= px + bx < right
+                and top <= py + by < bottom
+                and _compact_peak(response, px, py)
+            ):
+                score = float(response[round(py), round(px)])
+                seeds.append((score, px + bx, py + by, scale))
+        for px, py in plateaus:
+            score = float(response[round(py), round(px)])
+            if score > threshold and _compact_peak(response, px, py):
+                seeds.append((score, px + bx, py + by, scale))
+    return seeds, thresholds
+
+
+def _measure_seeds(
+    frame: ImageFrame,
+    seeds: list[tuple[float, float, float, float]],
+    scales: tuple[float, ...],
+    min_distance: float,
+    threshold_sigma: float,
+    sky_mask: SkyMask | None,
+    cancel: Event | None,
+) -> list[dict]:
+    """Measure strongest seeds first, suppress overlaps globally, then normalize colors."""
+    # Strongest DoG contrast chooses a source width, rather than the highest
+    # signal/noise (which can favor a very broad kernel on nearly noiseless sky).
+    seeds.sort(key=lambda s: (-s[0], s[2], s[1], s[3]))
+    rows, grid = [], {}
+    cell_size = max(min_distance, 4 * max(scales))
+    for score, x, y, scale in seeds:
+        check_cancel(cancel)
+        point = dict(x=x + 0.5, y=y + 0.5, size=0)
+        if _nearby(point, grid, cell_size, min_distance):
+            continue
+        row = _measure(frame, x, y, scale, sky_mask, threshold_sigma)
+        if row is None or _nearby(row, grid, cell_size, min_distance):
+            continue
+        rows.append(row)
+        key = (math.floor(row["x"] / cell_size), math.floor(row["y"] / cell_size))
+        grid.setdefault(key, []).append(row)
+    peak = max((max(row["rgb"]) for row in rows), default=0)
+    multiplier = 0.87 / peak if peak > 0 else 0
+    for row in rows:
+        row["normalized_rgb"] = tuple(v * multiplier for v in row["rgb"])
+        row["normalized_brightness"] = float(np.dot(row["normalized_rgb"], LUMA))
+    rows.sort(key=lambda row: (row["y"], row["x"]))
+    return rows
+
+
 def analyze(
     frame,
     threshold_sigma=5.0,
@@ -200,102 +325,16 @@ def analyze(
                 min(frame.width, right + halo),
                 min(frame.height, bottom + halo),
             )
-            bx, by, ex, ey = bounds
-            channels = frame.pixels[by:ey, bx:ex]
-            luminance = (
-                channels[..., 0].copy()
-                if channels.shape[2] == 1
-                else np.asarray(channels @ np.asarray(LUMA, dtype=np.float32), dtype=np.float32)
+            found = _tile_seeds(
+                frame, bounds, (left, top, right, bottom), scales, threshold_sigma, sky_mask, cancel
             )
-            support = (
-                np.ones(luminance.shape, dtype=bool)
-                if sky_mask is None
-                else sky_mask.region(bounds)
-            )
-            core = (slice(top - by, bottom - by), slice(left - bx, right - bx))
-            if not support[core].any():
+            if found is None:
                 continue
-            if not support.all():
-                # Fill from nearest allowed sky, so bright excluded foreground
-                # cannot leak through a Gaussian kernel across the mask edge.
-                indices = ndimage.distance_transform_edt(
-                    ~support, return_distances=False, return_indices=True
-                )
-                luminance[~support] = luminance[tuple(indices[:, ~support])]
-            saturated = (channels.max(axis=2) >= 0.9995) & support
-            sat_labels, _ = ndimage.label(saturated, structure=np.ones((3, 3)))
-            plateaus = []
-            for number, region in enumerate(ndimage.find_objects(sat_labels), start=1):
-                if region is None:
-                    continue
-                sy, sx = np.nonzero(sat_labels[region] == number)
-                py = float(sy.mean() + region[0].start)
-                px = float(sx.mean() + region[1].start)
-                if left <= px + bx < right and top <= py + by < bottom:
-                    plateaus.append((px, py))
-            previous_broad, previous_sigma = None, None
-            for scale in scales:
-                check_cancel(cancel)
-                # Adjacent geometric scales share exactly the same smoothing.
-                response = (
-                    previous_broad
-                    if scale == previous_sigma
-                    else ndimage.gaussian_filter(luminance, scale, mode="nearest")
-                )
-                previous_broad = ndimage.gaussian_filter(luminance, 2 * scale, mode="nearest")
-                previous_sigma = 2 * scale
-                response -= previous_broad
-                sample = response[core][support[core]]
-                center = float(np.median(sample))
-                noise = float(1.4826 * np.median(np.abs(sample - center)))
-                threshold = max(FLOOR, center + threshold_sigma * noise)
-                thresholds.append((left, top, scale, threshold))
-                selected = (
-                    (response == ndimage.maximum_filter(response, size=3, mode="nearest"))
-                    & (response > threshold)
-                    & support
-                    & ~saturated
-                )
-                labels, _ = ndimage.label(selected, structure=np.ones((3, 3)))
-                for number, region in enumerate(ndimage.find_objects(labels), start=1):
-                    if region is None:
-                        continue
-                    sy, sx = np.nonzero(labels[region] == number)
-                    py, px = sy.mean() + region[0].start, sx.mean() + region[1].start
-                    if (
-                        left <= px + bx < right
-                        and top <= py + by < bottom
-                        and _compact_peak(response, px, py)
-                    ):
-                        score = float(response[round(py), round(px)])
-                        seeds.append((score, px + bx, py + by, scale))
-                for px, py in plateaus:
-                    score = float(response[round(py), round(px)])
-                    if score > threshold and _compact_peak(response, px, py):
-                        seeds.append((score, px + bx, py + by, scale))
+            local_seeds, local_thresholds = found
+            seeds.extend(local_seeds)
+            thresholds.extend(local_thresholds)
             logger.info("Multiscale detector tile (%d,%d): %d total seeds", left, top, len(seeds))
-    # Strongest DoG contrast chooses a source width, rather than the highest
-    # signal/noise (which can favor a very broad kernel on nearly noiseless sky).
-    seeds.sort(key=lambda s: (-s[0], s[2], s[1], s[3]))
-    rows, grid = [], {}
-    cell_size = max(min_distance, 4 * max(scales))
-    for score, x, y, scale in seeds:
-        check_cancel(cancel)
-        point = dict(x=x + 0.5, y=y + 0.5, size=0)
-        if _nearby(point, grid, cell_size, min_distance):
-            continue
-        row = _measure(frame, x, y, scale, sky_mask, threshold_sigma)
-        if row is None or _nearby(row, grid, cell_size, min_distance):
-            continue
-        rows.append(row)
-        key = (math.floor(row["x"] / cell_size), math.floor(row["y"] / cell_size))
-        grid.setdefault(key, []).append(row)
-    peak = max((max(row["rgb"]) for row in rows), default=0)
-    multiplier = 0.87 / peak if peak > 0 else 0
-    for row in rows:
-        row["normalized_rgb"] = tuple(v * multiplier for v in row["rgb"])
-        row["normalized_brightness"] = float(np.dot(row["normalized_rgb"], LUMA))
-    rows.sort(key=lambda row: (row["y"], row["x"]))
+    rows = _measure_seeds(frame, seeds, scales, min_distance, threshold_sigma, sky_mask, cancel)
     return rows, dict(
         method="Multiscale local-background DoG (Stars-Fill inspired; experimental)",
         count=len(rows),

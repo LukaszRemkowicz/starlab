@@ -2,18 +2,45 @@
 
 import time
 from threading import Event
+from typing import TYPE_CHECKING
 
 import numpy as np
 import pytest
 from PySide6.QtCore import QPoint, Qt
 from PySide6.QtWidgets import QStyle, QStyleOptionSlider
 
+if TYPE_CHECKING:
+    from PySide6.QtWidgets import QSlider
+    from pytestqt.qtbot import QtBot
+
+    from starlab.presentation.qt.main_window import MainWindow
+
+
+def _slider_window(qtbot: "QtBot") -> tuple["MainWindow", "QSlider", QPoint]:
+    """Show a loaded image and return the visible intensity slider's handle center."""
+    from starlab.bootstrap import create_window
+    from starlab.domain.imaging import ImageFrame
+
+    window = create_window()
+    qtbot.addWidget(window)
+    window.show()
+    window.controller.session.open(ImageFrame(np.zeros((32, 32, 3), np.float32)))
+    window.set_loaded(True)
+    window.effect_panel.tabs.setCurrentIndex(1)
+    slider = window.effect_panel.controls["primary"]["intensity"].slider
+    qtbot.waitUntil(slider.isVisible)
+    option = QStyleOptionSlider()
+    slider.initStyleOption(option)
+    handle = slider.style().subControlRect(
+        QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderHandle, slider
+    )
+    return window, slider, handle.center()
+
 
 @pytest.mark.parametrize("busy_at_press", [False, True])
 def test_slider_displays_frames_before_mouse_release(qtbot, monkeypatch, busy_at_press):
     from starlab.application.use_cases import Preview
-    from starlab.bootstrap import create_window
-    from starlab.domain.imaging import ImageFrame, check_cancel
+    from starlab.domain.imaging import check_cancel
     from starlab.presentation.qt import controller as controller_module
 
     entered_full_preview = Event()
@@ -32,22 +59,9 @@ def test_slider_displays_frames_before_mouse_release(qtbot, monkeypatch, busy_at
         return Preview(frame, np.full_like(frame.pixels, settings.primary.intensity / 200), 1)
 
     monkeypatch.setattr(controller_module, "render_preview", render)
-    window = create_window()
-    qtbot.addWidget(window)
-    window.show()
+    window, slider, start_position = _slider_window(qtbot)
     controller = window.controller
-    controller.session.open(ImageFrame(np.zeros((32, 32, 3), np.float32)))
-    window.set_loaded(True)
-    window.effect_panel.tabs.setCurrentIndex(1)
-    control = window.effect_panel.controls["primary"]["intensity"]
-    slider = control.slider
-    qtbot.waitUntil(slider.isVisible)
-    option = QStyleOptionSlider()
-    slider.initStyleOption(option)
-    handle = slider.style().subControlRect(
-        QStyle.ComplexControl.CC_Slider, option, QStyle.SubControl.SC_SliderHandle, slider
-    )
-    position = handle.center()
+    position = start_position
     displayed = []
     original_set_pixels = window.image_view.set_pixels
 
@@ -65,7 +79,7 @@ def test_slider_displays_frames_before_mouse_release(qtbot, monkeypatch, busy_at
         assert controller.dragging
         initial_value = slider.value()
         for offset in range(8, 89, 8):
-            position = QPoint(handle.center().x() + offset, handle.center().y())
+            position = QPoint(start_position.x() + offset, start_position.y())
             qtbot.mouseMove(slider, pos=position)
             qtbot.wait(15)
         assert slider.value() != initial_value

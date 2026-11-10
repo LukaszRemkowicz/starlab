@@ -2,8 +2,10 @@
 
 import numpy as np
 from numba import njit
+from numpy.typing import NDArray
 from scipy import ndimage
 
+from .candidate import Image
 from .peak_filters import uniform7_at
 
 SPARSE_FLOOR_LIMIT = 256
@@ -31,7 +33,8 @@ def _local_mean(lum, allowed, y, x, radius):
 
 
 @njit(cache=True, nogil=True)
-def _select(rgb, lum, allowed, threshold, support_threshold, coarse, global_floor):
+def _select(rgb, lum, allowed, threshold, support_threshold, coarse, global_floor):  # noqa: C901
+    """Keep the ordered early-rejection/proof cascade together to bound sparse work."""
     height, width = lum.shape
     selected = np.zeros((height, width), np.bool_)
     unresolved = np.empty((SPARSE_FLOOR_LIMIT, 2), np.int64)
@@ -137,6 +140,21 @@ def _contrast(lum, allowed, centers):
     return keep, uncertain
 
 
+def _component_centers(
+    selected: NDArray[np.bool_], image: Image, core: tuple[int, int, int, int]
+) -> list[tuple[int, int]]:
+    """Find component bounding-box centers after retaining the complete halo topology."""
+    labels, _ = ndimage.label(selected)
+    centers = []
+    for region in ndimage.find_objects(labels):
+        if region is not None:
+            y = (region[0].start + region[0].stop - 1) // 2
+            x = (region[1].start + region[1].stop - 1) // 2
+            if core[0] <= x + image.ox < core[2] and core[1] <= y + image.oy < core[3]:
+                centers.append((y, x))
+    return centers
+
+
 def peak_positions(image, threshold, core, coarse=False):
     """Return global component bounding-box centers, retaining halo topology."""
     lum, allowed = image.lum, image.allowed
@@ -162,14 +180,7 @@ def peak_positions(image, threshold, core, coarse=False):
         selected &= lum - floor >= np.float32(0.13)
     if need_coarse:
         selected &= ndimage.uniform_filter(lum, size=3, mode="nearest") >= np.float32(0.6)
-    labels, _ = ndimage.label(selected)
-    centers = []
-    for region in ndimage.find_objects(labels):
-        if region is not None:
-            y = (region[0].start + region[0].stop - 1) // 2
-            x = (region[1].start + region[1].stop - 1) // 2
-            if core[0] <= x + image.ox < core[2] and core[1] <= y + image.oy < core[3]:
-                centers.append((y, x))
+    centers = _component_centers(selected, image, core)
     if not centers:
         return []
     centers = np.asarray(centers, dtype=np.int64)

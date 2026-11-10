@@ -38,7 +38,16 @@ def _sample(pixels, classes, cell, x, y):
 
 
 @njit(cache=True)
-def _background(pixels, classes, cell, x, y, inner, outer):
+def _background_samples(
+    pixels: np.ndarray,
+    classes: np.ndarray,
+    cell: int,
+    x: float,
+    y: float,
+    inner: float,
+    outer: float,
+) -> np.ndarray:
+    """Collect finite luminance samples in the original annulus scan order."""
     step = max(1, math.ceil(outer / 12))
     extent = math.ceil(outer)
     samples = np.empty(((2 * extent // step + 2) ** 2, 3))
@@ -53,6 +62,13 @@ def _background(pixels, classes, cell, x, y, inner, outer):
                     samples[n, 1] = round(y + dy) - y
                     samples[n, 2] = value
                     n += 1
+    return samples[:n]
+
+
+@njit(cache=True)
+def _background(pixels, classes, cell, x, y, inner, outer):
+    samples = _background_samples(pixels, classes, cell, x, y, inner, outer)
+    n = len(samples)
     if n < 8:
         return math.nan, 0.0, 0.0
     keep = np.ones(n, np.bool_)
@@ -123,8 +139,19 @@ def _aperture(pixels, classes, cell, x, y, background, gx, gy):
 
 
 @njit(cache=True)
-def _background_colors(pixels, classes, cell, x, y, inner, outer, background, gx, gy):
-    """Fit RGB background planes using the luminance fit to reject bright sources."""
+def _background_color_samples(
+    pixels: np.ndarray,
+    classes: np.ndarray,
+    cell: int,
+    x: float,
+    y: float,
+    inner: float,
+    outer: float,
+    background: float,
+    gx: float,
+    gy: float,
+) -> tuple[np.ndarray, np.ndarray]:
+    """Collect RGB planes and their luminance residuals without changing sample order."""
     step, extent = max(1, math.ceil(outer / 12)), math.ceil(outer)
     samples = np.empty(((2 * extent // step + 2) ** 2, 5))
     residuals = np.empty(len(samples))
@@ -143,6 +170,16 @@ def _background_colors(pixels, classes, cell, x, y, inner, outer, background, gx
                         ]
                     residuals[n] = value - background - gx * sx - gy * sy
                     n += 1
+    return samples[:n], residuals[:n]
+
+
+@njit(cache=True)
+def _background_colors(pixels, classes, cell, x, y, inner, outer, background, gx, gy):
+    """Fit RGB background planes using the luminance fit to reject bright sources."""
+    samples, residuals = _background_color_samples(
+        pixels, classes, cell, x, y, inner, outer, background, gx, gy
+    )
+    n = len(samples)
     planes = np.full((3, 3), np.nan)
     if n < 8:
         return planes
@@ -181,61 +218,95 @@ def _background_colors(pixels, classes, cell, x, y, inner, outer, background, gx
     return planes
 
 
+@njit(cache=True)
+def _source_aperture(
+    pixels: np.ndarray, classes: np.ndarray, cell: int, x: float, y: float
+) -> tuple[int, float, float, float, float, float, float] | None:
+    """Refine a source aperture and background, rejecting unsupported measurements."""
+    if not math.isfinite(_sample(pixels, classes, cell, x, y)):
+        return None
+    bg, gx, gy = _background(pixels, classes, cell, x, y, 12, 16)
+    if not math.isfinite(bg):
+        return None
+    radius, width = _aperture(pixels, classes, cell, x, y, bg, gx, gy)
+    inner, outer = max(radius + 3, 1.5 * radius), 2 * radius
+    bg, gx, gy = _background(pixels, classes, cell, x, y, inner, outer)
+    if not math.isfinite(bg):
+        return None
+    updated, width = _aperture(pixels, classes, cell, x, y, bg, gx, gy)
+    if updated > radius + 2:
+        radius = updated
+        inner, outer = max(radius + 3, 1.5 * radius), 2 * radius
+        bg, gx, gy = _background(pixels, classes, cell, x, y, inner, outer)
+        if not math.isfinite(bg):
+            return None
+    return radius, width, inner, outer, bg, gx, gy
+
+
+@njit(cache=True)
+def _integrate_owned_aperture(
+    pixels: np.ndarray,
+    classes: np.ndarray,
+    cell: int,
+    x: float,
+    y: float,
+    radius: int,
+    background: tuple[float, float, float],
+    planes: np.ndarray,
+    positions: np.ndarray,
+    neighbours: np.ndarray,
+    index: int,
+) -> tuple[float, np.ndarray]:
+    """Sum signed source flux only over finite pixels owned by this aperture."""
+    bg, gx, gy = background
+    flux = 0.0
+    rgb = np.zeros(3)
+    for py in range(
+        max(0, math.ceil(y - radius)), min(pixels.shape[0], math.floor(y + radius) + 1)
+    ):
+        for px in range(
+            max(0, math.ceil(x - radius)), min(pixels.shape[1], math.floor(x + radius) + 1)
+        ):
+            dx, dy = px - x, py - y
+            distance = dx * dx + dy * dy
+            if distance > radius * radius:
+                continue
+            owned = True
+            for other in neighbours[index]:
+                if other < len(positions) and other != index:
+                    nx, ny = positions[other]
+                    if (px - nx) ** 2 + (py - ny) ** 2 < distance:
+                        owned = False
+                        break
+            if owned:
+                value = _sample(pixels, classes, cell, px, py)
+                if math.isfinite(value):
+                    flux += value - bg - gx * dx - gy * dy
+                    for channel in range(3):
+                        rgb[channel] += (
+                            pixels[py, px, 0 if pixels.shape[2] == 1 else channel]
+                            - planes[channel, 0]
+                            - planes[channel, 1] * dx
+                            - planes[channel, 2] * dy
+                        )
+    return flux, rgb
+
+
 @njit(cache=True, nogil=True)
 def _measure_batch(pixels, classes, cell, positions, neighbours, start, stop):
     result = np.zeros((stop - start, 17))
     for index in range(start, stop):
         x, y = positions[index]
-        if not math.isfinite(_sample(pixels, classes, cell, x, y)):
+        aperture = _source_aperture(pixels, classes, cell, x, y)
+        if aperture is None:
             continue
-        bg, gx, gy = _background(pixels, classes, cell, x, y, 12, 16)
-        if not math.isfinite(bg):
-            continue
-        radius, width = _aperture(pixels, classes, cell, x, y, bg, gx, gy)
-        inner, outer = max(radius + 3, 1.5 * radius), 2 * radius
-        bg, gx, gy = _background(pixels, classes, cell, x, y, inner, outer)
-        if not math.isfinite(bg):
-            continue
-        updated, width = _aperture(pixels, classes, cell, x, y, bg, gx, gy)
-        if updated > radius + 2:
-            radius = updated
-            inner, outer = max(radius + 3, 1.5 * radius), 2 * radius
-            bg, gx, gy = _background(pixels, classes, cell, x, y, inner, outer)
-            if not math.isfinite(bg):
-                continue
+        radius, width, inner, outer, bg, gx, gy = aperture
         planes = _background_colors(pixels, classes, cell, x, y, inner, outer, bg, gx, gy)
         if not np.isfinite(planes).all():
             continue
-        flux = 0.0
-        rgb = np.zeros(3)
-        for py in range(
-            max(0, math.ceil(y - radius)), min(pixels.shape[0], math.floor(y + radius) + 1)
-        ):
-            for px in range(
-                max(0, math.ceil(x - radius)), min(pixels.shape[1], math.floor(x + radius) + 1)
-            ):
-                dx, dy = px - x, py - y
-                distance = dx * dx + dy * dy
-                if distance > radius * radius:
-                    continue
-                owned = True
-                for other in neighbours[index]:
-                    if other < len(positions) and other != index:
-                        nx, ny = positions[other]
-                        if (px - nx) ** 2 + (py - ny) ** 2 < distance:
-                            owned = False
-                            break
-                if owned:
-                    value = _sample(pixels, classes, cell, px, py)
-                    if math.isfinite(value):
-                        flux += value - bg - gx * dx - gy * dy
-                        for channel in range(3):
-                            rgb[channel] += (
-                                pixels[py, px, 0 if pixels.shape[2] == 1 else channel]
-                                - planes[channel, 0]
-                                - planes[channel, 1] * dx
-                                - planes[channel, 2] * dy
-                            )
+        flux, rgb = _integrate_owned_aperture(
+            pixels, classes, cell, x, y, radius, (bg, gx, gy), planes, positions, neighbours, index
+        )
         result[index - start, 0] = max(0, flux)
         result[index - start, 1:4] = rgb
         result[index - start, 4] = width

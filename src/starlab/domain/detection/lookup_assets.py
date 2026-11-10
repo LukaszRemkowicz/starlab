@@ -48,8 +48,10 @@ def load_color_cube(path: Path | None = None) -> NDArray[np.uint8]:
     with np.load(io.BytesIO(archive), allow_pickle=False) as stored:
         cube = stored["delta"]
         baselines = tuple(stored[channel] for channel in ("red", "green", "blue"))
-    if cube.shape != (256, 256, 256, 3) or cube.dtype != np.uint8 or any(
-        values.shape != (256,) or values.dtype != np.uint8 for values in baselines
+    if (
+        cube.shape != (256, 256, 256, 3)
+        or cube.dtype != np.uint8
+        or any(values.shape != (256,) or values.dtype != np.uint8 for values in baselines)
     ):
         raise ValueError("Color-transform arrays have unsupported dimensions or dtype.")
     np.add(cube[..., 0], baselines[0][:, None, None], out=cube[..., 0])

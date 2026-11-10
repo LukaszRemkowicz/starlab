@@ -273,6 +273,48 @@ def transverse_profile(cross, coefficient, denominator):
     return result
 
 
+def _sampled_cross_offsets(
+    width: int,
+    height: int,
+    origins: np.ndarray,
+    residues: np.ndarray,
+    source: np.ndarray,
+    along: np.ndarray,
+    middle: np.ndarray,
+    band: float,
+    axis: int,
+    sampling: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Expand clipped transverse spans, retaining each sample's source and major offset."""
+    low = np.ceil((middle - band - residues[source, 1 - axis]) / sampling).astype(np.int64)
+    high = np.floor((middle + band - residues[source, 1 - axis]) / sampling).astype(np.int64)
+    low = np.maximum(
+        low,
+        np.ceil((-origins[source, 1 - axis] - residues[source, 1 - axis]) / sampling).astype(
+            np.int64
+        ),
+    )
+    high = np.minimum(
+        high,
+        np.floor(
+            (
+                (height if axis == 0 else width)
+                - 1
+                - origins[source, 1 - axis]
+                - residues[source, 1 - axis]
+            )
+            / sampling
+        ).astype(np.int64),
+    )
+    counts = np.maximum(high - low + 1, 0)
+    offsets = np.repeat(np.cumsum(counts) - counts, counts)
+    across = (np.repeat(low, counts) + np.arange(int(counts.sum())) - offsets) * sampling
+    source = np.repeat(source, counts)
+    across += residues[source, 1 - axis]
+    along = np.repeat(along, counts)
+    return along, across, source
+
+
 def sampled_ray_scene(width, height, positions, p, diagonal, sampling, angle):
     """Batch many sampled sources through one exact ray rasterizer.
 
@@ -304,32 +346,9 @@ def sampled_ray_scene(width, height, positions, p, diagonal, sampling, angle):
     along = along[source, column]
     middle = centers[source, 1 - axis] + (along - centers[source, axis]) * slope
     band = (1 + cutoff * widening) / cross_coefficient + 0.875
-    low = np.ceil((middle - band - residues[source, 1 - axis]) / sampling).astype(np.int64)
-    high = np.floor((middle + band - residues[source, 1 - axis]) / sampling).astype(np.int64)
-    low = np.maximum(
-        low,
-        np.ceil((-origins[source, 1 - axis] - residues[source, 1 - axis]) / sampling).astype(
-            np.int64
-        ),
+    along, across, source = _sampled_cross_offsets(
+        width, height, origins, residues, source, along, middle, band, axis, sampling
     )
-    high = np.minimum(
-        high,
-        np.floor(
-            (
-                (height if horizontal else width)
-                - 1
-                - origins[source, 1 - axis]
-                - residues[source, 1 - axis]
-            )
-            / sampling
-        ).astype(np.int64),
-    )
-    counts = np.maximum(high - low + 1, 0)
-    offsets = np.repeat(np.cumsum(counts) - counts, counts)
-    across = (np.repeat(low, counts) + np.arange(int(counts.sum())) - offsets) * sampling
-    source = np.repeat(source, counts)
-    across += residues[source, 1 - axis]
-    along = np.repeat(along, counts)
     xx, yy = (along, across) if horizontal else (across, along)
     world_x, world_y = xx + origins[source, 0], yy + origins[source, 1]
     valid = (world_x >= 0) & (world_y >= 0) & (world_x < width) & (world_y < height)
@@ -356,6 +375,91 @@ def sampled_ray_scene(width, height, positions, p, diagonal, sampling, angle):
     )
 
 
+def _sparse_ray_profile(
+    p: EffectParameters,
+    diagonal: int,
+    extent: int,
+    cutoff: float,
+    center: tuple[float, float],
+    sampling: int,
+    residue: tuple[int, int],
+    angle: int,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Rasterize one ray into integer offsets, transverse opacity and radius."""
+    center_x, center_y = center
+    scale = 800 / max(diagonal, 1414)
+    coefficient, widening = ray_coefficients(p, scale)
+    sin, cos = sine(angle), sine(angle + 900)
+    horizontal = abs(sin) >= abs(cos)
+    dominant = abs(sin) if horizontal else abs(cos)
+    cross_coefficient = coefficient * dominant
+    slope = -cos / sin if horizontal else -sin / cos
+    axis = 0 if horizontal else 1
+    centers = (center_x, center_y)
+    along = _coordinates(extent, sampling, residue[axis])
+    positive = sin > 0 if horizontal else cos < 0
+    along = along[along >= 0] if positive else along[along < 0]
+    middle = centers[1 - axis] + (along - centers[axis]) * slope
+    band = (1 + cutoff * widening) / cross_coefficient + 0.875
+    low = np.ceil((middle - band - residue[1 - axis]) / sampling).astype(np.int64)
+    high = np.floor((middle + band - residue[1 - axis]) / sampling).astype(np.int64)
+    counts = np.maximum(high - low + 1, 0)
+    offsets = np.repeat(np.cumsum(counts) - counts, counts)
+    across = (np.repeat(low, counts) + np.arange(int(counts.sum())) - offsets) * sampling + residue[
+        1 - axis
+    ]
+    along = np.repeat(along, counts)
+    xx, yy = (along, across) if horizontal else (across, along)
+    dx, dy = xx - center_x, yy - center_y
+    radius = np.hypot(dx, dy)
+    cross = np.abs(dy - dx * slope) if horizontal else np.abs(dx - dy * slope)
+    denominator = 1 + radius * widening
+    valid = (radius <= cutoff) & (cross < denominator / cross_coefficient + 0.875)
+    xx, yy, radius, cross, denominator = (v[valid] for v in (xx, yy, radius, cross, denominator))
+
+    values = transverse_profile(cross, cross_coefficient, denominator)
+    return xx, yy, values, radius
+
+
+def _sparse_radial_profile(
+    kind: str,
+    p: EffectParameters,
+    diagonal: int,
+    extent: int,
+    center: tuple[float, float],
+    sampling: int,
+    residue: tuple[int, int],
+    bounds: tuple[int, int, int, int] | None,
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Evaluate soft or ring opacity on the bounded sampled radial grid."""
+    center_x, center_y = center
+    x, y = (
+        _coordinates(extent, sampling, residue[0]),
+        _coordinates(extent, sampling, residue[1]),
+    )
+    if bounds is not None:
+        x = x[(x >= bounds[0]) & (x < bounds[2])]
+        y = y[(y >= bounds[1]) & (y < bounds[3])]
+    xx, yy = np.meshgrid(x, y)
+    xx, yy = xx.ravel(), yy.ravel()
+    radius = np.hypot(xx - center_x, yy - center_y)
+    if kind == "soft":
+        size = 1 + (max(diagonal, 1414) // 3) * (p.size / 100) ** 3
+        values = np.maximum(
+            5.7 * np.maximum(1 - radius / size, 0) ** (0.6 + 0.124 * p.falloff) - 0.00025, 0
+        )
+    else:
+        peak = (1 + 0.01 * (p.size + 25) ** 2) * max(diagonal, 1414) / 3768
+        inner = peak * (1 - (0.03 + 0.0097 * p.inner_width))
+        outer = peak * (1.03 + 0.02 * p.outer_width)
+        values = np.where(
+            radius < peak,
+            np.clip((radius - inner) / (peak - inner), 0, 1) ** (0.08 * (p.inner_falloff + 10)),
+            np.clip((outer - radius) / (outer - peak), 0, 1) ** (0.08 * (p.outer_falloff + 10)),
+        )
+    return xx, yy, values, radius
+
+
 def sparse_profile(kind, p, diagonal, phase, sampling, residue, angle=0, bounds=None):
     """One ray's integer offsets, opacity, radius; AA always uses full pixels."""
     key = geometry_key(kind, p), diagonal, phase, sampling, residue, angle, bounds
@@ -369,66 +473,15 @@ def sparse_profile(kind, p, diagonal, phase, sampling, residue, angle=0, bounds=
             (0.000015 ** (-(envelope + 25) / 190) - 1) * max(diagonal, 1414) / 800, diagonal + 2
         )
     extent = math.ceil(cutoff + 1)
-    center_x, center_y = phase[0] / 4 - 0.5, phase[1] / 4 - 0.5
+    center = phase[0] / 4 - 0.5, phase[1] / 4 - 0.5
     if kind in ("primary", "secondary"):
-        scale = 800 / max(diagonal, 1414)
-        coefficient, widening = ray_coefficients(p, scale)
-        sin, cos = sine(angle), sine(angle + 900)
-        horizontal = abs(sin) >= abs(cos)
-        dominant = abs(sin) if horizontal else abs(cos)
-        cross_coefficient = coefficient * dominant
-        slope = -cos / sin if horizontal else -sin / cos
-        axis = 0 if horizontal else 1
-        centers = (center_x, center_y)
-        along = _coordinates(extent, sampling, residue[axis])
-        positive = sin > 0 if horizontal else cos < 0
-        along = along[along >= 0] if positive else along[along < 0]
-        middle = centers[1 - axis] + (along - centers[axis]) * slope
-        band = (1 + cutoff * widening) / cross_coefficient + 0.875
-        low = np.ceil((middle - band - residue[1 - axis]) / sampling).astype(np.int64)
-        high = np.floor((middle + band - residue[1 - axis]) / sampling).astype(np.int64)
-        counts = np.maximum(high - low + 1, 0)
-        offsets = np.repeat(np.cumsum(counts) - counts, counts)
-        across = (
-            np.repeat(low, counts) + np.arange(int(counts.sum())) - offsets
-        ) * sampling + residue[1 - axis]
-        along = np.repeat(along, counts)
-        xx, yy = (along, across) if horizontal else (across, along)
-        dx, dy = xx - center_x, yy - center_y
-        radius = np.hypot(dx, dy)
-        cross = np.abs(dy - dx * slope) if horizontal else np.abs(dx - dy * slope)
-        denominator = 1 + radius * widening
-        valid = (radius <= cutoff) & (cross < denominator / cross_coefficient + 0.875)
-        xx, yy, radius, cross, denominator = (
-            v[valid] for v in (xx, yy, radius, cross, denominator)
+        xx, yy, values, radius = _sparse_ray_profile(
+            p, diagonal, extent, cutoff, center, sampling, residue, angle
         )
-
-        values = transverse_profile(cross, cross_coefficient, denominator)
     else:
-        x, y = (
-            _coordinates(extent, sampling, residue[0]),
-            _coordinates(extent, sampling, residue[1]),
+        xx, yy, values, radius = _sparse_radial_profile(
+            kind, p, diagonal, extent, center, sampling, residue, bounds
         )
-        if bounds is not None:
-            x = x[(x >= bounds[0]) & (x < bounds[2])]
-            y = y[(y >= bounds[1]) & (y < bounds[3])]
-        xx, yy = np.meshgrid(x, y)
-        xx, yy = xx.ravel(), yy.ravel()
-        radius = np.hypot(xx - center_x, yy - center_y)
-        if kind == "soft":
-            size = 1 + (max(diagonal, 1414) // 3) * (p.size / 100) ** 3
-            values = np.maximum(
-                5.7 * np.maximum(1 - radius / size, 0) ** (0.6 + 0.124 * p.falloff) - 0.00025, 0
-            )
-        else:
-            peak = (1 + 0.01 * (p.size + 25) ** 2) * max(diagonal, 1414) / 3768
-            inner = peak * (1 - (0.03 + 0.0097 * p.inner_width))
-            outer = peak * (1.03 + 0.02 * p.outer_width)
-            values = np.where(
-                radius < peak,
-                np.clip((radius - inner) / (peak - inner), 0, 1) ** (0.08 * (p.inner_falloff + 10)),
-                np.clip((outer - radius) / (outer - peak), 0, 1) ** (0.08 * (p.outer_falloff + 10)),
-            )
     valid = values > 0
     arrays = tuple(
         np.ascontiguousarray(v[valid], dtype=dtype)

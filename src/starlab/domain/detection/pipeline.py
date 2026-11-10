@@ -10,7 +10,10 @@ Normalization and the output catalog are global, never ranked within tiles.
 import logging
 import os
 import time
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from collections.abc import Callable, Iterator
+from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
+from contextlib import closing
+from functools import partial
 from threading import Event
 
 import numpy as np
@@ -118,6 +121,114 @@ def peak_positions_reference(image, threshold, core, coarse=False):
             yield x, y
 
 
+def _reference_neighbors(
+    image: Image,
+    px: int,
+    py: int,
+    width: int,
+    height: int,
+    threshold: float,
+    neighbor_radius: int,
+    coarse: bool,
+    excluded: tuple | list,
+    visited: set[tuple[int, int]],
+) -> list[tuple[int, int, dict | None]]:
+    """Evaluate unvisited neighborhood seeds in native row order."""
+    attempts = []
+    for y in range(max(0, py - neighbor_radius), min(height, py + neighbor_radius + 1)):
+        for x in range(max(0, px - neighbor_radius), min(width, px + neighbor_radius + 1)):
+            if (x, y) in visited or covered(x + 0.5, y + 0.5, excluded):
+                continue
+            if image.rgb[y - image.oy, x - image.ox].max() < threshold:
+                continue
+            visited.add((x, y))
+            result = candidate(image, x + 0.5, y + 0.5, coarse, excluded)
+            attempts.append((y, x, result))
+    return attempts
+
+
+def _reference_attempts(
+    image: Image,
+    px: int,
+    py: int,
+    width: int,
+    height: int,
+    threshold: float,
+    neighbor_radius: int,
+    coarse: bool,
+    excluded: tuple | list,
+    visited: set[tuple[int, int]],
+) -> list[tuple[int, int, dict | None]]:
+    """Try the preferred basin seeds, then expand only after an accepted candidate."""
+    accepted = False
+    # A maximum may itself fail the original shape predicate;
+    # four adjacent seeds retain the nearby qualifying basin.
+    attempts = []
+    for dx, dy in (
+        (0, 0),
+        (1, 0),
+        (-1, 0),
+        (0, 1),
+        (0, -1),
+        (1, 1),
+        (-1, 1),
+        (-1, -1),
+        (1, -1),
+    ):
+        x, y = px + dx, py + dy
+        if not (0 <= x < width and 0 <= y < height):
+            continue
+        if (x, y) in visited:
+            continue
+        if image.rgb[y - image.oy, x - image.ox].max() < threshold:
+            continue
+        visited.add((x, y))
+        result = candidate(image, x + 0.5, y + 0.5, coarse, excluded)
+        attempts.append((y, x, result))
+        if result is not None:
+            accepted = True
+            break
+    if accepted:
+        attempts.extend(
+            _reference_neighbors(
+                image, px, py, width, height, threshold, neighbor_radius, coarse, excluded, visited
+            )
+        )
+    return attempts
+
+
+def _scan_reference_tile(
+    image: Image,
+    core: tuple[int, int, int, int],
+    width: int,
+    height: int,
+    threshold: float,
+    neighbor_radius: int,
+    coarse: bool,
+    excluded: tuple | list,
+    visited: set[tuple[int, int]],
+    cancel: Event | None,
+) -> tuple[list[dict], int, int]:
+    """Qualify a reference tile and merge accepted attempts in native seed order."""
+    local_rows = []
+    maximum_size = 0.0
+    peaks = seeds = 0
+    for px, py in peak_positions_reference(image, threshold, core, coarse):
+        peaks += 1
+        check_cancel(cancel)
+        if covered(px + 0.5, py + 0.5, excluded):
+            continue
+        attempts = _reference_attempts(
+            image, px, py, width, height, threshold, neighbor_radius, coarse, excluded, visited
+        )
+        seeds += len(attempts)
+        # Native local merging scans seed rows left-to-right.
+        for _, _, result in sorted(attempts, key=lambda row: row[:2]):
+            if result is not None:
+                maximum_size = merge_candidate(local_rows, result, maximum_size)
+    return local_rows, peaks, seeds
+
+
 def scan_tiled(
     width,
     height,
@@ -149,67 +260,26 @@ def scan_tiled(
     for top in range(0, height, TILE):
         for left in range(0, width, TILE):
             tile_started = time.monotonic()
-            local_rows = []
-            maximum_size = 0.0
             check_cancel(cancel)
             core, bounds, allowed = _tile_region(width, height, left, top, sky_mask, source_scale)
             if allowed is not None and not allowed.any():
                 continue
             image = Image(read_tile(bounds), origin=bounds[:2], allowed=allowed)
             try:
-                for px, py in peak_positions_reference(image, threshold, core, coarse):
-                    peaks += 1
-                    check_cancel(cancel)
-                    if covered(px + 0.5, py + 0.5, excluded):
-                        continue
-                    accepted = False
-                    # A maximum may itself fail the original shape predicate;
-                    # four adjacent seeds retain the nearby qualifying basin.
-                    attempts = []
-                    for dx, dy in (
-                        (0, 0),
-                        (1, 0),
-                        (-1, 0),
-                        (0, 1),
-                        (0, -1),
-                        (1, 1),
-                        (-1, 1),
-                        (-1, -1),
-                        (1, -1),
-                    ):
-                        x, y = px + dx, py + dy
-                        if not (0 <= x < width and 0 <= y < height):
-                            continue
-                        if (x, y) in visited:
-                            continue
-                        if image.rgb[y - image.oy, x - image.ox].max() < threshold:
-                            continue
-                        visited.add((x, y))
-                        seeds += 1
-                        result = candidate(image, x + 0.5, y + 0.5, coarse, excluded)
-                        attempts.append((y, x, result))
-                        if result is not None:
-                            accepted = True
-                            break
-                    if accepted:
-                        for y in range(
-                            max(0, py - neighbor_radius), min(height, py + neighbor_radius + 1)
-                        ):
-                            for x in range(
-                                max(0, px - neighbor_radius), min(width, px + neighbor_radius + 1)
-                            ):
-                                if (x, y) in visited or covered(x + 0.5, y + 0.5, excluded):
-                                    continue
-                                if image.rgb[y - image.oy, x - image.ox].max() < threshold:
-                                    continue
-                                visited.add((x, y))
-                                seeds += 1
-                                result = candidate(image, x + 0.5, y + 0.5, coarse, excluded)
-                                attempts.append((y, x, result))
-                    # Native local merging scans seed rows left-to-right.
-                    for _, _, result in sorted(attempts, key=lambda row: row[:2]):
-                        if result is not None:
-                            maximum_size = merge_candidate(local_rows, result, maximum_size)
+                local_rows, count_peaks, count_seeds = _scan_reference_tile(
+                    image,
+                    core,
+                    width,
+                    height,
+                    threshold,
+                    neighbor_radius,
+                    coarse,
+                    excluded,
+                    visited,
+                    cancel,
+                )
+                peaks += count_peaks
+                seeds += count_seeds
             finally:
                 image.clear_cache()
             join_catalogs(rows, local_rows)
@@ -229,73 +299,160 @@ def scan_tiled(
 WORKERS = min(16, os.cpu_count() or 1)
 
 
-def scan_compiled(
-    width,
-    height,
-    read_tile,
-    threshold,
-    neighbor_radius,
-    cancel,
-    coarse,
-    excluded,
-    sky_mask,
-    source_scale,
-):
-    from .compiled import scan_tile
-    from .join_fast import join_catalogs_fast
+def _prepare_tile(
+    row: int,
+    column: int,
+    *,
+    width: int,
+    height: int,
+    read_tile: Callable[[tuple[int, int, int, int]], NDArray[np.float32]],
+    threshold: float,
+    coarse: bool,
+    token: Event,
+    sky_mask: SkyMask | None,
+    source_scale: int,
+) -> tuple[Image | None, list[tuple[int, int]], NDArray[np.float64]]:
+    """Read one halo tile and locate peaks without writing shared visitation state."""
+    started = time.monotonic()
+    check_cancel(token)
+    left, top = column * TILE, row * TILE
+    core, bounds, allowed = _tile_region(width, height, left, top, sky_mask, source_scale)
+    if allowed is not None and not allowed.any():
+        return None, [], np.zeros(2)
+    image = Image(read_tile(bounds), origin=bounds[:2], allowed=allowed)
+    converted = time.monotonic()
+    try:
+        positions = list(peak_positions(image, threshold, core, coarse))
+        return image, positions, np.array([converted - started, time.monotonic() - converted])
+    except BaseException:
+        image.clear_cache()
+        raise
 
-    token = cancel if cancel is not None else Event()
+
+def _qualify_tile(
+    value: tuple[Image | None, list[tuple[int, int]], NDArray[np.float64]],
+    *,
+    threshold: float,
+    neighbor_radius: int,
+    coarse: bool,
+    excluded: tuple | list,
+    visited: NDArray[np.bool_],
+    token: Event,
+) -> tuple[list[dict], int, int, NDArray[np.float64]]:
+    """Qualify a prepared tile and release its caches even on cancellation."""
+    from .compiled import scan_tile
+
+    image, positions, timing = value
+    if image is None:
+        return [], 0, 0, np.zeros(3)
+    started = time.monotonic()
+    try:
+        local, count = scan_tile(
+            image, positions, threshold, neighbor_radius, coarse, excluded, visited, token
+        )
+        return (
+            local,
+            len(positions),
+            count,
+            np.array([timing[0], timing[1], time.monotonic() - started]),
+        )
+    finally:
+        image.clear_cache()
+
+
+def _tile_ready(
+    row: int,
+    column: int,
+    columns: int,
+    completed: set[tuple[int, int]],
+) -> bool:
+    """Preserve adjacent visitation writes before a tile starts qualification."""
+    return (column == 0 or (row, column - 1) in completed) and (
+        row == 0 or (row - 1, min(column + 1, columns - 1)) in completed
+    )
+
+
+def _wait_tiles(
+    preparing: dict[Future, tuple[int, int]],
+    qualifying: dict[Future, tuple[int, int]],
+    prepared: dict[tuple[int, int], tuple],
+    results: dict[tuple[int, int], tuple],
+    completed: set[tuple[int, int]],
+) -> None:
+    """Collect completed preparation/qualification work without changing join order."""
+    finished, _ = wait((*preparing, *qualifying), return_when=FIRST_COMPLETED)
+    for future in finished:
+        if future in preparing:
+            prepared[preparing.pop(future)] = future.result()
+        else:
+            key = qualifying.pop(future)
+            results[key] = future.result()
+            completed.add(key)
+
+
+def _cancel_tiles(
+    token: Event,
+    preparing: dict[Future, tuple[int, int]],
+    qualifying: dict[Future, tuple[int, int]],
+    prepared: dict[tuple[int, int], tuple],
+    proxy_pool: ThreadPoolExecutor,
+    candidate_pool: ThreadPoolExecutor,
+) -> None:
+    """Cancel queued work, join active workers, then dispose unused prepared images."""
+    token.set()
+    for future in (*preparing, *qualifying):
+        future.cancel()
+    # Active tasks check cancellation between blocks of128 peaks.
+    proxy_pool.shutdown(wait=True, cancel_futures=True)
+    candidate_pool.shutdown(wait=True, cancel_futures=True)
+    for image, _, _ in prepared.values():
+        if image is not None:
+            image.clear_cache()
+    for future in preparing:
+        if not future.cancelled() and future.exception() is None:
+            image, _, _ = future.result()
+            if image is not None:
+                image.clear_cache()
+
+
+def _compiled_tiles(
+    width: int,
+    height: int,
+    read_tile: Callable[[tuple[int, int, int, int]], NDArray[np.float32]],
+    threshold: float,
+    neighbor_radius: int,
+    token: Event,
+    coarse: bool,
+    excluded: tuple | list,
+    sky_mask: SkyMask | None,
+    source_scale: int,
+) -> Iterator[tuple[int, int, tuple[list[dict], int, int, NDArray[np.float64]]]]:
+    """Schedule bounded tile work and yield completed tiles in row-major join order."""
     visited = np.zeros((height, width), np.bool_)
     columns, row_count = (width + TILE - 1) // TILE, (height + TILE - 1) // TILE
     keys = [(r, c) for r in range(row_count) for c in range(columns)]
     results, completed, preparing, prepared, qualifying = {}, set(), {}, {}, {}
-    rows = []
-    peaks = seeds = next_join = next_prepare = 0
-    catalog_maximum = 0.0
-    phases = np.zeros(3)
-    join_seconds = 0.0
-
-    def prepare(row, column):
-        started = time.monotonic()
-        check_cancel(token)
-        left, top = column * TILE, row * TILE
-        core, bounds, allowed = _tile_region(width, height, left, top, sky_mask, source_scale)
-        if allowed is not None and not allowed.any():
-            return None, [], np.zeros(2)
-        image = Image(read_tile(bounds), origin=bounds[:2], allowed=allowed)
-        converted = time.monotonic()
-        try:
-            positions = list(peak_positions(image, threshold, core, coarse))
-            return image, positions, np.array([converted - started, time.monotonic() - converted])
-        except BaseException:
-            image.clear_cache()
-            raise
-
-    def qualify_tile(value):
-        image, positions, timing = value
-        if image is None:
-            return [], 0, 0, np.zeros(3)
-        started = time.monotonic()
-        try:
-            local, count = scan_tile(
-                image, positions, threshold, neighbor_radius, coarse, excluded, visited, token
-            )
-            return (
-                local,
-                len(positions),
-                count,
-                np.array([timing[0], timing[1], time.monotonic() - started]),
-            )
-        finally:
-            image.clear_cache()
-
-    def ready(row, column):
-        # Preparation has no shared writes. Only qualification observes visited.
-        # Preserve all adjacent writes; merge catalogues later in row-major order.
-        return (column == 0 or (row, column - 1) in completed) and (
-            row == 0 or (row - 1, min(column + 1, columns - 1)) in completed
-        )
-
+    next_join = next_prepare = 0
+    prepare = partial(
+        _prepare_tile,
+        width=width,
+        height=height,
+        read_tile=read_tile,
+        threshold=threshold,
+        coarse=coarse,
+        token=token,
+        sky_mask=sky_mask,
+        source_scale=source_scale,
+    )
+    qualify_tile = partial(
+        _qualify_tile,
+        threshold=threshold,
+        neighbor_radius=neighbor_radius,
+        coarse=coarse,
+        excluded=excluded,
+        visited=visited,
+        token=token,
+    )
     with (
         ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="star-proxy") as proxy_pool,
         ThreadPoolExecutor(
@@ -312,50 +469,67 @@ def scan_compiled(
                     preparing[proxy_pool.submit(prepare, *key)] = key
                     next_prepare += 1
                 for key in list(prepared):
-                    if ready(*key):
+                    if _tile_ready(*key, columns, completed):
                         qualifying[candidate_pool.submit(qualify_tile, prepared.pop(key))] = key
-                finished, _ = wait((*preparing, *qualifying), return_when=FIRST_COMPLETED)
-                for future in finished:
-                    if future in preparing:
-                        prepared[preparing.pop(future)] = future.result()
-                    else:
-                        key = qualifying.pop(future)
-                        results[key] = future.result()
-                        completed.add(key)
+                _wait_tiles(preparing, qualifying, prepared, results, completed)
                 while divmod(next_join, columns) in results:
-                    local, count_peaks, count_seeds, timing = results.pop(
-                        divmod(next_join, columns)
-                    )
-                    phases += timing
-                    joining = time.monotonic()
-                    catalog_maximum = join_catalogs_fast(rows, local, catalog_maximum)
-                    join_seconds += time.monotonic() - joining
-                    peaks += count_peaks
-                    seeds += count_seeds
+                    value = results.pop(divmod(next_join, columns))
+                    yield next_join + 1, len(keys), value
                     next_join += 1
-                    logger.info(
-                        "Compiled detector %s: %d/%d tiles, %d sources",
-                        "coarse" if coarse else "full",
-                        next_join,
-                        len(keys),
-                        len(rows),
-                    )
         except BaseException:
-            token.set()
-            for future in (*preparing, *qualifying):
-                future.cancel()
-            # Active tasks check cancellation between blocks of128 peaks.
-            proxy_pool.shutdown(wait=True, cancel_futures=True)
-            candidate_pool.shutdown(wait=True, cancel_futures=True)
-            for image, _, _ in prepared.values():
-                if image is not None:
-                    image.clear_cache()
-            for future in preparing:
-                if not future.cancelled() and future.exception() is None:
-                    image, _, _ = future.result()
-                    if image is not None:
-                        image.clear_cache()
+            _cancel_tiles(token, preparing, qualifying, prepared, proxy_pool, candidate_pool)
             raise
+
+
+def scan_compiled(
+    width,
+    height,
+    read_tile,
+    threshold,
+    neighbor_radius,
+    cancel,
+    coarse,
+    excluded,
+    sky_mask,
+    source_scale,
+):
+    from .join_fast import join_catalogs_fast
+
+    token = cancel if cancel is not None else Event()
+    rows = []
+    peaks = seeds = 0
+    catalog_maximum = 0.0
+    phases = np.zeros(3)
+    join_seconds = 0.0
+    tiles = _compiled_tiles(
+        width,
+        height,
+        read_tile,
+        threshold,
+        neighbor_radius,
+        token,
+        coarse,
+        excluded,
+        sky_mask,
+        source_scale,
+    )
+    # Closing also propagates join failures into the scheduler's cancellation cleanup.
+    with closing(tiles):
+        for next_join, tile_count, value in tiles:
+            local, count_peaks, count_seeds, timing = value
+            phases += timing
+            joining = time.monotonic()
+            catalog_maximum = join_catalogs_fast(rows, local, catalog_maximum)
+            join_seconds += time.monotonic() - joining
+            peaks += count_peaks
+            seeds += count_seeds
+            logger.info(
+                "Compiled detector %s: %d/%d tiles, %d sources",
+                "coarse" if coarse else "full",
+                next_join,
+                tile_count,
+                len(rows),
+            )
     return rows, dict(
         peaks=peaks,
         candidate_seeds=seeds,
@@ -364,6 +538,52 @@ def scan_compiled(
         qualify_cpu_seconds=phases[2],
         join_seconds=join_seconds,
     )
+
+
+def _scan_coarse(
+    codes: NDArray[np.uint8],
+    denominator: float,
+    threshold: float,
+    neighbor_radius: int,
+    cancel: Event | None,
+    sky_mask: SkyMask | None,
+) -> tuple[list[dict], dict]:
+    """Scan decoded coarse tiles and restore full-image source coordinates/sizes."""
+
+    def coarse_tile(bounds, source=codes):
+        left, top, right, bottom = bounds
+        return decode(source[top:bottom, left:right], denominator)
+
+    coarse_rows, coarse_stats = scan_tiled(
+        codes.shape[1],
+        codes.shape[0],
+        coarse_tile,
+        threshold,
+        neighbor_radius,
+        cancel,
+        coarse=True,
+        sky_mask=sky_mask,
+        source_scale=4,
+    )
+    for row in coarse_rows:
+        for key in ("x", "y", "size"):
+            row[key] *= 4
+    return coarse_rows, coarse_stats
+
+
+def _normalize_rows(rows: list[dict], sky_mask: SkyMask | None) -> list[dict]:
+    """Apply final mask filtering and one global normalization before catalog sorting."""
+    if sky_mask is not None:
+        keep = sky_mask.keep(np.array([(row["x"] - 0.5, row["y"] - 0.5) for row in rows]))
+        rows = [row for row, allowed in zip(rows, keep) if allowed]
+    colors, brightness, _ = normalize_catalog(
+        [(r["rgb"], r["size"], r["brightness"]) for r in rows]
+    )
+    for row, color, value in zip(rows, colors, brightness):
+        row["normalized_rgb"] = color
+        row["normalized_brightness"] = value
+    rows.sort(key=lambda row: (row["y"], row["x"]))
+    return rows
 
 
 def analyze(frame, threshold=0.2, neighbor_radius=2, cancel=None, sky_mask=None):
@@ -392,26 +612,9 @@ def analyze(frame, threshold=0.2, neighbor_radius=2, cancel=None, sky_mask=None)
     coarse_started = time.monotonic()
     coarse_stats = dict(peaks=0, candidate_seeds=0)
     if use_coarse:
-
-        def coarse_tile(bounds, source=codes):
-            left, top, right, bottom = bounds
-            return decode(source[top:bottom, left:right], denominator)
-
-        coarse_rows, coarse_stats = scan_tiled(
-            codes.shape[1],
-            codes.shape[0],
-            coarse_tile,
-            threshold,
-            neighbor_radius,
-            cancel,
-            coarse=True,
-            sky_mask=sky_mask,
-            source_scale=4,
+        coarse_rows, coarse_stats = _scan_coarse(
+            codes, denominator, threshold, neighbor_radius, cancel, sky_mask
         )
-        for row in coarse_rows:
-            for key in ("x", "y", "size"):
-                row[key] *= 4
-        del coarse_tile
     del codes
     coarse_seconds = time.monotonic() - coarse_started
 
@@ -435,16 +638,7 @@ def analyze(frame, threshold=0.2, neighbor_radius=2, cancel=None, sky_mask=None)
     )
     rows = coarse_rows + full_rows
     full_seconds = time.monotonic() - full_started
-    if sky_mask is not None:
-        keep = sky_mask.keep(np.array([(row["x"] - 0.5, row["y"] - 0.5) for row in rows]))
-        rows = [row for row, allowed in zip(rows, keep) if allowed]
-    colors, brightness, _ = normalize_catalog(
-        [(r["rgb"], r["size"], r["brightness"]) for r in rows]
-    )
-    for row, color, value in zip(rows, colors, brightness):
-        row["normalized_rgb"] = color
-        row["normalized_brightness"] = value
-    rows.sort(key=lambda row: (row["y"], row["x"]))
+    rows = _normalize_rows(rows, sky_mask)
     return rows, dict(
         seconds=time.monotonic() - start,
         normalization_luminance=denominator,

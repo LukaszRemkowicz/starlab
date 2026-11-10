@@ -19,7 +19,7 @@ from .profiles import (
     source_colors,
     sparse_profile,
 )
-from .settings import KINDS, EffectSettings
+from .settings import KINDS, EffectParameters, EffectSettings
 
 SCENE_CACHE = ArrayCache(128)
 GROUP_CACHE = ArrayCache(32)
@@ -34,35 +34,51 @@ def _grouped_ray_scene(kind: str, sampling: int, source_count: int, region: bool
     )
 
 
-def _scene(width, height, stars, kind, p, sampling, cancel, diagonal=None):
-    region = diagonal is not None
-    diagonal = diagonal or image_diagonal(width, height)
-    positions = tuple((star.x, star.y) for star in stars)
-    key = width, height, positions, geometry_key(kind, p), sampling, diagonal, region
-    cached = SCENE_CACHE.get(key)
-    if cached is not None:
-        return cached
+def _sampled_scene(
+    width: int,
+    height: int,
+    positions: tuple[tuple[float, float], ...],
+    rays: tuple[tuple[int, float], ...],
+    p: EffectParameters,
+    diagonal: int,
+    sampling: int,
+    cancel: Event | None,
+) -> tuple[np.ndarray, ...]:
+    """Assemble sampled source batches and stably group contributions by pixel."""
+    indices, profiles, radii, sources = [], [], [], []
+    for start in range(0, len(positions), 512):
+        for angle, weight in rays:
+            check_cancel(cancel)
+            index, values, radius, source = sampled_ray_scene(
+                width, height, positions[start : start + 512], p, diagonal, sampling, angle
+            )
+            indices.append(index)
+            profiles.append(values * weight)
+            radii.append(radius)
+            sources.append(source + start)
+    arrays = tuple(np.concatenate(parts) for parts in (indices, profiles, radii, sources))
+    # Stable pixel grouping turns repeated scatter multiplication into a
+    # contiguous product reduction on warm slider updates.
+    order = np.argsort(arrays[0], kind="stable")
+    arrays = tuple(array[order] for array in arrays)
+    return arrays
+
+
+def _sparse_scene(
+    width: int,
+    height: int,
+    stars: tuple[Star, ...],
+    kind: str,
+    p: EffectParameters,
+    diagonal: int,
+    sampling: int,
+    cancel: Event | None,
+    region: bool,
+) -> tuple[np.ndarray, ...] | None:
+    """Place cached per-source profiles, retaining their original contribution order."""
     out_width = (width + sampling - 1) // sampling
     indices, profiles, radii, sources = [], [], [], []
     rays = directions(kind, p)
-    if _grouped_ray_scene(kind, sampling, len(stars), region):
-        for start in range(0, len(stars), 512):
-            for angle, weight in rays:
-                check_cancel(cancel)
-                index, values, radius, source = sampled_ray_scene(
-                    width, height, positions[start : start + 512], p, diagonal, sampling, angle
-                )
-                indices.append(index)
-                profiles.append(values * weight)
-                radii.append(radius)
-                sources.append(source + start)
-        arrays = tuple(np.concatenate(parts) for parts in (indices, profiles, radii, sources))
-        # Stable pixel grouping turns repeated scatter multiplication into a
-        # contiguous product reduction on warm slider updates.
-        order = np.argsort(arrays[0], kind="stable")
-        arrays = tuple(array[order] for array in arrays)
-        check_cancel(cancel)
-        return SCENE_CACHE.put(key, arrays)
     for i, star in enumerate(stars):
         check_cancel(cancel)
         raw_x, raw_y = star.x + 0.5, star.y + 0.5
@@ -94,8 +110,29 @@ def _scene(width, height, stars, kind, p, sampling, cancel, diagonal=None):
             radii.append(radius[valid])
             sources.append(np.full(int(valid.sum()), i, np.int32))
     if not indices:
-        return tuple(np.empty(0, dtype) for dtype in (np.int32, np.float32, np.float32, np.int32))
+        return None
     arrays = tuple(np.concatenate(parts) for parts in (indices, profiles, radii, sources))
+    return arrays
+
+
+def _scene(width, height, stars, kind, p, sampling, cancel, diagonal=None):
+    region = diagonal is not None
+    diagonal = diagonal or image_diagonal(width, height)
+    positions = tuple((star.x, star.y) for star in stars)
+    key = width, height, positions, geometry_key(kind, p), sampling, diagonal, region
+    cached = SCENE_CACHE.get(key)
+    if cached is not None:
+        return cached
+    if _grouped_ray_scene(kind, sampling, len(stars), region):
+        arrays = _sampled_scene(
+            width, height, positions, directions(kind, p), p, diagonal, sampling, cancel
+        )
+    else:
+        arrays = _sparse_scene(width, height, stars, kind, p, diagonal, sampling, cancel, region)
+        if arrays is None:
+            return tuple(
+                np.empty(0, dtype) for dtype in (np.int32, np.float32, np.float32, np.int32)
+            )
     check_cancel(cancel)
     return SCENE_CACHE.put(key, arrays)
 

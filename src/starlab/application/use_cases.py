@@ -15,6 +15,7 @@ from ..domain.effects.soft_filter import (
 )
 from ..domain.imaging import ImageFrame, Pixels, check_cancel
 from ..domain.photometry import calibrate_sources
+from ..domain.sky_mask import SkyMask
 from ..domain.stars import DetectionSettings, Star, detect_stars, filter_stars
 from .ports import ImageReader, ImageWriter
 
@@ -66,8 +67,10 @@ class _RegionView:
         return self.pixels.shape[0]
 
 
-def _render_region(frame, stars, settings, region, sampling, cancel, sky_mask=None):
-    check_cancel(cancel)
+def _preview_region_bounds(
+    frame: ImageFrame, region: tuple[int, int, int, int], sampling: int
+) -> tuple[int, int, int, int]:
+    """Clip a requested ROI and require two sampled pixels along each image axis."""
     left, top, right, bottom = region
     left, top = max(0, int(left)), max(0, int(top))
     right, bottom = min(frame.width, int(right)), min(frame.height, int(bottom))
@@ -78,7 +81,17 @@ def _render_region(frame, stars, settings, region, sampling, cancel, sky_mask=No
         or (bottom - top + sampling - 1) // sampling < 2
     ):
         raise ValueError("Preview region must contain at least two sampled pixels on each axis.")
-    diagonal = image_diagonal(frame.width, frame.height)
+    return left, top, right, bottom
+
+
+def _region_sources(
+    stars: tuple[Star, ...],
+    settings: EffectSettings,
+    region: tuple[int, int, int, int],
+    diagonal: int,
+) -> tuple[Star, ...]:
+    """Translate contributing sources while retaining the global brightness maximum."""
+    left, top, right, bottom = region
     groups = ((kind, getattr(settings, kind)) for kind in ("primary", "secondary", "soft", "ring"))
     active = [(kind, p) for kind, p in groups if p.enabled and p.intensity and p.quantity]
     cutoff = max((radial_extent(kind, p, diagonal) for kind, p in active), default=0) + 1
@@ -102,6 +115,14 @@ def _render_region(frame, stars, settings, region, sampling, cancel, sky_mask=No
     translated = tuple(replace(star, x=star.x - left, y=star.y - top) for star in relevant)
     if maximum is not None and maximum not in relevant:
         translated += (replace(maximum, x=maximum.x - left, y=maximum.y - top, visible=False),)
+    return translated
+
+
+def _render_region(frame, stars, settings, region, sampling, cancel, sky_mask=None):
+    check_cancel(cancel)
+    left, top, right, bottom = _preview_region_bounds(frame, region, sampling)
+    diagonal = image_diagonal(frame.width, frame.height)
+    translated = _region_sources(stars, settings, (left, top, right, bottom), diagonal)
     view = _RegionView(frame.pixels[top:bottom, left:right])
     preview_frame = ImageFrame(
         view.pixels[::sampling, ::sampling], frame.name, frame.color_space, frame.note
@@ -168,6 +189,39 @@ def render_preview(
         preview_frame.pixels, stars, settings, cancel, sampling=scale, sky_mask=sky_mask
     )
     return Preview(preview_frame, effects, scale, reduction=reduction, enlargement=enlargement)
+
+
+def _apply_export_source_filter(
+    output: Pixels,
+    effects: Pixels,
+    frame: ImageFrame,
+    stars: tuple[Star, ...],
+    settings: EffectSettings,
+    cancel: Event | None,
+    sky_mask: SkyMask | None,
+) -> None:
+    """Apply original-pixel corrections in bounded strips before effect composition."""
+    records = reduction_records(filter_stars(stars, sky_mask))
+    large_records = enlargement_records(filter_stars(stars, sky_mask))
+    for top in range(0, frame.height, 128):
+        check_cancel(cancel)
+        reduction = star_reduction(
+            frame.pixels[top : top + 128],
+            records,
+            settings.soft.soft_filter,
+            origin=(0, top),
+            sky_mask=sky_mask,
+            cancel=cancel,
+        )
+        enlargement = star_enlargement(
+            frame.pixels[top : top + 128],
+            large_records,
+            settings.soft.soft_filter,
+            origin=(0, top),
+            sky_mask=sky_mask,
+            cancel=cancel,
+        )
+        output[top : top + 128] += (enlargement - reduction) * (1 - effects[top : top + 128])
 
 
 @dataclass
@@ -239,28 +293,6 @@ class ImageServices:
         effects = render_effects(frame, stars, settings, cancel, sky_mask=sky_mask)
         output = effects if effects_only else composite(frame, effects)
         if not effects_only and settings.soft.enabled and settings.soft.soft_filter:
-            records = reduction_records(filter_stars(stars, sky_mask))
-            large_records = enlargement_records(filter_stars(stars, sky_mask))
-            for top in range(0, frame.height, 128):
-                check_cancel(cancel)
-                reduction = star_reduction(
-                    frame.pixels[top : top + 128],
-                    records,
-                    settings.soft.soft_filter,
-                    origin=(0, top),
-                    sky_mask=sky_mask,
-                    cancel=cancel,
-                )
-                enlargement = star_enlargement(
-                    frame.pixels[top : top + 128],
-                    large_records,
-                    settings.soft.soft_filter,
-                    origin=(0, top),
-                    sky_mask=sky_mask,
-                    cancel=cancel,
-                )
-                output[top : top + 128] += (enlargement - reduction) * (
-                    1 - effects[top : top + 128]
-                )
+            _apply_export_source_filter(output, effects, frame, stars, settings, cancel, sky_mask)
         check_cancel(cancel)
         self.write(path, frame, output, source_path=source, cancel=cancel)

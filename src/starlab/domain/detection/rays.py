@@ -7,6 +7,7 @@ All finite RGB inputs, finite bounds, and native float32 operation ordering.
 
 import math
 import struct
+from collections.abc import Callable
 
 DIRECTIONS = ((1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1))
 LUMA = (0.2126390039920807, 0.7151686549186707, 0.07219231128692627)
@@ -51,6 +52,30 @@ def inside(position, bounds):
     return x >= left and y >= top and x < right and y < bottom
 
 
+def _extend_ray(
+    position: tuple[float, float],
+    bounds: tuple[float, float, float, float],
+    sample: Callable[[float, float], tuple[float, ...]],
+    center: tuple[float, ...],
+    dx: int,
+    dy: int,
+    lum: list[float],
+    distance: list[float],
+    needed: int,
+) -> bool:
+    """Append reference ray samples through needed, retaining native float32 order."""
+    while len(lum) <= needed:
+        i = len(lum)
+        p = (add(position[0], i * dx), add(position[1], i * dy))
+        if not inside(p, bounds):
+            return False
+        color = tuple(map(f, sample(*p)))
+        lum.append(luma(color))
+        differences = [mul(sub(a, b), sub(a, b)) for a, b in zip(center[:3], color[:3])]
+        distance.append(f(math.sqrt(add(add(differences[1], differences[0]), differences[2]))))
+    return True
+
+
 def initial_extents(position, bounds, sample):
     """98880: returns (success, 8 radii); unset radii retain caller's -1.
 
@@ -68,22 +93,8 @@ def initial_extents(position, bounds, sample):
         lum = [center_luma]
         distance = [0.0]
 
-        def ensure(j):
-            while len(lum) <= j:
-                i = len(lum)
-                p = (add(position[0], i * dx), add(position[1], i * dy))
-                if not inside(p, bounds):
-                    return False
-                color = tuple(map(f, sample(*p)))
-                lum.append(luma(color))
-                differences = [mul(sub(a, b), sub(a, b)) for a, b in zip(center[:3], color[:3])]
-                distance.append(
-                    f(math.sqrt(add(add(differences[1], differences[0]), differences[2])))
-                )
-            return True
-
         for k in range(1, limit):
-            if not ensure(k):
+            if not _extend_ray(position, bounds, sample, center, dx, dy, lum, distance, k):
                 radii[direction] = mul(k, length)
                 break
             width = int(add(mul(k, 0.25), 1.0))
@@ -95,7 +106,7 @@ def initial_extents(position, bounds, sample):
             delta = sub(sub(prev, prev_color), sub(current, current_color))
             if delta > mul(width, f(0.04)) or -delta > mul(width, f(0.015)):
                 end = min(k + width, limit - 1)
-                if not ensure(end):
+                if not _extend_ray(position, bounds, sample, center, dx, dy, lum, distance, end):
                     radii[direction] = mul(k, length)
                     break
                 next_sum = total(lum[k + 1 : end + 1])
@@ -150,6 +161,11 @@ def repair_recenter(position, radii):
                 radii[i] = replacement
     if not success:
         return False, position, radii
+    return True, _recenter(position, radii), radii
+
+
+def _recenter(position: tuple[float, float], radii: list[float]) -> tuple[float, float]:
+    """Accumulate valid radii in native direction order and shift the center."""
     # Preserve native accumulation order, including skipped invalid radii.
     x = y = nx = ny = 0.0
     q = f(math.sqrt(2))
@@ -188,7 +204,7 @@ def repair_recenter(position, radii):
         y = sub(y, v)
         nx = add(nx, 1)
         ny = add(ny, 1)
-    return True, (add(position[0], div(x, nx)), add(position[1], div(y, ny))), radii
+    return add(position[0], div(x, nx)), add(position[1], div(y, ny))
 
 
 def initial_candidate(position, bounds, sample):

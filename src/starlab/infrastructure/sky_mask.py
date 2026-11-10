@@ -105,71 +105,97 @@ class SkyMaskService:
             dimensions = _ImageDimensions(page.imagewidth, page.imagelength)
         return self(dimensions, source, cancel)
 
-    def __call__(self, frame, source=None, cancel=None):
+    def _cache_path(self, source: Path | str | None) -> Path | None:
+        """Identify optional persisted masks without opening their data."""
+        if source is None or not self.persistent_cache:
+            return None
+        path = Path(source)
+        stat = path.stat()
+        identity = (
+            os.path.normcase(str(path.resolve())),
+            stat.st_size,
+            stat.st_mtime_ns,
+            self.recipe,
+            self.model_identity,
+        )
+        key = hashlib.sha256(repr(identity).encode()).hexdigest()
+        return self.cache_directory / f"{key}.npz"
+
+    def _load_cached(self, path: Path | None, shape: tuple[int, int]) -> SkyMask | None:
+        """Read an optional cache entry; malformed or unavailable data is a miss."""
+        if path is None:
+            return None
+        try:
+            with np.load(path, allow_pickle=False) as stored:
+                mask = SkyMask(int(stored["cell_px"]), stored["classes"], tuple(stored["shape"]))
+            return mask if mask.shape == shape else None
+        except (OSError, ValueError, KeyError):
+            return None
+
+    def _from_encoded_source(self, shape: tuple[int, int], source: Path | str, cancel) -> SkyMask:
+        """Run mask preprocessing on encoded TIFF samples, never working RGB."""
+        with tifffile.TiffFile(source) as tif:
+            page, _ = _validated_page(tif)
+            raw = _mapped_pixels(page)
+            return build_sky_mask(
+                shape,
+                lambda top, bottom: raw[top:bottom],
+                self.segmenter,
+                cancel,
+                block_mean=_block_mean,
+            )
+
+    def _from_working_frame(self, frame, cancel) -> SkyMask:
+        """Encode in-memory working samples when no TIFF source exists."""
+
+        def read(top: int, bottom: int) -> np.ndarray:
+            pixels = frame.pixels[top:bottom]
+            return linear_to_srgb(pixels) if frame.color_space == "linear-srgb" else pixels
+
+        return build_sky_mask(
+            (frame.height, frame.width), read, self.segmenter, cancel, block_mean=_block_mean
+        )
+
+    def _save_cached(self, path: Path | None, mask: SkyMask) -> None:
+        """Atomically persist an optional mask without making cache writes mandatory."""
+        if path is None:
+            return
+        temporary = None
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            with tempfile.NamedTemporaryFile(
+                dir=path.parent, suffix=".npz", delete=False
+            ) as stream:
+                temporary = Path(stream.name)
+                np.savez_compressed(
+                    stream, cell_px=mask.cell_px, classes=mask.classes, shape=mask.shape
+                )
+            os.replace(temporary, path)
+        except OSError:
+            logger.debug("Sky-mask cache could not be written.", exc_info=True)
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink(missing_ok=True)
+                except OSError:
+                    logger.debug("Temporary sky-mask cache could not be removed.", exc_info=True)
+
+    def __call__(self, frame, source=None, cancel=None) -> SkyMask:
+        """Reuse this frame's mask or build one, keeping persistence optional."""
         check_cancel(cancel)
         if self.last_frame is not None and self.last_frame() is frame:
             return self.last_mask
-        cache = None
-        if source is not None and self.persistent_cache:
-            source = Path(source)
-            stat = source.stat()
-            identity = (
-                os.path.normcase(str(source.resolve())),
-                stat.st_size,
-                stat.st_mtime_ns,
-                self.recipe,
-                self.model_identity,
+        cache = self._cache_path(source)
+        mask = self._load_cached(cache, (frame.height, frame.width))
+        if mask is None:
+            if self.segmenter is None:
+                self.segmenter = OnnxSkySegmenter()
+            mask = (
+                self._from_encoded_source((frame.height, frame.width), source, cancel)
+                if source is not None
+                else self._from_working_frame(frame, cancel)
             )
-            key = hashlib.sha256(repr(identity).encode()).hexdigest()
-            cache = self.cache_directory / f"{key}.npz"
-            try:
-                with np.load(cache, allow_pickle=False) as stored:
-                    mask = SkyMask(
-                        int(stored["cell_px"]), stored["classes"], tuple(stored["shape"])
-                    )
-                if mask.shape != (frame.height, frame.width):
-                    raise ValueError("Cached mask shape changed.")
-                self.last_frame, self.last_mask = weakref.ref(frame), mask
-                return mask
-            except (OSError, ValueError, KeyError):
-                pass
-        if self.segmenter is None:
-            self.segmenter = OnnxSkySegmenter()
-        if source is not None:
-            with tifffile.TiffFile(source) as tif:
-                page, _ = _validated_page(tif)
-                raw = _mapped_pixels(page)
-                mask = build_sky_mask(
-                    (frame.height, frame.width),
-                    lambda top, bottom: raw[top:bottom],
-                    self.segmenter,
-                    cancel,
-                    block_mean=_block_mean,
-                )
-        else:
-
-            def read(top, bottom):
-                pixels = frame.pixels[top:bottom]
-                return linear_to_srgb(pixels) if frame.color_space == "linear-srgb" else pixels
-
-            mask = build_sky_mask(
-                (frame.height, frame.width), read, self.segmenter, cancel, block_mean=_block_mean
-            )
+            check_cancel(cancel)
+            self._save_cached(cache, mask)
         self.last_frame, self.last_mask = weakref.ref(frame), mask
-        if cache is not None:
-            temporary = None
-            try:
-                cache.parent.mkdir(parents=True, exist_ok=True)
-                with tempfile.NamedTemporaryFile(
-                    dir=cache.parent, suffix=".npz", delete=False
-                ) as stream:
-                    temporary = Path(stream.name)
-                    np.savez_compressed(
-                        stream, cell_px=mask.cell_px, classes=mask.classes, shape=mask.shape
-                    )
-                os.replace(temporary, cache)
-            except OSError:
-                logger.debug("Sky-mask cache could not be written.", exc_info=True)
-                if temporary is not None:
-                    temporary.unlink(missing_ok=True)
         return mask

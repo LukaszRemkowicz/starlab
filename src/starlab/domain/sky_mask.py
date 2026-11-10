@@ -4,7 +4,10 @@ Adapted with the owner's permission from commit cd40fd16e3552e3c1519de9de7272b77
 The input rows are encoded image samples, not linear-light working pixels.
 """
 
+from collections.abc import Callable
 from dataclasses import dataclass
+from threading import Event
+from typing import Any
 
 import numpy as np
 
@@ -34,14 +37,15 @@ class SkyMask:
         h, w = self.shape
         values = np.asarray(self.classes)
         if (
-            self.cell_px < 1
+            not isinstance(self.cell_px, (int, np.integer))
+            or self.cell_px < 1
             or h < 1
             or w < 1
             or values.shape
             != ((h + self.cell_px - 1) // self.cell_px, (w + self.cell_px - 1) // self.cell_px)
         ):
             raise ValueError("Sky mask must cover the full image.")
-        if not np.isfinite(values).all() or np.any((values < 0) | (values > UNKNOWN)):
+        if not np.isfinite(values).all() or not np.isin(values, (FOREGROUND, SKY, UNKNOWN)).all():
             raise ValueError("Invalid sky-mask classes.")
         values = np.array(values, dtype=np.uint8, copy=True)
         values.flags.writeable = False
@@ -53,7 +57,14 @@ class SkyMask:
         cells = np.floor(np.where(finite[:, None], points, 0) / self.cell_px)
         rows = np.clip(cells[:, 1], 0, self.classes.shape[0] - 1).astype(np.int64)
         cols = np.clip(cells[:, 0], 0, self.classes.shape[1] - 1).astype(np.int64)
-        return finite & (self.classes[rows, cols] != FOREGROUND)
+        height, width = self.shape
+        inside = (
+            (points[:, 0] >= 0)
+            & (points[:, 0] < width)
+            & (points[:, 1] >= 0)
+            & (points[:, 1] < height)
+        )
+        return finite & inside & (self.classes[rows, cols] != FOREGROUND)
 
     def allowed_at(self, x, y):
         return bool(self.keep(((x, y),))[0])
@@ -74,13 +85,15 @@ class SkyMask:
         return self.labels_region(bounds, sampling) != FOREGROUND
 
 
-def build_sky_mask(shape, read_rows, segmenter, cancel=None, block_mean=None):
-    """Bounded row reads, robust encoded-channel normalization, overlap-averaged logits."""
-    height, width = shape
-    factor = max(2, round(max(shape) / 4000))
-    out_h, out_w = height // factor, width // factor
-    if min(out_h, out_w) < 1:
-        raise ValueError("Image is too small for sky segmentation.")
+def _reduce_encoded_rows(
+    out_h: int,
+    out_w: int,
+    factor: int,
+    read_rows: Callable[[int, int], np.ndarray],
+    cancel: Event | None,
+    block_mean: Callable[[np.ndarray, int], np.ndarray] | None,
+) -> np.ndarray:
+    """Read bounded encoded strips and preserve the original float32 block means."""
     reduced = np.empty((out_h, out_w, 3), np.float32)
     strip_rows = max(factor, 512 // factor * factor)
     for top in range(0, out_h * factor, strip_rows):
@@ -105,6 +118,11 @@ def build_sky_mask(shape, read_rows, segmenter, cancel=None, block_mean=None):
         else:
             means = block_mean(strip, factor)
         reduced[top // factor : bottom // factor] = means
+    return reduced
+
+
+def _normalize_channels(reduced: np.ndarray, cancel: Event | None) -> np.ndarray:
+    """Normalize each encoded channel into the model's float16 input range."""
     normalized = np.empty_like(reduced, dtype=np.float16)
     for channel in range(3):
         check_cancel(cancel)
@@ -114,7 +132,14 @@ def build_sky_mask(shape, read_rows, segmenter, cancel=None, block_mean=None):
         normalized[..., channel] = np.clip(
             (reduced[..., channel] - median) / max(high - median, 1e-6), -1, 8
         )
-    del reduced
+    return normalized
+
+
+def _infer_overlapping_logits(
+    normalized: np.ndarray, segmenter: Any, cancel: Event | None
+) -> np.ndarray:
+    """Average validated model logits in the original tile and batch order."""
+    out_h, out_w = normalized.shape[:2]
     tile, overlap = segmenter.tile, segmenter.overlap
     if not 0 <= overlap < tile:
         raise ValueError("Invalid model tile overlap.")
@@ -146,7 +171,20 @@ def build_sky_mask(shape, read_rows, segmenter, cancel=None, block_mean=None):
         for (top, left), tile_logits in zip(batch_positions, logits):
             total[top : top + tile, left : left + tile] += tile_logits
             count[top : top + tile, left : left + tile] += 1
-    classes = _classify_logits((total / count)[:out_h, :out_w])
+    return (total / count)[:out_h, :out_w]
+
+
+def build_sky_mask(shape, read_rows, segmenter, cancel=None, block_mean=None):
+    """Bounded row reads, robust encoded-channel normalization, overlap-averaged logits."""
+    height, width = shape
+    factor = max(2, round(max(shape) / 4000))
+    out_h, out_w = height // factor, width // factor
+    if min(out_h, out_w) < 1:
+        raise ValueError("Image is too small for sky segmentation.")
+    reduced = _reduce_encoded_rows(out_h, out_w, factor, read_rows, cancel, block_mean)
+    normalized = _normalize_channels(reduced, cancel)
+    del reduced
+    classes = _classify_logits(_infer_overlapping_logits(normalized, segmenter, cancel))
     gh, gw = (height + factor - 1) // factor, (width + factor - 1) // factor
     classes = np.pad(classes, ((0, gh - out_h), (0, gw - out_w)), mode="edge")
     check_cancel(cancel)

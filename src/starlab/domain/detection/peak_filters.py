@@ -5,13 +5,15 @@ from numba import njit
 
 
 @njit(cache=True, nogil=True)
-def uniform7_at(lum, allowed, centers):
+def uniform7_at(lum, allowed, centers):  # noqa: C901, PLR0915
     """Return mean, square mean and mask fraction in the input center order.
 
     Match SciPy NI_UniformFilter1D: accumulate doubles from the line origin,
     update with added-minus-removed, divide by seven, then store float32.
     The axis-0 output is rounded before axis 1. Only requested rows need the
     horizontal pass; the vertical pass keeps three width-sized accumulators.
+    Keep this rolling state machine intact: splitting its axis updates would
+    obscure accumulator lifetimes and SciPy's exact rounding/iteration order.
     """
     result = np.empty((len(centers), 3), np.float32)
     if len(centers) == 0:

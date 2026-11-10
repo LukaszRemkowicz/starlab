@@ -80,19 +80,8 @@ def _matches_srgb_curve(value: bytes, expected: bytes) -> bool:
     return bool(np.max(np.abs(decoded - srgb)) <= 1 / 65535)
 
 
-def _matches_srgb(characteristics, reference) -> bool:
-    header, tags = characteristics
-    reference_header, reference_tags = reference
-    if header[4:] != reference_header[4:]:
-        return False
-    required = {b"rXYZ", b"gXYZ", b"bXYZ", b"rTRC", b"gTRC", b"bTRC", b"wtpt"}
-    if not required <= tags.keys() or tags.keys() - required - {b"chad", b"chrm", b"bkpt"}:
-        return False  # In particular, never ignore LUT or other transform tags.
-    for channel in (b"r", b"g", b"b"):
-        if not _matches_fixed_tag(tags[channel + b"XYZ"], reference_tags[channel + b"XYZ"]):
-            return False
-        if not _matches_srgb_curve(tags[channel + b"TRC"], reference_tags[channel + b"TRC"]):
-            return False
+def _matches_optional_tags(tags: dict[bytes, bytes], reference_tags: dict[bytes, bytes]) -> bool:
+    """Validate optional adaptation/chromaticity and a zero black point."""
     for signature in (b"chad", b"chrm"):
         if signature in tags:
             if signature == b"chrm":
@@ -102,13 +91,38 @@ def _matches_srgb(characteristics, reference) -> bool:
                 return False
     if b"bkpt" in tags and tags[b"bkpt"] != b"XYZ \0\0\0\0" + bytes(12):
         return False
-    if not _matches_fixed_tag(tags[b"wtpt"], reference_tags[b"wtpt"]):
-        # Legacy v2 sRGB uses D65 wtpt with D50-adapted colorants and no chad.
-        # https://registry.color.org/rgb-registry/srgbprofiles
-        d65 = b"XYZ \0\0\0\0" + struct.pack(">iii", 62289, 65536, 71372)
-        if header[0] != 2 or b"chad" in tags or not _matches_fixed_tag(tags[b"wtpt"], d65):
-            return False
     return True
+
+
+def _matches_white_point(
+    header: bytes, tags: dict[bytes, bytes], reference_tags: dict[bytes, bytes]
+) -> bool:
+    """Accept reference white or legacy v2 D65 without an adaptation tag."""
+    if _matches_fixed_tag(tags[b"wtpt"], reference_tags[b"wtpt"]):
+        return True
+    # Legacy v2 sRGB uses D65 wtpt with D50-adapted colorants and no chad.
+    # https://registry.color.org/rgb-registry/srgbprofiles
+    d65 = b"XYZ \0\0\0\0" + struct.pack(">iii", 62289, 65536, 71372)
+    return header[0] == 2 and b"chad" not in tags and _matches_fixed_tag(tags[b"wtpt"], d65)
+
+
+def _matches_srgb(characteristics, reference) -> bool:
+    """Check matrix/shaper compatibility without trusting descriptive profile names."""
+    header, tags = characteristics
+    reference_header, reference_tags = reference
+    if header[4:] != reference_header[4:]:
+        return False
+    required = {b"rXYZ", b"gXYZ", b"bXYZ", b"rTRC", b"gTRC", b"bTRC", b"wtpt"}
+    if not required <= tags.keys() or tags.keys() - required - {b"chad", b"chrm", b"bkpt"}:
+        return False  # Never ignore LUT or unknown transform tags.
+    for channel in (b"r", b"g", b"b"):
+        if not _matches_fixed_tag(tags[channel + b"XYZ"], reference_tags[channel + b"XYZ"]):
+            return False
+        if not _matches_srgb_curve(tags[channel + b"TRC"], reference_tags[channel + b"TRC"]):
+            return False
+    return _matches_optional_tags(tags, reference_tags) and _matches_white_point(
+        header, tags, reference_tags
+    )
 
 
 def _check_profile(profile: bytes | None, rgb: bool) -> str:

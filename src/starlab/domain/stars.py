@@ -51,10 +51,19 @@ class DetectionSettings:
     def __post_init__(self) -> None:
         if type(self.sky_only) is not bool or self.method not in ("native", "multiscale"):
             raise ValueError("Invalid sky mask or detection method.")
-        if not isfinite(self.threshold_sigma) or not 1 <= self.threshold_sigma <= 30:
+        if (
+            type(self.threshold_sigma) not in (int, float)
+            or not isfinite(self.threshold_sigma)
+            or not 1 <= self.threshold_sigma <= 30
+        ):
             raise ValueError("Detection threshold must be between 1 and 30 sigma.")
-        if not 2 <= self.min_distance <= 30 or (
-            self.max_stars is not None and not 1 <= self.max_stars <= 10000
+        if (
+            type(self.min_distance) is not int
+            or not 2 <= self.min_distance <= 30
+            or (
+                self.max_stars is not None
+                and (type(self.max_stars) is not int or not 1 <= self.max_stars <= 10000)
+            )
         ):
             raise ValueError("Invalid detector limits.")
 

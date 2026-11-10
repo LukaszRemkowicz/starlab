@@ -20,7 +20,7 @@ uv run ruff format --check src tests
 
 Qt tests use the offscreen platform through their test configuration. They exercise application workflows without driving a user's desktop. Numerical tests cover image validation, color transforms, detector regressions, CPU kernel agreement, masks, source corrections, rendering profiles, history and stale preview handling. Some UI tests have timeouts and require generic Numba specializations to be available; a first run after numerical-code edits can compile them.
 
-The current Ruff configuration checks selected syntax/import/error rules and import ordering. It does not currently enforce complete type coverage, docstring coverage, duplication limits or comprehensive complexity limits. A successful Ruff run does not establish those properties. Type-checker and complexity-policy changes belong to the later code-review work rather than this documentation/identity publication.
+Ruff checks selected syntax/import/error rules, import ordering, unused suppressions, McCabe complexity (maximum10) and statement count (maximum50). Two function-scoped exceptions document numerical state machines whose exact accumulator/rejection order is intentional: the two-axis rolling filter and conservative sparse peak screening. No module-wide complexity suppressions are used. A passing run does not establish duplication freedom, complete typing or scientific correctness; independent numerical and workflow checks remain necessary.
 
 ## Layout
 

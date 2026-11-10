@@ -47,6 +47,7 @@ for _name in (
     "luma",
     "inside",
     "neighbor_mean",
+    "_recenter",
     "repair_recenter",
 ):
     register_jitable(getattr(rays, _name))
@@ -206,6 +207,38 @@ def tuple8(a, b, remain, weight, count):
 
 
 @njit(cache=True, nogil=True)
+def _neighbor_attempts(
+    im: Buffer,
+    px: int,
+    py: int,
+    threshold: float,
+    neighbor_radius: int,
+    coarse: bool,
+    excluded: NDArray[np.float64],
+    visited: NDArray[np.bool_],
+    indices: NDArray[np.int32],
+    records: NDArray[np.float64],
+    attempts: List,
+) -> int:
+    """Append accepted neighborhood seeds in row order and return all evaluated seeds."""
+    seeds = 0
+    height, width = visited.shape
+    for y in range(max(0, py - neighbor_radius), min(height, py + neighbor_radius + 1)):
+        for x in range(max(0, px - neighbor_radius), min(width, px + neighbor_radius + 1)):
+            if visited[y, x] or covered(x + 0.5, y + 0.5, excluded):
+                continue
+            if im.rgb[y - im.oy, x - im.ox].max() < threshold:
+                continue
+            visited[y, x] = True
+            seeds += 1
+            result = prepared_candidate(im, x, y, coarse, excluded, indices, records)
+            if result is not None:
+                sx, sy, ss, sb, sr, sg, sc, sn = result
+                attempts.append((float(y), float(x), sx, sy, ss, sb, sr, sg, sc, sn))
+    return seeds
+
+
+@njit(cache=True, nogil=True)
 def scan_block(
     im,
     peaks,
@@ -243,18 +276,19 @@ def scan_block(
                 accepted = True
                 break
         if accepted:
-            for y in range(max(0, py - neighbor_radius), min(height, py + neighbor_radius + 1)):
-                for x in range(max(0, px - neighbor_radius), min(width, px + neighbor_radius + 1)):
-                    if visited[y, x] or covered(x + 0.5, y + 0.5, excluded):
-                        continue
-                    if im.rgb[y - im.oy, x - im.ox].max() < threshold:
-                        continue
-                    visited[y, x] = True
-                    seeds += 1
-                    result = prepared_candidate(im, x, y, coarse, excluded, indices, records)
-                    if result is not None:
-                        sx, sy, ss, sb, sr, sg, sc, sn = result
-                        attempts.append((float(y), float(x), sx, sy, ss, sb, sr, sg, sc, sn))
+            seeds += _neighbor_attempts(
+                im,
+                px,
+                py,
+                threshold,
+                neighbor_radius,
+                coarse,
+                excluded,
+                visited,
+                indices,
+                records,
+                attempts,
+            )
         attempts.sort()
         for row in attempts:
             maximum = merge(
@@ -589,17 +623,15 @@ def covered(x, y, excluded):
 
 
 @njit(cache=True)
-def qualify(im, x, y, coarse, excluded):
-    ok, x, y, size = initial(im, x, y)
-    if not ok:
-        return None
-    size = shrink(im, x, y, size)
-    n = int(4 * size)
-    delta = n // 8 + 4
-    if n >= delta:
-        a, b = stats(im, x, y, n - delta, True), stats(im, x, y, n + delta, True)
-        if a is None or b is None or not numeric.preliminary_shape(a, b, n):
-            return None
+def _refine_candidate(
+    im: Buffer,
+    x: float,
+    y: float,
+    size: float,
+    coarse: bool,
+    excluded: NDArray[np.float64],
+) -> tuple[float, float, float] | None:
+    """Alternate native refinement stages, including rollback and convergence limits."""
     old_x, old_y = x, y
     x, y, moved = refine_position(im, x, y, size)
     size, resized = refine_size(im, x, y, size)
@@ -622,16 +654,17 @@ def qualify(im, x, y, coarse, excluded):
             return None
     if not converged and size > 2:
         return None
-    x, y, size = (
-        numeric.quarter_position(x),
-        numeric.quarter_position(y),
-        numeric.quarter_size(size),
-    )
+    return x, y, size
+
+
+@njit(cache=True)
+def _accept_shape(im: Buffer, x: float, y: float, size: float) -> bool:
+    """Evaluate the final shape supports in their original sampling order."""
     n = max(1, int(4 * size))
     if n < 12:
         a, b = stats(im, x, y, max(1, n - 2)), stats(im, x, y, 2 * n + 4, True)
         if a is None or b is None or not (a.score >= b.score and a.score - b.score >= 0.13):
-            return None
+            return False
     else:
         a, b, c, d, e = (
             stats(im, x, y, n // 2),
@@ -648,7 +681,33 @@ def qualify(im, x, y, coarse, excluded):
             or e is None
             or not numeric.final_shape(size, a, b, c, d, e)
         ):
+            return False
+    return True
+
+
+@njit(cache=True)
+def qualify(im, x, y, coarse, excluded):
+    ok, x, y, size = initial(im, x, y)
+    if not ok:
+        return None
+    size = shrink(im, x, y, size)
+    n = int(4 * size)
+    delta = n // 8 + 4
+    if n >= delta:
+        a, b = stats(im, x, y, n - delta, True), stats(im, x, y, n + delta, True)
+        if a is None or b is None or not numeric.preliminary_shape(a, b, n):
             return None
+    refined = _refine_candidate(im, x, y, size, coarse, excluded)
+    if refined is None:
+        return None
+    x, y, size = refined
+    x, y, size = (
+        numeric.quarter_position(x),
+        numeric.quarter_position(y),
+        numeric.quarter_size(size),
+    )
+    if not _accept_shape(im, x, y, size):
+        return None
     if not inside(im, x, y) or (coarse and size <= 4):
         return None
     count = 1 - int((size - 1) * -0.5)
@@ -694,6 +753,12 @@ def repair(position, radii):
                 radii[i] = replacement
     if not success:
         return False, position, radii
+    return True, _recenter(position, radii), radii
+
+
+@njit(cache=True)
+def _recenter(position: tuple[float, float], radii: NDArray[np.float64]) -> tuple[float, float]:
+    """Accumulate valid radii in native direction order and shift the center."""
     # Preserve native accumulation order, including skipped invalid radii.
     x = y = nx = ny = 0.0
     q = f(math.sqrt(2))
@@ -732,8 +797,4 @@ def repair(position, radii):
         y = rays.sub(y, v)
         nx = rays.add(nx, 1)
         ny = rays.add(ny, 1)
-    return (
-        True,
-        (rays.add(position[0], rays.div(x, nx)), rays.add(position[1], rays.div(y, ny))),
-        radii,
-    )
+    return rays.add(position[0], rays.div(x, nx)), rays.add(position[1], rays.div(y, ny))

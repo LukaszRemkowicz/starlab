@@ -7,7 +7,7 @@ The user authorized implementation after the complete baseline review, in the ex
 - [x] Item3: remove genuine duplication/dead scanning work; preserve independent numerical backends.348 full-suite cases pass after shared ray/tile/image/history helpers and TIFF-drop regressions.
 - [x] Item4: replace categorical branch dispatch with match where clearer. Job completion/display modes and effect directions/support dispatch now use match; numerical guards remain if.
 - [x] Item5: separate/validate universal transform loading and metadata meaning. Archive/schema checks precede reconstruction; stored values/operation order remain unchanged.
-- [ ] Item6: decompose responsibility hotspots, correct state/lifecycle defects, add complexity gates and focused regressions.
+- [x] Item6: decompose responsibility hotspots, correct state/lifecycle defects, add complexity gates and focused regressions.368 full-suite cases pass; real GPU/CPU correction errors remain below1.5e-7. Two documented numerical state-machine exceptions remain.
 - [ ] Item7: add accurate docstrings, boundary/local types and enforced annotation/type checks.
 - [ ] Item8: name secondary-pattern units and derive Python ray counts from its data.
 - [ ] Item9: document executable shader stages and maintain CPU/GPU numerical distinction; shader coverage belongs to item11.

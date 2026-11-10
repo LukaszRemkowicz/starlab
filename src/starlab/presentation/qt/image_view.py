@@ -1,6 +1,8 @@
+from dataclasses import dataclass
+
 import numpy as np
 from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap
+from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QTransform
 from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView
 
 from ...domain.imaging import Pixels, display_pixels
@@ -18,6 +20,20 @@ def _pixmap(data: Pixels, color_space: str) -> QPixmap:
         rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0], QImage.Format.Format_RGB888
     ).copy()
     return QPixmap.fromImage(image)
+
+
+@dataclass(frozen=True)
+class ViewState:
+    """Implicitly shared pixmaps and navigation state for a temporary thumbnail."""
+
+    overview: tuple[QPixmap, float, QPointF]
+    detail: tuple[QPixmap, float, QPointF]
+    scene_rect: QRectF
+    transform: QTransform
+    scroll: tuple[int, int]
+    fitted: bool
+    has_image: bool
+    stars: tuple[Star, ...]
 
 
 class ImageView(QGraphicsView):
@@ -53,6 +69,39 @@ class ImageView(QGraphicsView):
         self.fitted = True
         self.has_image = False
         self._space_pan = False
+
+    def capture_state(self) -> ViewState:
+        """Retain both image layers and navigation before showing an import thumbnail."""
+        return ViewState(
+            (self.item.pixmap(), self.item.scale(), self.item.pos()),
+            (self.detail_item.pixmap(), self.detail_item.scale(), self.detail_item.pos()),
+            self.sceneRect(),
+            self.transform(),
+            (self.horizontalScrollBar().value(), self.verticalScrollBar().value()),
+            self.fitted,
+            self.has_image,
+            self.stars,
+        )
+
+    def restore_state(self, state: ViewState) -> None:
+        """Restore a committed document without requesting replacement preview work."""
+        self.fitted = False
+        for item, layer in ((self.item, state.overview), (self.detail_item, state.detail)):
+            pixmap, scale, position = layer
+            item.setPixmap(pixmap)
+            item.setScale(scale)
+            item.setPos(position)
+        self.scene().setSceneRect(state.scene_rect)
+        self.setTransform(state.transform)
+        self.horizontalScrollBar().setValue(state.scroll[0])
+        self.verticalScrollBar().setValue(state.scroll[1])
+        self.fitted, self.has_image, self.stars = state.fitted, state.has_image, state.stars
+        self.detail_timer.stop()
+        self.viewport().update()
+
+    def clear_detail(self) -> None:
+        """Expose the overview while detail for a different display mode is pending."""
+        self.detail_item.setPixmap(QPixmap())
 
     def set_pixels(
         self,

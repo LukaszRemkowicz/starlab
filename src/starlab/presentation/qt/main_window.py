@@ -95,6 +95,12 @@ class MainWindow(QMainWindow):
         self.activity_timer = QTimer(self)
         self.activity_timer.setInterval(1000)
         self.activity_timer.timeout.connect(self._activity_tick)
+        self._build_layout()
+        self._shortcuts()
+        self.set_loaded(False)
+
+    def _build_layout(self) -> None:
+        """Arrange the canvas, inspector and footer around the shared error banner."""
         central = QWidget()
         self.setCentralWidget(central)
         root = QVBoxLayout(central)
@@ -108,6 +114,17 @@ class MainWindow(QMainWindow):
         splitter = QSplitter()
         splitter.setHandleWidth(1)
         root.addWidget(splitter, 1)
+        splitter.addWidget(self._build_canvas())
+        splitter.addWidget(self._build_inspector())
+        splitter.setSizes([1110, 330])
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 0)
+        splitter.setCollapsible(0, False)
+        splitter.setCollapsible(1, False)
+        root.addWidget(self._footer())
+
+    def _build_canvas(self) -> QWidget:
+        """Build the empty/image stack and its toolbar and image-information overlays."""
         self.canvas = Canvas()
         self.canvas.file_dropped.connect(self.open_requested)
         canvas_layout = QGridLayout(self.canvas)
@@ -135,7 +152,10 @@ class MainWindow(QMainWindow):
         canvas_layout.addWidget(
             self.image_info, 0, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft
         )
-        splitter.addWidget(self.canvas)
+        return self.canvas
+
+    def _build_inspector(self) -> QWidget:
+        """Build the filename header, effect tabs and general detection controls."""
         self.inspector = QWidget()
         self.inspector.setObjectName("inspector")
         self.inspector.setMinimumWidth(320)
@@ -159,15 +179,7 @@ class MainWindow(QMainWindow):
         self.effect_panel = EffectPanel()
         sidebar.addWidget(self.effect_panel, 1)
         self._general_controls()
-        splitter.addWidget(self.inspector)
-        splitter.setSizes([1110, 330])
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 0)
-        splitter.setCollapsible(0, False)
-        splitter.setCollapsible(1, False)
-        root.addWidget(self._footer())
-        self._shortcuts()
-        self.set_loaded(False)
+        return self.inspector
 
     def _empty_state(self):
         empty = QWidget()
@@ -571,8 +583,9 @@ class MainWindow(QMainWindow):
         self.error_label.setVisible(bool(text))
 
     def closeEvent(self, event):
-        if self.controller is not None and not self.controller.shutdown():
+        if self.controller is not None and not self.controller.shutdown(timeout_ms=0):
             event.ignore()
+            self.setEnabled(False)
             self.status_text.setText("Finishing cancellation…")
         else:
             self.activity_timer.stop()

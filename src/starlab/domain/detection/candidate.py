@@ -211,18 +211,10 @@ def refine_size(image, x, y, size):
     return size, size != original
 
 
-def candidate(image, x, y, coarse=False, excluded=()):
-    ok, (x, y), size = initial_candidate((x, y), image.bounds, image.sample)
-    if not ok:
-        return None
-    size = shrink_initial(image, x, y, size)
-    n = int(4 * size)
-    delta = n // 8 + 4
-    if n >= delta:
-        a = image.stats(x, y, n - delta, "ring")
-        b = image.stats(x, y, n + delta, "ring")
-        if a is None or b is None or not preliminary_shape(a, b, n):
-            return None
+def _refine_candidate(
+    image: Image, x: float, y: float, size: float, coarse: bool, excluded: tuple | list
+) -> tuple[float, float, float] | None:
+    """Alternate position and size refinement, preserving native rollback and limits."""
     previous = (x, y)
     (x, y), moved = refine_position((x, y), size, image.stats)
     size, resized = refine_size(image, x, y, size)
@@ -249,8 +241,11 @@ def candidate(image, x, y, coarse=False, excluded=()):
             return None
     if not converged and size > 2:
         return None
-    x, y = quarter_position(x), quarter_position(y)
-    size = quarter_size(size)
+    return x, y, size
+
+
+def _accept_shape(image: Image, x: float, y: float, size: float) -> bool:
+    """Sample the final disk/ring supports and apply the recovered shape predicate."""
     n = max(1, int(4 * size))
     if n < 12:
         a = image.stats(x, y, max(1, n - 2))
@@ -264,7 +259,28 @@ def candidate(image, x, y, coarse=False, excluded=()):
             image.stats(x, y, (6 * n) // 5 + 4, "ring"),
             image.stats(x, y, 2 * n + 4, "ring"),
         )
-    if any(v is None for v in args) or not final_shape(size, *args):
+    return not any(v is None for v in args) and final_shape(size, *args)
+
+
+def candidate(image, x, y, coarse=False, excluded=()):
+    ok, (x, y), size = initial_candidate((x, y), image.bounds, image.sample)
+    if not ok:
+        return None
+    size = shrink_initial(image, x, y, size)
+    n = int(4 * size)
+    delta = n // 8 + 4
+    if n >= delta:
+        a = image.stats(x, y, n - delta, "ring")
+        b = image.stats(x, y, n + delta, "ring")
+        if a is None or b is None or not preliminary_shape(a, b, n):
+            return None
+    refined = _refine_candidate(image, x, y, size, coarse, excluded)
+    if refined is None:
+        return None
+    x, y, size = refined
+    x, y = quarter_position(x), quarter_position(y)
+    size = quarter_size(size)
+    if not _accept_shape(image, x, y, size):
         return None
     if not image.inside(x, y) or (coarse and size <= 4):
         return None
