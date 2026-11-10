@@ -7,11 +7,13 @@ from typing import cast
 
 import numpy as np
 
+from ..array_types import BoolArray, DoubleArray, FloatArray, IntArray, Position
 from ..imaging import ImageFrame, ImagePixels, Pixels, check_cancel
 from ..sky_mask import SkyMask
 from ..stars import Star, filter_stars
 from .profiles import (
     ArrayCache,
+    CacheKey,
     IndexArray,
     SceneArrays,
     directions,
@@ -45,7 +47,7 @@ def _sampled_scene(
     height: int,
     positions: tuple[tuple[float, float], ...],
     rays: tuple[tuple[int, float], ...],
-    p: EffectParameters,
+    parameters: EffectParameters,
     diagonal: int,
     sampling: int,
     cancel: Event | None,
@@ -59,18 +61,18 @@ def _sampled_scene(
         for angle, weight in rays:
             check_cancel(cancel)
             index, values, radius, source = sampled_ray_scene(
-                width, height, positions[start : start + 512], p, diagonal, sampling, angle
+                width, height, positions[start : start + 512], parameters, diagonal, sampling, angle
             )
             indices.append(index)
             profiles.append(values * weight)
             radii.append(radius)
             sources.append(source + start)
-    arrays = cast(
+    arrays: SceneArrays = cast(
         SceneArrays, tuple(np.concatenate(parts) for parts in (indices, profiles, radii, sources))
     )
     # Stable pixel grouping turns repeated scatter multiplication into a
     # contiguous product reduction on warm slider updates.
-    order = np.argsort(arrays[0], kind="stable")
+    order: IntArray = np.argsort(arrays[0], kind="stable")
     arrays = cast(SceneArrays, tuple(array[order] for array in arrays))
     return arrays
 
@@ -80,30 +82,34 @@ def _sparse_scene(
     height: int,
     stars: tuple[Star, ...],
     kind: EffectKind,
-    p: EffectParameters,
+    parameters: EffectParameters,
     diagonal: int,
     sampling: int,
     cancel: Event | None,
     region: bool,
 ) -> SceneArrays | None:
     """Place cached per-source profiles, retaining their original contribution order."""
-    out_width = (width + sampling - 1) // sampling
+    out_width: int = (width + sampling - 1) // sampling
     indices: list[IndexArray] = []
     profiles: list[Pixels] = []
     radii: list[Pixels] = []
     sources: list[IndexArray] = []
-    rays = directions(kind, p)
-    for i, star in enumerate(stars):
+    rays: tuple[tuple[int, float], ...] = directions(kind, parameters)
+    for source_index, star in enumerate(stars):
         check_cancel(cancel)
-        raw_x, raw_y = star.x + 0.5, star.y + 0.5
-        origin_x, origin_y = math.floor(raw_x), math.floor(raw_y)
-        phase = int(4 * (raw_x - origin_x)), int(4 * (raw_y - origin_y))
-        residue = (-origin_x) % sampling, (-origin_y) % sampling
+        position_x: float
+        position_y: float
+        position_x, position_y = star.x + 0.5, star.y + 0.5
+        origin_x: int
+        origin_y: int
+        origin_x, origin_y = math.floor(position_x), math.floor(position_y)
+        phase: tuple[int, int] = int(4 * (position_x - origin_x)), int(4 * (position_y - origin_y))
+        residue: tuple[int, int] = (-origin_x) % sampling, (-origin_y) % sampling
         for angle, weight in rays:
             check_cancel(cancel)
-            dx, dy, values, radius = sparse_profile(
+            offset_x, offset_y, values, radius = sparse_profile(
                 kind,
-                p,
+                parameters,
                 diagonal,
                 phase,
                 sampling,
@@ -113,19 +119,25 @@ def _sparse_scene(
                 if region
                 else None,
             )
-            xx, yy = dx + origin_x, dy + origin_y
-            valid = (xx >= 0) & (yy >= 0) & (xx < width) & (yy < height)
+            world_x: IndexArray
+            world_y: IndexArray
+            world_x, world_y = offset_x + origin_x, offset_y + origin_y
+            valid: BoolArray = (
+                (world_x >= 0) & (world_y >= 0) & (world_x < width) & (world_y < height)
+            )
             if not valid.any():
                 continue
             indices.append(
-                ((yy[valid] // sampling) * out_width + xx[valid] // sampling).astype(np.int32)
+                ((world_y[valid] // sampling) * out_width + world_x[valid] // sampling).astype(
+                    np.int32
+                )
             )
             profiles.append(values[valid] * weight)
             radii.append(radius[valid])
-            sources.append(np.full(int(valid.sum()), i, np.int32))
+            sources.append(np.full(int(valid.sum()), source_index, np.int32))
     if not indices:
         return None
-    arrays = cast(
+    arrays: SceneArrays = cast(
         SceneArrays, tuple(np.concatenate(parts) for parts in (indices, profiles, radii, sources))
     )
     return arrays
@@ -136,26 +148,43 @@ def _scene(
     height: int,
     stars: tuple[Star, ...],
     kind: EffectKind,
-    p: EffectParameters,
+    parameters: EffectParameters,
     sampling: int,
     cancel: Event | None,
     diagonal: int | None = None,
 ) -> SceneArrays:
     """Cache integer pixel indices, transverse profiles, radii and source indices."""
-    region = diagonal is not None
+    region: bool = diagonal is not None
     diagonal = diagonal or image_diagonal(width, height)
-    positions = tuple((star.x, star.y) for star in stars)
-    key = width, height, positions, geometry_key(kind, p), sampling, diagonal, region
-    cached = SCENE_CACHE.get(key)
+    positions: tuple[Position, ...] = tuple((star.x, star.y) for star in stars)
+    key: CacheKey = (
+        width,
+        height,
+        positions,
+        geometry_key(kind, parameters),
+        sampling,
+        diagonal,
+        region,
+    )
+    cached: SceneArrays | None = SCENE_CACHE.get(key)
     if cached is not None:
         return cached
     arrays: SceneArrays | None
     if _grouped_ray_scene(kind, sampling, len(stars), region):
         arrays = _sampled_scene(
-            width, height, positions, directions(kind, p), p, diagonal, sampling, cancel
+            width,
+            height,
+            positions,
+            directions(kind, parameters),
+            parameters,
+            diagonal,
+            sampling,
+            cancel,
         )
     else:
-        arrays = _sparse_scene(width, height, stars, kind, p, diagonal, sampling, cancel, region)
+        arrays = _sparse_scene(
+            width, height, stars, kind, parameters, diagonal, sampling, cancel, region
+        )
         if arrays is None:
             return cast(
                 SceneArrays,
@@ -170,59 +199,69 @@ def _lit_scene(
     stars: tuple[Star, ...],
     maximum: float,
     kind: EffectKind,
-    p: EffectParameters,
+    parameters: EffectParameters,
     sampling: int,
     cancel: Event | None,
     diagonal: int | None = None,
 ) -> LitArrays:
     """Cache source-colored ray light independently of the intensity slider."""
-    channels = frame.pixels.shape[2]
-    key = (
+    channels: int = frame.pixels.shape[2]
+    key: CacheKey = (
         frame.width,
         frame.height,
         channels,
         stars,
         maximum,
         kind,
-        replace(p, intensity=0, soft_filter=0),
+        replace(parameters, intensity=0, soft_filter=0),
         sampling,
         diagonal,
     )
-    cached = LIGHT_CACHE.get(key)
+    cached: LitArrays | None = LIGHT_CACHE.get(key)
     if cached is not None:
         return cached
+    radius: FloatArray
     indices, profile, radius, source = _scene(
-        frame.width, frame.height, stars, kind, p, sampling, cancel, diagonal
+        frame.width, frame.height, stars, kind, parameters, sampling, cancel, diagonal
     )
-    brightness = np.array([s.brightness for s in stars], np.float32)
-    threshold = (1 - p.quantity / 100) ** 2 * maximum
-    factors = np.maximum(brightness - threshold, 0) / ((1 - threshold) * brightness)
-    original = np.array([s.color for s in stars])
-    colors = source_colors(original, p.hue, p.saturation)
+    brightness: FloatArray = np.array([star.brightness for star in stars], np.float32)
+    threshold: float = (1 - parameters.quantity / 100) ** 2 * maximum
+    factors: FloatArray = np.maximum(brightness - threshold, 0) / ((1 - threshold) * brightness)
+    original: DoubleArray = np.array([star.color for star in stars])
+    colors: FloatArray = source_colors(original, parameters.hue, parameters.saturation)
     # The native catalog already has this luminance. The ratio additionally
     # applies manual brightness edits without changing the source hue.
-    original_luma = original @ np.array([0.212639004, 0.715168655, 0.072192311])
+    original_luma: DoubleArray = original @ np.array([0.212639004, 0.715168655, 0.072192311])
     colors *= np.divide(
         brightness, original_luma, out=np.zeros_like(brightness), where=original_luma > 0
     )[:, None]
     if channels == 1:
         colors = colors.mean(axis=1, keepdims=True)
-    amplitudes = colors * factors[:, None]
-    scale = 800 / max(diagonal or image_diagonal(frame.width, frame.height), 1414)
-    rays = kind in ("primary", "secondary")
-    values = profile
+    amplitudes: FloatArray = colors * factors[:, None]
+    scale: float = 800 / max(diagonal or image_diagonal(frame.width, frame.height), 1414)
+    rays: bool = kind in ("primary", "secondary")
+    values: FloatArray | DoubleArray = profile
     if rays:
         values = values * np.maximum(
-            29 * ((1 + radius.astype(np.float64) * scale) ** (-190 / (p.length + 25)) - 0.000015), 0
+            29
+            * (
+                (1 + radius.astype(np.float64) * scale) ** (-190 / (parameters.length + 25))
+                - 0.000015
+            ),
+            0,
         )
-    selected = (values > 0) & (factors[source] > 0)
+    selected: BoolArray = (values > 0) & (factors[source] > 0)
     radius = radius[selected]
-    light = values[selected, None] * amplitudes[source[selected]]
-    if rays and p.rainbow:
-        u = radius.astype(np.float64) * scale * 125000 / (107 - p.frequency) ** 2
-        theta = np.deg2rad((np.trunc(u) + 36 * (50 - p.phase)) * 0.1)
-        amount = 0.017 * p.rainbow * np.minimum(u / 3000, 1)
-        modulation = (
+    light: FloatArray | DoubleArray = values[selected, None] * amplitudes[source[selected]]
+    if rays and parameters.rainbow:
+        rainbow_distance: DoubleArray = (
+            radius.astype(np.float64) * scale * 125000 / (107 - parameters.frequency) ** 2
+        )
+        theta: DoubleArray = np.deg2rad(
+            (np.trunc(rainbow_distance) + 36 * (50 - parameters.phase)) * 0.1
+        )
+        amount: DoubleArray = 0.017 * parameters.rainbow * np.minimum(rainbow_distance / 3000, 1)
+        modulation: DoubleArray = (
             np.sin(theta)[:, None]
             if channels == 1
             else np.stack((np.sin(theta), np.cos(theta), -np.sin(theta)), axis=1)
@@ -237,52 +276,59 @@ def _group(
     stars: tuple[Star, ...],
     maximum: float,
     kind: EffectKind,
-    p: EffectParameters,
+    parameters: EffectParameters,
     sampling: int,
     cancel: Event | None,
     diagonal: int | None = None,
 ) -> Pixels:
     """Screen-compose one emission group into an immutable sampled layer."""
-    h, w = (frame.height + sampling - 1) // sampling, (frame.width + sampling - 1) // sampling
-    channels = frame.pixels.shape[2]
-    key = (
+    output_height: int
+    output_width: int
+    output_height, output_width = (
+        (frame.height + sampling - 1) // sampling,
+        (frame.width + sampling - 1) // sampling,
+    )
+    channels: int = frame.pixels.shape[2]
+    key: CacheKey = (
         frame.width,
         frame.height,
         channels,
         stars,
         maximum,
         kind,
-        replace(p, soft_filter=0),
+        replace(parameters, soft_filter=0),
         sampling,
         diagonal,
     )
-    cached = GROUP_CACHE.get(key)
+    cached: Pixels | None = GROUP_CACHE.get(key)
     if cached is not None:
         return cached
-    threshold = (1 - p.quantity / 100) ** 2 * maximum
+    threshold: float = (1 - parameters.quantity / 100) ** 2 * maximum
     stars = tuple(star for star in stars if star.brightness > threshold)
-    transmission = np.ones((h * w, channels), np.float32)
-    intensity = gain(kind, p)
-    batch = scene_batch_size(
-        kind, p, diagonal or image_diagonal(frame.width, frame.height), sampling
+    transmission: Pixels = np.ones((output_height * output_width, channels), np.float32)
+    intensity: float = gain(kind, parameters)
+    batch: int = scene_batch_size(
+        kind, parameters, diagonal or image_diagonal(frame.width, frame.height), sampling
     )
     if diagonal is not None:
         batch = min(64, max(1, 1048576 // (4 * (frame.width + frame.height))))
     for base in range(0, len(stars), batch):
-        subset = stars[base : base + batch]
-        indices, light = _lit_scene(frame, subset, maximum, kind, p, sampling, cancel, diagonal)
+        subset: tuple[Star, ...] = stars[base : base + batch]
+        indices, light = _lit_scene(
+            frame, subset, maximum, kind, parameters, sampling, cancel, diagonal
+        )
         for start in range(0, len(indices), 131072):
             check_cancel(cancel)
-            pixels = indices[start : start + 131072]
-            factors = 1 - np.clip(light[start : start + 131072] * intensity, 0, 1)
+            pixels: IndexArray = indices[start : start + 131072]
+            factors: Pixels = 1 - np.clip(light[start : start + 131072] * intensity, 0, 1)
             if _grouped_ray_scene(kind, sampling, len(subset), diagonal is not None):
-                boundaries = np.r_[0, np.flatnonzero(np.diff(pixels)) + 1]
+                boundaries: IntArray = np.r_[0, np.flatnonzero(np.diff(pixels)) + 1]
                 transmission[pixels[boundaries]] *= np.multiply.reduceat(
                     factors, boundaries, axis=0
                 )
             else:
                 np.multiply.at(transmission, pixels, factors)
-    result = (1 - transmission).reshape(h, w, channels)
+    result: Pixels = (1 - transmission).reshape(output_height, output_width, channels)
     check_cancel(cancel)
     return GROUP_CACHE.put(key, result)
 
@@ -302,16 +348,18 @@ def render_effects(
     stars = filter_stars(stars, sky_mask)
     if sampling < 1:
         raise ValueError("Sampling must be positive.")
-    result = np.zeros_like(frame.pixels[::sampling, ::sampling])
-    maximum = max((star.brightness for star in stars), default=0.0)
-    visible = tuple(star for star in stars if star.visible)
+    result: Pixels = np.zeros_like(frame.pixels[::sampling, ::sampling])
+    maximum: float = max((star.brightness for star in stars), default=0.0)
+    visible: tuple[Star, ...] = tuple(star for star in stars if star.visible)
     if not visible:
         return result
     for kind in KINDS:
-        p = getattr(settings, kind)
-        if not p.enabled or p.intensity == 0 or p.quantity == 0:
+        parameters: EffectParameters = getattr(settings, kind)
+        if not parameters.enabled or parameters.intensity == 0 or parameters.quantity == 0:
             continue
-        group = _group(frame, visible, maximum, kind, p, sampling, cancel, diagonal)
+        group: Pixels = _group(
+            frame, visible, maximum, kind, parameters, sampling, cancel, diagonal
+        )
         result += (1 - result) * group
     check_cancel(cancel)
     if sky_mask is not None:
@@ -327,7 +375,7 @@ def composite(
     enlargement: Pixels | None = None,
 ) -> Pixels:
     """Screen in linear working space, preserving exact identity at zero effects."""
-    pixels = frame.pixels if reduction is None else np.maximum(frame.pixels - reduction, 0)
+    pixels: Pixels = frame.pixels if reduction is None else np.maximum(frame.pixels - reduction, 0)
     if enlargement is not None:
         pixels = pixels + enlargement
     return pixels + (1 - pixels) * effects

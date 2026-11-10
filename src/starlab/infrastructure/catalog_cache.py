@@ -5,6 +5,7 @@ import json
 import logging
 import os
 import tempfile
+from _hashlib import HASH
 from collections.abc import Sequence
 from dataclasses import asdict
 from functools import lru_cache
@@ -73,9 +74,9 @@ class _CatalogDocument(TypedDict):
 @lru_cache(maxsize=1)
 def engine_signature() -> str:
     """Hash detector code and assets once per process to invalidate incompatible catalogs."""
-    digest = hashlib.sha256(b"star-effects-detector-cache-v1")
-    directory = Path(__file__).parents[1] / "domain"
-    paths = [
+    digest: HASH = hashlib.sha256(b"star-effects-detector-cache-v1")
+    directory: Path = Path(__file__).parents[1] / "domain"
+    paths: list[Path] = [
         directory / "stars.py",
         directory / "imaging.py",
         directory / "jit.py",
@@ -99,8 +100,8 @@ def engine_signature() -> str:
 def identity(source: str | Path, settings: DetectionSettings) -> _CatalogIdentity:
     """Describe the resolved input file and all detector inputs affecting its catalog."""
     source = Path(source).resolve()
-    stat = source.stat()
-    return dict(
+    stat: os.stat_result = source.stat()
+    return _CatalogIdentity(
         source=str(source),
         size=stat.st_size,
         modified=stat.st_mtime_ns,
@@ -111,7 +112,7 @@ def identity(source: str | Path, settings: DetectionSettings) -> _CatalogIdentit
 
 def cache_path(source: str | Path, settings: DetectionSettings | None = None) -> Path:
     """Choose a stable temporary-cache filename for the source path and detector settings."""
-    key = hashlib.sha256(
+    key: str = hashlib.sha256(
         (
             str(Path(source).resolve())
             + json.dumps(asdict(settings or DetectionSettings()), sort_keys=True)
@@ -123,20 +124,20 @@ def cache_path(source: str | Path, settings: DetectionSettings | None = None) ->
 def load_catalog(source: str | Path, settings: DetectionSettings) -> tuple[Star, ...] | None:
     """Return matching validated stars, or None for stale, missing or malformed cache data."""
     try:
-        stored = cast(
+        stored: _CatalogDocument = cast(
             _CatalogDocument,
             json.loads(cache_path(source, settings).read_text(encoding="utf-8")),
         )
         if stored["identity"] != identity(source, settings):
             return None
         return tuple(_restore_star(row) for row in stored["stars"])
-    except (OSError, ValueError, KeyError, TypeError):
+    except OSError, ValueError, KeyError, TypeError:
         return None
 
 
 def _restore_star(row: _StoredStar) -> Star:
     """Normalize JSON arrays while retaining Star's validation of unknown keys and values."""
-    arguments = cast(
+    arguments: _StarArguments = cast(
         _StarArguments,
         {
             **row,
@@ -152,7 +153,7 @@ def save_catalog(source: str | Path, settings: DetectionSettings, stars: tuple[S
     """Atomically replace a disposable cache without letting write failures lose analysis."""
     temporary: Path | None = None
     try:
-        target = cache_path(source, settings)
+        target: Path = cache_path(source, settings)
         target.parent.mkdir(parents=True, exist_ok=True)
         data: _CatalogDocument = {
             "identity": identity(source, settings),

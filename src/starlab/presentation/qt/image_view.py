@@ -21,6 +21,7 @@ from PySide6.QtGui import (
 )
 from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QWidget
 
+from ...domain.array_types import ByteArray
 from ...domain.imaging import Pixels, display_pixels
 from ...domain.stars import Star
 from .drop_paths import accept_tiff_drag, drop_tiff
@@ -28,11 +29,11 @@ from .drop_paths import accept_tiff_drag, drop_tiff
 
 def _pixmap(data: Pixels, color_space: str) -> QPixmap:
     """Create a GUI-thread pixmap with copied image storage independent of NumPy."""
-    rgb = display_pixels(data, color_space)
+    rgb: ByteArray = display_pixels(data, color_space)
     if rgb.shape[2] == 1:
         rgb = np.repeat(rgb, 3, axis=2)
     rgb = np.ascontiguousarray(rgb)
-    image = QImage(
+    image: QImage = QImage(
         rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0], QImage.Format.Format_RGB888
     ).copy()
     return QPixmap.fromImage(image)
@@ -139,7 +140,7 @@ class ImageView(QGraphicsView):
         self.item.setScale(scale)
         # A subsampled pixel represents full-image index i*scale, centered at +0.5.
         self.item.setPos((1 - scale) / 2, (1 - scale) / 2)
-        size_changed = self.sceneRect() != QRectF(0, 0, width, height) or not self.has_image
+        size_changed: bool = self.sceneRect() != QRectF(0, 0, width, height) or not self.has_image
         self.scene().setSceneRect(QRectF(0, 0, width, height))
         self.has_image = True
         if self.fitted and size_changed:
@@ -148,7 +149,7 @@ class ImageView(QGraphicsView):
 
     def fit_image(self) -> None:
         """Fit the full-image rectangle and discard any obsolete detail layer."""
-        was_fitted = self.fitted
+        was_fitted: bool = self.fitted
         self.fitted = True
         self.detail_timer.stop()
         self.detail_item.setPixmap(QPixmap())
@@ -196,7 +197,7 @@ class ImageView(QGraphicsView):
     def wheelEvent(self, event: QWheelEvent) -> None:
         """Zoom around the pointer when an image is loaded."""
         if self.has_image:
-            factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
+            factor: float = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
             self.zoom_by(factor)
             event.accept()
 
@@ -223,7 +224,7 @@ class ImageView(QGraphicsView):
             and not self._space_pan
             and event.button() == Qt.MouseButton.LeftButton
         ):
-            point = self.mapToScene(event.position().toPoint())
+            point: QPointF = self.mapToScene(event.position().toPoint())
             if self.sceneRect().contains(point):
                 self.image_clicked.emit(max(0, point.x() - 0.5), max(0, point.y() - 0.5))
             event.accept()
@@ -251,10 +252,10 @@ class ImageView(QGraphicsView):
         rect = QRectF(rect)
         if not self.show_centers:
             return
-        pen = QPen(QColor("#87b8ff"), 1)
+        pen: QPen = QPen(QColor("#87b8ff"), 1)
         pen.setCosmetic(True)
         painter.setPen(pen)
-        radius = 7 / max(self.transform().m11(), 0.01)
+        radius: float = 7 / max(self.transform().m11(), 0.01)
         for star in self.stars:
             star_x, star_y = star.x + 0.5, star.y + 0.5
             if not rect.contains(QPointF(star_x, star_y)):

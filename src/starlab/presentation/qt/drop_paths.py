@@ -11,7 +11,7 @@ def local_tiff_path(mime: QMimeData) -> str | None:
     """Return the first local TIFF URL, skipping remote URLs and other suffixes."""
     for url in mime.urls():
         if url.isLocalFile():
-            path = url.toLocalFile()
+            path: str = url.toLocalFile()
             if Path(path).suffix.lower() in (".tif", ".tiff"):
                 return path
     return None
@@ -25,7 +25,7 @@ def accept_tiff_drag(event: QDropEvent) -> None:
 
 def drop_tiff(event: QDropEvent, emit: Callable[[str], None]) -> None:
     """Emit the first eligible local TIFF path and accept its drop."""
-    path = local_tiff_path(event.mimeData())
+    path: str | None = local_tiff_path(event.mimeData())
     if path is not None:
         emit(path)
         event.acceptProposedAction()

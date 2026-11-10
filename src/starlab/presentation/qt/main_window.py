@@ -119,9 +119,9 @@ class MainWindow(QMainWindow):
 
     def _build_layout(self) -> None:
         """Arrange the canvas, inspector and footer around the shared error banner."""
-        central = QWidget()
+        central: QWidget = QWidget()
         self.setCentralWidget(central)
-        root = QVBoxLayout(central)
+        root: QVBoxLayout = QVBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
         self.error_label = QLabel()
@@ -129,7 +129,7 @@ class MainWindow(QMainWindow):
         self.error_label.setObjectName("error")
         self.error_label.hide()
         root.addWidget(self.error_label)
-        splitter = QSplitter()
+        splitter: QSplitter = QSplitter()
         splitter.setHandleWidth(1)
         root.addWidget(splitter, 1)
         splitter.addWidget(self._build_canvas())
@@ -145,7 +145,7 @@ class MainWindow(QMainWindow):
         """Build the empty/image stack and its toolbar and image-information overlays."""
         self.canvas = Canvas()
         self.canvas.file_dropped.connect(self.open_requested)
-        canvas_layout = QGridLayout(self.canvas)
+        canvas_layout: QGridLayout = QGridLayout(self.canvas)
         canvas_layout.setContentsMargins(0, 0, 0, 0)
         self.stack = QStackedWidget()
         self.stack.setObjectName("canvas")
@@ -154,9 +154,9 @@ class MainWindow(QMainWindow):
         self.stack.addWidget(self.image_view)
         canvas_layout.addWidget(self.stack, 0, 0)
         self.hud = self._toolbar()
-        hud_margin = QWidget()
+        hud_margin: QWidget = QWidget()
         hud_margin.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-        hud_box = QHBoxLayout(hud_margin)
+        hud_box: QHBoxLayout = QHBoxLayout(hud_margin)
         hud_box.setContentsMargins(12, 12, 0, 0)
         hud_box.addWidget(self.hud)
         canvas_layout.addWidget(
@@ -178,14 +178,14 @@ class MainWindow(QMainWindow):
         self.inspector.setObjectName("inspector")
         self.inspector.setMinimumWidth(320)
         self.inspector.setMaximumWidth(420)
-        sidebar = QVBoxLayout(self.inspector)
+        sidebar: QVBoxLayout = QVBoxLayout(self.inspector)
         sidebar.setContentsMargins(0, 0, 0, 0)
         sidebar.setSpacing(0)
-        header = QFrame()
+        header: QFrame = QFrame()
         header.setObjectName("panelHeader")
-        header_box = QHBoxLayout(header)
+        header_box: QHBoxLayout = QHBoxLayout(header)
         header_box.setContentsMargins(12, 12, 12, 12)
-        title = QLabel("Parameters")
+        title: QLabel = QLabel("Parameters")
         title.setStyleSheet("font-weight: 600;")
         header_box.addWidget(title)
         header_box.addStretch()
@@ -201,21 +201,21 @@ class MainWindow(QMainWindow):
 
     def _empty_state(self) -> QWidget:
         """Build the initial prompt and image-open action."""
-        empty = QWidget()
+        empty: QWidget = QWidget()
         empty.setObjectName("canvas")
-        box = QVBoxLayout(empty)
+        box: QVBoxLayout = QVBoxLayout(empty)
         box.setSpacing(16)
         box.addStretch()
-        emblem = QLabel()
+        emblem: QLabel = QLabel()
         emblem.setObjectName("emptyIcon")
         emblem.setFixedSize(68, 68)
         emblem.setAlignment(Qt.AlignmentFlag.AlignCenter)
         emblem.setPixmap(icon("image", "#4d78cc", 32).pixmap(32, 32))
         box.addWidget(emblem, alignment=Qt.AlignmentFlag.AlignCenter)
-        title = QLabel("Star Effects Lab")
+        title: QLabel = QLabel("Star Effects Lab")
         title.setObjectName("emptyTitle")
         box.addWidget(title, alignment=Qt.AlignmentFlag.AlignCenter)
-        text = QLabel("Open an image to start detecting stars and applying optical effects")
+        text: QLabel = QLabel("Open an image to start detecting stars and applying optical effects")
         text.setObjectName("muted")
         box.addWidget(text, alignment=Qt.AlignmentFlag.AlignCenter)
         self.empty_open_button = QPushButton(icon("folder", "#ffffff"), "Load Image")
@@ -223,15 +223,16 @@ class MainWindow(QMainWindow):
         self.empty_open_button.setMinimumHeight(34)
         self.empty_open_button.clicked.connect(self.choose_open)
         box.addWidget(self.empty_open_button, alignment=Qt.AlignmentFlag.AlignCenter)
-        hint = QLabel("or drag and drop a TIFF image here")
+        hint: QLabel = QLabel("or drag and drop a TIFF image here")
         hint.setObjectName("muted")
         box.addWidget(hint, alignment=Qt.AlignmentFlag.AlignCenter)
         box.addStretch()
         return empty
 
-    def _tool_button(self, name: str, label: str, callback: Callable[[], object]) -> QToolButton:
+    @staticmethod
+    def _tool_button(name: str, label: str, callback: Callable[[], object]) -> QToolButton:
         """Create a labeled accessible icon button connected to its action."""
-        button = QToolButton()
+        button: QToolButton = QToolButton()
         button.setIcon(icon(name))
         button.setToolTip(label)
         button.setAccessibleName(label)
@@ -240,10 +241,10 @@ class MainWindow(QMainWindow):
 
     def _toolbar(self) -> QFrame:
         """Build catalog tools, navigation actions and display-mode selectors."""
-        hud = QFrame()
+        hud: QFrame = QFrame()
         hud.setObjectName("hud")
         hud.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
-        box = QHBoxLayout(hud)
+        box: QHBoxLayout = QHBoxLayout(hud)
         box.setContentsMargins(6, 5, 6, 5)
         box.setSpacing(4)
         self.open_button = self._tool_button("folder", "Open TIFF (Ctrl+O)", self.choose_open)
@@ -260,7 +261,7 @@ class MainWindow(QMainWindow):
                 """Emit the captured tool name independently of Qt's checked argument."""
                 self.tool_changed.emit(tool)
 
-            button = self._tool_button(name, label, select_tool)
+            button: QToolButton = self._tool_button(name, label, select_tool)
             button.setCheckable(True)
             button.setChecked(key == "pan")
             self.tool_group.addButton(button)
@@ -313,7 +314,7 @@ class MainWindow(QMainWindow):
 
     def _general_controls(self) -> None:
         """Build detection threshold controls and bind their numeric representations."""
-        box = self.effect_panel.general_box
+        box: QVBoxLayout = self.effect_panel.general_box
         self.auto_detect = QCheckBox("Automatic Star Detection")
         self.auto_detect.setChecked(True)
         box.addWidget(self.auto_detect)
@@ -322,7 +323,7 @@ class MainWindow(QMainWindow):
         self.detection_method.addItem("Multiscale · larger stars", "multiscale")
         self.detection_method.setAccessibleName("Star detector")
         box.addWidget(self.detection_method)
-        row = QHBoxLayout()
+        row: QHBoxLayout = QHBoxLayout()
         self.threshold_label = QLabel("Minimum brightness")
         row.addWidget(self.threshold_label)
         self.threshold = QDoubleSpinBox()
@@ -338,7 +339,7 @@ class MainWindow(QMainWindow):
         self.threshold.setAlignment(Qt.AlignmentFlag.AlignRight)
         row.addWidget(self.threshold)
         box.addLayout(row)
-        threshold_slider = QSlider(Qt.Orientation.Horizontal)
+        threshold_slider: QSlider = QSlider(Qt.Orientation.Horizontal)
         self.threshold_slider = threshold_slider
         threshold_slider.setRange(4, 98)
         threshold_slider.setValue(20)
@@ -350,7 +351,7 @@ class MainWindow(QMainWindow):
         box.addWidget(threshold_slider)
         self._threshold_method = "native"
         self._threshold_values: dict[str, float] = {"native": 0.2, "multiscale": 5.0}
-        self.detection_method.currentIndexChanged.connect(self._detector_threshold_mode)
+        self.detection_method.currentIndexChanged.connect(self.set_detector_threshold_mode)
         self.analyze_button = QPushButton("Detect stars")
         box.addWidget(self.analyze_button)
         self.star_count = QLabel("No image loaded")
@@ -359,7 +360,7 @@ class MainWindow(QMainWindow):
         box.addWidget(self.star_count)
         self.centers = QCheckBox("Show star centers")
         box.addWidget(self.centers)
-        hint = QLabel(
+        hint: QLabel = QLabel(
             "Primary and Secondary have separate tabs under Spikes. Advanced reveals all controls.\n\nForeground is excluded automatically. The mask icon shows blue sky, red foreground and yellow uncertain areas. Multiscale also detects broader stars."
         )
         hint.setWordWrap(True)
@@ -367,12 +368,12 @@ class MainWindow(QMainWindow):
         box.addWidget(hint)
         box.addStretch()
 
-    def _detector_threshold_mode(self, _index: int) -> None:
+    def set_detector_threshold_mode(self, _index: int) -> None:
         """Keep separate threshold values and ranges for each detector algorithm."""
-        method = self.detection_method.currentData()
+        method: str = self.detection_method.currentData()
         self._threshold_values[self._threshold_method] = self.threshold.value()
         self._threshold_method = method
-        multi = method == "multiscale"
+        multi: bool = method == "multiscale"
         self.threshold_label.setText("Detection threshold" if multi else "Minimum brightness")
         with QSignalBlocker(self.threshold), QSignalBlocker(self.threshold_slider):
             self.threshold.setRange(*((1, 30) if multi else (0.04, 0.98)))
@@ -388,12 +389,12 @@ class MainWindow(QMainWindow):
 
     def _footer(self) -> QFrame:
         """Build presets, activity feedback, before-view and export actions."""
-        footer = QFrame()
+        footer: QFrame = QFrame()
         footer.setObjectName("footer")
-        box = QHBoxLayout(footer)
+        box: QHBoxLayout = QHBoxLayout(footer)
         box.setContentsMargins(12, 8, 12, 8)
         box.setSpacing(8)
-        label = QLabel("Preset:")
+        label: QLabel = QLabel("Preset:")
         label.setObjectName("muted")
         box.addWidget(label)
         self.preset_combo = QComboBox()
@@ -435,7 +436,7 @@ class MainWindow(QMainWindow):
 
     def _activity_feedback(self) -> QVBoxLayout:
         """Build elapsed-operation text and the indeterminate progress indicator."""
-        activity = QVBoxLayout()
+        activity: QVBoxLayout = QVBoxLayout()
         activity.setSpacing(3)
         self.status_text = QLabel("Ready")
         self.status_text.setObjectName("muted")
@@ -454,7 +455,7 @@ class MainWindow(QMainWindow):
         """Apply a built-in settings snapshot unless an exclusive operation is active."""
         if index == 3 or (self.controller and self.controller.exclusive):
             return
-        settings = EffectSettings()
+        settings: EffectSettings = EffectSettings()
         if index == 1:
             settings = replace(
                 settings,
@@ -512,7 +513,7 @@ class MainWindow(QMainWindow):
             ("Undo", QKeySequence.StandardKey.Undo, self.undo_requested.emit),
             ("Redo", QKeySequence.StandardKey.Redo, self.redo_requested.emit),
         ]:
-            action = QAction(title, self)
+            action: QAction = QAction(title, self)
             action.setShortcut(QKeySequence(shortcut))
             action.triggered.connect(callback)
             self.addAction(action)
@@ -556,7 +557,9 @@ class MainWindow(QMainWindow):
         if self.controller and self.controller.exclusive:
             return
         # QSettings returns object in the stub even when type=str requests string conversion.
-        directory = cast(str, self.preferences.value("dialogs/open_image_directory", "", type=str))
+        directory: str = cast(
+            str, self.preferences.value("dialogs/open_image_directory", "", type=str)
+        )
         if not directory or not Path(directory).is_dir():
             directory = QStandardPaths.writableLocation(
                 QStandardPaths.StandardLocation.PicturesLocation
@@ -579,7 +582,7 @@ class MainWindow(QMainWindow):
             return
         from PySide6.QtWidgets import QInputDialog
 
-        kind, ok = QInputDialog.getItem(
+        kind, accepted = QInputDialog.getItem(
             self,
             "Export",
             "Image content",
@@ -587,7 +590,7 @@ class MainWindow(QMainWindow):
             0,
             False,
         )
-        if ok:
+        if accepted:
             path, _ = QFileDialog.getSaveFileName(
                 self, "Export 16-bit TIFF", "star-effects.tif", "TIFF (*.tif)"
             )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import weakref
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
@@ -24,8 +25,9 @@ from PySide6.QtOpenGL import (
 from shiboken6 import VoidPtr
 
 from ..application.use_cases import Preview
+from ..domain.array_types import BoolArray, FloatArray
+from ..domain.effects.constants import SECONDARY_RAY_COUNT
 from ..domain.effects.profiles import (
-    SECONDARY_RAY_COUNT,
     directions,
     gain,
     image_diagonal,
@@ -39,8 +41,17 @@ from ..domain.sky_mask import SkyMask
 from ..domain.stars import Star
 
 type Bounds = tuple[int, int, int, int]
-type CropKey = tuple[object, Bounds, int]
+type FrameIdentity = weakref.ReferenceType[ImageFrame] | ImageFrame
+type CropKey = tuple[FrameIdentity, Bounds, int]
+type GroupKey = tuple[EffectParameters, Bounds, int, int, int, SkyMask | None]
+type SourceFilterKey = tuple[float, CropKey | None, SkyMask | None]
+type BufferKey = int | tuple[int, float]
 type UniformComparable = float | int | tuple[float, float]
+
+# Generated PySide stubs label void* as int, but the installed binding requires
+# VoidPtr. Correct the callable boundary, keeping the actual pointer object.
+type ReadPixels = Callable[[int, int, int, int, int, int, VoidPtr], None]
+type UploadPixels = Callable[[QOpenGLTexture.PixelFormat, QOpenGLTexture.PixelType, VoidPtr], None]
 
 
 def _view_region(
@@ -49,7 +60,7 @@ def _view_region(
     """Choose integer sampling with at least two samples per full-image axis."""
     if region is not None:
         return region, sampling, True
-    stride = (
+    stride: int = (
         1
         if full_resolution
         else max(1, (max(frame.width, frame.height) + max_edge - 1) // max_edge)
@@ -62,11 +73,11 @@ class GpuPreviewRenderer:
 
     def __init__(self) -> None:
         """Prepare GUI-owned surface; worker-owned GL objects are created lazily."""
-        fmt = QSurfaceFormat()
-        fmt.setVersion(3, 3)
-        fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
+        surface_format: QSurfaceFormat = QSurfaceFormat()
+        surface_format.setVersion(3, 3)
+        surface_format.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
         self.surface = QOffscreenSurface()
-        self.surface.setFormat(fmt)
+        self.surface.setFormat(surface_format)
         self.surface.create()
         self.context: QOpenGLContext | None = None
         self.program: QOpenGLShaderProgram | None = None
@@ -79,16 +90,16 @@ class GpuPreviewRenderer:
         self.records: NDArray[np.float32]
         self.maximum: float = 0.0
         self.buffers: dict[str, QOpenGLBuffer] = {}
-        self.buffer_keys: dict[str, object] = {}
+        self.buffer_keys: dict[str, BufferKey] = {}
         self.buffer_counts: dict[str, int] = {}
         self.target: QOpenGLFramebufferObject | None = None
-        self.group_cache: dict[EffectKind, tuple[tuple[object, ...], Pixels]] = {}
+        self.group_cache: dict[EffectKind, tuple[GroupKey, Pixels]] = {}
         self.renderer_name = ""
         self.uniform_locations: dict[str, int] = {}
         self.uniform_values: dict[str, UniformComparable] = {}
         self.source_texture: QOpenGLTexture | None = None
         self.texture_key: CropKey | None = None
-        self.reduction_cache: tuple[tuple[object, ...], Pixels, Pixels] | None = None
+        self.reduction_cache: tuple[SourceFilterKey, Pixels, Pixels] | None = None
 
     @property
     def _gpu(self) -> QOpenGLFunctions_3_3_Core:
@@ -153,7 +164,7 @@ class GpuPreviewRenderer:
             raise RuntimeError("Cannot initialize the preview GPU functions.")
         self.renderer_name = self._gpu.glGetString(0x1F01)
         self.program = QOpenGLShaderProgram()
-        folder = Path(__file__).with_name("shaders")
+        folder: Path = Path(__file__).with_name("shaders")
         for kind, name in (
             (QOpenGLShader.ShaderTypeBit.Vertex, "preview.vert"),
             (QOpenGLShader.ShaderTypeBit.Fragment, "preview.frag"),
@@ -172,12 +183,12 @@ class GpuPreviewRenderer:
 
     def _set_crop(self, frame: ImageFrame, region: Bounds, sampling: int) -> None:
         """Copy only a changed sampled region, retaining source identity in its key."""
-        source_key: weakref.ReferenceType[ImageFrame] | ImageFrame
+        source_key: FrameIdentity
         try:
             source_key = weakref.ref(frame)
         except TypeError:
             source_key = frame
-        key = source_key, region, sampling
+        key: CropKey = source_key, region, sampling
         if self.crop_key == key:
             return
         left, top, right, bottom = region
@@ -197,16 +208,16 @@ class GpuPreviewRenderer:
         self.records = np.asarray(
             [
                 (
-                    s.x,
-                    s.y,
-                    *s.color,
-                    s.brightness,
-                    float(s.visible),
-                    s.soft_weight,
-                    *(s.source_profile or (0,) * 10),
-                    *s.source_peak,
+                    star.x,
+                    star.y,
+                    *star.color,
+                    star.brightness,
+                    float(star.visible),
+                    star.soft_weight,
+                    *(star.source_profile or (0,) * 10),
+                    *star.source_peak,
                 )
-                for s in stars
+                for star in stars
             ],
             dtype=np.float32,
         ).reshape(-1, 21)
@@ -223,9 +234,9 @@ class GpuPreviewRenderer:
         self._vertex_array.bind()
         if self.target is None or (self.target.width(), self.target.height()) != (width, height):
             self.target = None
-            fmt = QOpenGLFramebufferObjectFormat()
-            fmt.setInternalTextureFormat(0x8814)
-            self.target = QOpenGLFramebufferObject(width, height, fmt)
+            framebuffer_format: QOpenGLFramebufferObjectFormat = QOpenGLFramebufferObjectFormat()
+            framebuffer_format.setInternalTextureFormat(0x8814)
+            self.target = QOpenGLFramebufferObject(width, height, framebuffer_format)
             if not self.target.isValid():
                 raise RuntimeError("Cannot allocate the preview framebuffer.")
         self.target.bind()
@@ -239,12 +250,14 @@ class GpuPreviewRenderer:
 
     def _uniform(self, name: str, value: QVector2D | float | int) -> None:
         """Upload a changed uniform, caching its location and normalized value."""
-        comparable = (value.x(), value.y()) if isinstance(value, QVector2D) else value
+        comparable: UniformComparable = (
+            (value.x(), value.y()) if isinstance(value, QVector2D) else value
+        )
         if self.uniform_values.get(name) == comparable:
             return
         if name not in self.uniform_locations:
             self.uniform_locations[name] = self._shader.uniformLocation(name.encode())
-        location = self.uniform_locations[name]
+        location: int = self.uniform_locations[name]
         if isinstance(value, QVector2D):
             self._gpu.glUniform2f(location, value.x(), value.y())
         elif type(value) is int:
@@ -257,14 +270,14 @@ class GpuPreviewRenderer:
         """Map framebuffer samples to original full-image coordinates."""
         height, width, channels = self.crop.pixels.shape
         self._uniform("outputSize", QVector2D(width, height))
-        self._uniform("origin", QVector2D(*region[:2]))
+        self._uniform("origin", QVector2D(region[0], region[1]))
         self._uniform("sampling", float(sampling))
         self._uniform("scale", float(800 / max(diagonal, 1414)))
         self._uniform("gray", int(channels == 1))
 
-    def _upload_buffer(self, name: str, key: object, records: NDArray[np.float32]) -> None:
+    def _upload_buffer(self, name: str, key: BufferKey, records: NDArray[np.float32]) -> None:
         """Replace one instance buffer and record its source-selection key."""
-        buffer = self.buffers.setdefault(name, QOpenGLBuffer())
+        buffer: QOpenGLBuffer = self.buffers.setdefault(name, QOpenGLBuffer())
         if not buffer.isCreated():
             buffer.create()
         buffer.bind()
@@ -273,66 +286,69 @@ class GpuPreviewRenderer:
 
     def _effect_buffer(self, kind: EffectKind, quantity: float, threshold: float) -> int:
         """Select visible sources once per quantity/catalog change."""
-        key = id(self.catalog), quantity
+        key: tuple[int, float] = id(self.catalog), quantity
         if self.buffer_keys.get(kind) != key:
-            selected = (self.records[:, 5] > threshold) & (self.records[:, 6] > 0)
+            selected: BoolArray = (self.records[:, 5] > threshold) & (self.records[:, 6] > 0)
             self._upload_buffer(kind, key, self.records[selected])
         return self.buffer_counts[kind]
 
     def _effect_uniforms(
-        self, kind: EffectKind, p: EffectParameters, diagonal: int, threshold: float, rays: int
+        self,
+        kind: EffectKind,
+        parameters: EffectParameters,
+        diagonal: int,
+        threshold: float,
+        rays: int,
     ) -> None:
         """Configure one effect profile without changing its source catalog."""
-        coefficient, widening = ray_coefficients(p, 800 / max(diagonal, 1414))
-        values = dict(
+        coefficient, widening = ray_coefficients(parameters, 800 / max(diagonal, 1414))
+        values: dict[str, float] = dict(
             kind=KINDS.index(kind),
             rayCount=rays,
-            cutoff=radial_extent(kind, p, diagonal),
+            cutoff=radial_extent(kind, parameters, diagonal),
             coefficient=coefficient,
             widening=widening,
-            rayLength=p.length,
-            intensity=gain(kind, p),
+            rayLength=parameters.length,
+            intensity=gain(kind, parameters),
             threshold=threshold,
-            hue=p.hue,
-            saturation=p.saturation,
-            rainbow=p.rainbow,
-            frequency=p.frequency,
-            phase=p.phase,
-            softSize=1 + (max(diagonal, 1414) // 3) * (p.size / 100) ** 3,
-            softPower=0.6 + 0.124 * p.falloff,
-            ringPeak=(1 + 0.01 * (p.size + 25) ** 2) * max(diagonal, 1414) / 3768,
-            innerWidth=p.inner_width,
-            outerWidth=p.outer_width,
-            innerPower=0.08 * (p.inner_falloff + 10),
-            outerPower=0.08 * (p.outer_falloff + 10),
+            hue=parameters.hue,
+            saturation=parameters.saturation,
+            rainbow=parameters.rainbow,
+            frequency=parameters.frequency,
+            phase=parameters.phase,
+            softSize=1 + (max(diagonal, 1414) // 3) * (parameters.size / 100) ** 3,
+            softPower=0.6 + 0.124 * parameters.falloff,
+            ringPeak=(1 + 0.01 * (parameters.size + 25) ** 2) * max(diagonal, 1414) / 3768,
+            innerWidth=parameters.inner_width,
+            outerWidth=parameters.outer_width,
+            innerPower=0.08 * (parameters.inner_falloff + 10),
+            outerPower=0.08 * (parameters.outer_falloff + 10),
         )
         for name, value in values.items():
             self._uniform(
                 name, value if type(value) is int and name in ("kind", "rayCount") else float(value)
             )
-        for index, (angle, weight) in enumerate(directions(kind, p)):
+        for index, (angle, weight) in enumerate(directions(kind, parameters)):
             self._uniform(f"rayDirections[{index}]", QVector2D(sine(angle), -sine(angle + 900)))
             self._uniform(f"rayWeights[{index}]", float(weight))
 
     def _draw(self, count: int, rays: int) -> None:
         """Draw source quads and surface errors at the GL operation that failed."""
         self._gpu.glDrawArraysInstanced(0x0004, 0, 6, count * rays)
-        error = self._gpu.glGetError()
+        error: int = self._gpu.glGetError()
         if error:
             raise RuntimeError(f"GPU drawing error: 0x{error:04x}")
 
     def _read_target(self, region: Bounds, sampling: int, sky_mask: SkyMask | None) -> Pixels:
         """Read an immutable top-down linear buffer and apply foreground protection."""
         height, width, channels = self.crop.pixels.shape
-        output = np.empty((height, width, 4), np.float32)
-        # PySide stubs model void* as int; the binding consumes a VoidPtr.
-        self._gpu.glReadPixels(
-            0, 0, width, height, 0x1908, 0x1406, cast(int, VoidPtr(output.ctypes.data))
-        )
-        error = self._gpu.glGetError()
+        output: FloatArray = np.empty((height, width, 4), np.float32)
+        read_pixels: ReadPixels = cast(ReadPixels, self._gpu.glReadPixels)
+        read_pixels(0, 0, width, height, 0x1908, 0x1406, VoidPtr(output.ctypes.data))
+        error: int = self._gpu.glGetError()
         if error:
             raise RuntimeError(f"GPU readback error: 0x{error:04x}")
-        pixels = np.ascontiguousarray(output[::-1, :, :channels])
+        pixels: FloatArray = np.ascontiguousarray(output[::-1, :, :channels])
         if sky_mask is not None:
             pixels *= sky_mask.region(region, sampling)[..., None]
         pixels.flags.writeable = False
@@ -341,34 +357,40 @@ class GpuPreviewRenderer:
     def _effect_group(
         self,
         kind: EffectKind,
-        p: EffectParameters,
+        parameters: EffectParameters,
         region: Bounds,
         sampling: int,
         diagonal: int,
         sky_mask: SkyMask | None,
     ) -> Pixels | None:
         """Reuse or draw one effect layer, independently of source correction."""
-        key = (
-            replace(p, soft_filter=0),
+        key: GroupKey = (
+            replace(parameters, soft_filter=0),
             region,
             sampling,
             diagonal,
             self.crop.pixels.shape[2],
             sky_mask,
         )
-        cached = self.group_cache.get(kind)
+        cached: tuple[GroupKey, Pixels] | None = self.group_cache.get(kind)
         if cached is not None and cached[0] == key:
             return cached[1]
-        threshold = (1 - p.quantity / 100) ** 2 * self.maximum
-        count = self._effect_buffer(kind, p.quantity, threshold)
+        threshold: float = (1 - parameters.quantity / 100) ** 2 * self.maximum
+        count: int = self._effect_buffer(kind, parameters.quantity, threshold)
         if not count:
             return None
-        rays = p.points if kind == "primary" else SECONDARY_RAY_COUNT if kind == "secondary" else 1
+        rays: int = (
+            parameters.points
+            if kind == "primary"
+            else SECONDARY_RAY_COUNT
+            if kind == "secondary"
+            else 1
+        )
         self._attributes(self.buffers[kind], rays)
-        self._effect_uniforms(kind, p, diagonal, threshold, rays)
+        self._effect_uniforms(kind, parameters, diagonal, threshold, rays)
         self._gpu.glClear(0x4000)
         self._draw(count, rays)
-        group = self._read_target(region, sampling, sky_mask)
+        group: FloatArray = self._read_target(region, sampling, sky_mask)
         self.group_cache[kind] = key, group
         return group
 
@@ -378,7 +400,7 @@ class GpuPreviewRenderer:
             height, width, channels = self.crop.pixels.shape
             if self.source_texture is not None:
                 self.source_texture.destroy()
-            texture = QOpenGLTexture(QOpenGLTexture.Target.Target2D)
+            texture: QOpenGLTexture = QOpenGLTexture(QOpenGLTexture.Target.Target2D)
             texture.setSize(width, height)
             texture.setMipLevels(1)
             texture.setMinMagFilters(QOpenGLTexture.Filter.Nearest, QOpenGLTexture.Filter.Nearest)
@@ -386,13 +408,15 @@ class GpuPreviewRenderer:
             texture.allocateStorage(
                 QOpenGLTexture.PixelFormat.RGB, QOpenGLTexture.PixelType.Float32
             )
-            pixels = self.crop.pixels if channels == 3 else np.repeat(self.crop.pixels, 3, axis=2)
+            pixels: FloatArray = (
+                self.crop.pixels if channels == 3 else np.repeat(self.crop.pixels, 3, axis=2)
+            )
             pixels = np.ascontiguousarray(pixels)
-            # Keep the binding pointer object; cast only bridges its void* stub.
-            texture.setData(
+            upload_pixels: UploadPixels = cast(UploadPixels, texture.setData)
+            upload_pixels(
                 QOpenGLTexture.PixelFormat.RGB,
                 QOpenGLTexture.PixelType.Float32,
-                cast(int, VoidPtr(pixels.ctypes.data)),
+                VoidPtr(pixels.ctypes.data),
             )
             self.source_texture, self.texture_key = texture, self.crop_key
         assert self.source_texture is not None
@@ -400,10 +424,10 @@ class GpuPreviewRenderer:
 
     def _correction_buffer(self, mode: int) -> str:
         """Select measured small/large sources, without halo quantity filtering."""
-        name = "reduction" if mode == 4 else "enlargement"
-        key = id(self.catalog)
+        name: str = "reduction" if mode == 4 else "enlargement"
+        key: int = id(self.catalog)
         if self.buffer_keys.get(name) != key:
-            eligible = (self.records[:, 6] > 0) & (self.records[:, 8] > 0)
+            eligible: BoolArray = (self.records[:, 6] > 0) & (self.records[:, 8] > 0)
             eligible &= (
                 self.records[:, 7] < 0.5
                 if mode == 4
@@ -414,30 +438,34 @@ class GpuPreviewRenderer:
 
     def _source_filter(
         self,
-        p: EffectParameters,
+        parameters: EffectParameters,
         region: Bounds,
         sampling: int,
         sky_mask: SkyMask | None,
         cancel: Event | None,
     ) -> tuple[Pixels | None, Pixels | None]:
         """Return bounded corrections for the source pixels before Screen composition."""
-        if not p.enabled or not p.soft_filter or not self.catalog:
+        if not parameters.enabled or not parameters.soft_filter or not self.catalog:
             return None, None
-        key = p.soft_filter, self.crop_key, sky_mask
+        key: SourceFilterKey = (
+            parameters.soft_filter,
+            self.crop_key,
+            sky_mask,
+        )
         if self.reduction_cache is not None and self.reduction_cache[0] == key:
             _, reduction, enlargement = self.reduction_cache
             return reduction, enlargement
         self._bind_source_texture()
         self._uniform("originalImage", 0)
         self._uniform("rayCount", 1)
-        self._uniform("softFilter", float(p.soft_filter / 100))
+        self._uniform("softFilter", float(parameters.soft_filter / 100))
         passes: list[Pixels] = []
         self._gpu.glBlendEquation(0x8008)
         try:
             for mode in (4, 5):
                 check_cancel(cancel)
                 self._uniform("kind", mode)
-                name = self._correction_buffer(mode)
+                name: str = self._correction_buffer(mode)
                 self._attributes(self.buffers[name], 1)
                 self._gpu.glClear(0x4000)
                 self._draw(self.buffer_counts[name], 1)
@@ -470,21 +498,23 @@ class GpuPreviewRenderer:
         self._set_crop(frame, region, sampling)
         self._set_catalog(stars, sky_mask)
         self._initialize()
-        context = self.context
+        context: QOpenGLContext | None = self.context
         assert context is not None
         try:
             self._bind_target()
-            diagonal = image_diagonal(frame.width, frame.height)
+            diagonal: int = image_diagonal(frame.width, frame.height)
             self._view_uniforms(region, sampling, diagonal)
             groups: dict[EffectKind, Pixels] = {}
             for kind in KINDS:
                 check_cancel(cancel)
-                p = getattr(settings, kind)
-                if p.enabled and p.intensity and p.quantity and stars:
-                    group = self._effect_group(kind, p, region, sampling, diagonal, sky_mask)
+                parameters: EffectParameters = getattr(settings, kind)
+                if parameters.enabled and parameters.intensity and parameters.quantity and stars:
+                    group: FloatArray | None = self._effect_group(
+                        kind, parameters, region, sampling, diagonal, sky_mask
+                    )
                     if group is not None:
                         groups[kind] = group
-            effects = np.zeros_like(self.crop.pixels)
+            effects: FloatArray = np.zeros_like(self.crop.pixels)
             for group in groups.values():
                 effects += (1 - effects) * group
             reduction, enlargement = self._source_filter(
@@ -495,7 +525,7 @@ class GpuPreviewRenderer:
                 self.crop,
                 effects,
                 sampling,
-                origin=region[:2],
+                origin=(region[0], region[1]),
                 is_region=is_region,
                 groups=groups,
                 reduction=reduction,

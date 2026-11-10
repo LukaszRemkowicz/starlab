@@ -8,7 +8,7 @@ from typing import cast
 
 import numpy as np
 
-from .array_types import RGB, CandidateRecord, Diagnostics
+from .array_types import RGB, BoolArray, CandidateRecord, Diagnostics
 from .detection.pipeline import analyze
 from .detection.records import MultiscaleRecord
 from .imaging import ImageFrame, check_cancel
@@ -33,18 +33,20 @@ class Star:
     def __post_init__(self) -> None:
         """Validate finite source geometry, RGB measurements and filter weights."""
         if not all(
-            isfinite(v) for v in (self.x, self.y, self.brightness, self.radius, *self.color)
+            isfinite(value) for value in (self.x, self.y, self.brightness, self.radius, *self.color)
         ):
             raise ValueError("Star values must be finite.")
         if self.brightness < 0 or self.radius <= 0 or len(self.color) != 3:
             raise ValueError("Invalid star brightness, radius or color.")
         if not isfinite(self.soft_weight) or not 0 <= self.soft_weight <= 1:
             raise ValueError("Invalid soft filter weight.")
-        if len(self.source_peak) != 3 or not all(isfinite(v) and v >= 0 for v in self.source_peak):
+        if len(self.source_peak) != 3 or not all(
+            isfinite(value) and value >= 0 for value in self.source_peak
+        ):
             raise ValueError("Invalid measured source peak.")
         if self.source_profile and (
             len(self.source_profile) != 10
-            or not all(isfinite(v) for v in self.source_profile)
+            or not all(isfinite(value) for value in self.source_profile)
             or self.source_profile[0] <= 0
         ):
             raise ValueError("Invalid measured source profile.")
@@ -85,7 +87,7 @@ def filter_stars(stars: tuple[Star, ...], sky_mask: SkyMask | None) -> tuple[Sta
     """Keep only sources allowed by the full-image mask, retaining catalogue order."""
     if sky_mask is None or not stars:
         return stars
-    keep = sky_mask.keep(np.array([(star.x, star.y) for star in stars]))
+    keep: BoolArray = sky_mask.keep(np.array([(star.x, star.y) for star in stars]))
     return tuple(star for star, allowed in zip(stars, keep) if allowed)
 
 
@@ -138,12 +140,12 @@ def detect_stars(
         )
     return tuple(
         Star(
-            i + 1,
+            source_index + 1,
             row["x"] - 0.5,
             row["y"] - 0.5,
             row["normalized_brightness"],
             cast(RGB, tuple(row["normalized_rgb"])),
             max(row["size"], 0.25),
         )
-        for i, row in enumerate(rows)
+        for source_index, row in enumerate(rows)
     )

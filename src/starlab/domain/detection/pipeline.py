@@ -27,16 +27,18 @@ from ..array_types import (
     CandidateRecord,
     CoordinateKey,
     Diagnostics,
+    DoubleArray,
     FloatArray,
 )
 from ..imaging import ImageFrame, check_cancel
 from ..sky_mask import SkyMask
 from .candidate import Image, candidate, covered, merge_candidate
 from .catalog import join_catalogs
+from .constants import PREFERRED_SEED_OFFSETS
 from .numeric import normalize_catalog
 from .peaks import peak_positions
 from .proxy import coarse_codes, decode, full_codes, full_proxy, maximum_luminance
-from .records import PreparedTile, ReferenceAttempt, TileKey, TileResult
+from .records import IndexArray, PreparedTile, ReferenceAttempt, TileKey, TileResult
 
 TILE = 1024
 HALO = 272  # Covers native 266-pixel rays and the largest disk/ring support.
@@ -48,18 +50,19 @@ def _tile_region(
     width: int, height: int, left: int, top: int, sky_mask: SkyMask | None, source_scale: int
 ) -> tuple[Bounds, Bounds, BoolArray | None]:
     """Return tile core, clipped halo bounds, and allowed pixels at source scale."""
-    core = (left, top, min(width, left + TILE), min(height, top + TILE))
-    bounds = (
+    core: Bounds = (left, top, min(width, left + TILE), min(height, top + TILE))
+    bounds: Bounds = (
         max(0, left - HALO),
         max(0, top - HALO),
         min(width, core[2] + HALO),
         min(height, core[3] + HALO),
     )
-    allowed = (
+    allowed: None | BoolArray = (
         None
         if sky_mask is None
         else sky_mask.region(
-            cast(Bounds, tuple(v * source_scale for v in bounds)), sampling=source_scale
+            cast(Bounds, tuple(coordinate * source_scale for coordinate in bounds)),
+            sampling=source_scale,
         )
     )
     return core, bounds, allowed
@@ -69,29 +72,29 @@ def peak_positions_reference(
     image: Image, threshold: float, core: Bounds, coarse: bool = False
 ) -> Iterator[tuple[int, int]]:
     """Yield global pixel-index component centers using the full SciPy reference screens."""
-    intensity = image.rgb.max(axis=2)
-    allowed = image.allowed
-    maxima = ndimage.maximum_filter(
-        image.lum if allowed is None else np.where(allowed, image.lum, -np.inf),
+    intensity: FloatArray = image.rgb.max(axis=2)
+    allowed: BoolArray | None = image.allowed
+    maxima: FloatArray = ndimage.maximum_filter(
+        image.luminance if allowed is None else np.where(allowed, image.luminance, -np.inf),
         size=3,
         mode="nearest",
     )
-    floor = ndimage.minimum_filter(
-        image.lum if allowed is None else np.where(allowed, image.lum, np.inf),
+    floor: FloatArray = ndimage.minimum_filter(
+        image.luminance if allowed is None else np.where(allowed, image.luminance, np.inf),
         size=129,
         mode="nearest",
     )
-    support = ndimage.uniform_filter(
+    support: FloatArray = ndimage.uniform_filter(
         ((intensity > threshold * 0.05) & (True if allowed is None else allowed)).astype(
             np.float32
         ),
         size=3,
         mode="constant",
     )
-    selected = (
-        (image.lum == maxima)
+    selected: BoolArray = (
+        (image.luminance == maxima)
         & (intensity >= threshold)
-        & (image.lum - floor >= 0.13)
+        & (image.luminance - floor >= 0.13)
         & (support >= 2.5 / 9)
     )
     if allowed is not None:
@@ -100,41 +103,63 @@ def peak_positions_reference(
         # This pass keeps only size>4. Native98440 requires center maximum>=.75
         # and normalized inner-disk score>=.67. The3x3 mean is a deliberately
         # approximate early screen for that broad bright support, not a rank.
-        selected &= (image.lum >= 0.75) & (
-            ndimage.uniform_filter(image.lum, size=3, mode="nearest") >= 0.6
+        selected &= (image.luminance >= 0.75) & (
+            ndimage.uniform_filter(image.luminance, size=3, mode="nearest") >= 0.6
         )
-        contrast_allowed = None
+        contrast_allowed: BoolArray | None = None
     else:
         # Approximate early screen inspired by the recovered mean-std shape
         # score. A local peak on a textured bright background can satisfy the
         # distant minimum test while having no compact source contrast.
-        values = image.lum if allowed is None else np.where(allowed, image.lum, 0)
-        mean = ndimage.uniform_filter(values, size=7, mode="nearest")
-        square = ndimage.uniform_filter(values**2, size=7, mode="nearest")
+        values: FloatArray = (
+            image.luminance if allowed is None else np.where(allowed, image.luminance, 0)
+        )
+        mean: FloatArray = ndimage.uniform_filter(values, size=7, mode="nearest")
+        square: FloatArray = ndimage.uniform_filter(values**2, size=7, mode="nearest")
         if allowed is not None:
-            count = ndimage.uniform_filter(allowed.astype(np.float32), size=7, mode="nearest")
+            count: FloatArray = ndimage.uniform_filter(
+                allowed.astype(np.float32), size=7, mode="nearest"
+            )
             mean = np.divide(mean, count, out=np.zeros_like(mean), where=count > 0)
             square = np.divide(square, count, out=np.zeros_like(square), where=count > 0)
-        std = np.sqrt(np.maximum(square - mean**2, 0))
-        contrast_allowed = (image.lum >= 0.75) | (image.lum - mean + std >= 0.08)
+        stddev: FloatArray = np.sqrt(np.maximum(square - mean**2, 0))
+        contrast_allowed = (image.luminance >= 0.75) | (image.luminance - mean + stddev >= 0.08)
+    labels: IndexArray
     labels, _ = ndimage.label(selected)
     for region in ndimage.find_objects(labels):
         if region is None:
             continue
-        y = (region[0].start + region[0].stop - 1) // 2
-        x = (region[1].start + region[1].stop - 1) // 2
+        y: int = (region[0].start + region[0].stop - 1) // 2
+        x: int = (region[1].start + region[1].stop - 1) // 2
         if contrast_allowed is not None and not contrast_allowed[y, x]:
             continue
-        x += image.ox
-        y += image.oy
+        x += image.origin_x
+        y += image.origin_y
         if core[0] <= x < core[2] and core[1] <= y < core[3]:
             yield x, y
 
 
+def _reference_attempt(
+    image: Image,
+    x: int,
+    y: int,
+    threshold: float,
+    coarse: bool,
+    excluded: Sequence[CandidateRecord],
+    visited: set[tuple[int, int]],
+) -> ReferenceAttempt | None:
+    """Record one fresh above-threshold seed, including rejected candidates."""
+    if image.rgb[y - image.origin_y, x - image.origin_x].max() < threshold:
+        return None
+    visited.add((x, y))
+    result: CandidateRecord | None = candidate(image, x + 0.5, y + 0.5, coarse, excluded)
+    return y, x, result
+
+
 def _reference_neighbors(
     image: Image,
-    px: int,
-    py: int,
+    peak_x: int,
+    peak_y: int,
     width: int,
     height: int,
     threshold: float,
@@ -144,23 +169,23 @@ def _reference_neighbors(
     visited: set[tuple[int, int]],
 ) -> list[ReferenceAttempt]:
     """Evaluate unvisited neighborhood seeds in native row order."""
-    attempts = []
-    for y in range(max(0, py - neighbor_radius), min(height, py + neighbor_radius + 1)):
-        for x in range(max(0, px - neighbor_radius), min(width, px + neighbor_radius + 1)):
+    attempts: list[tuple[int, int, CandidateRecord | None]] = []
+    for y in range(max(0, peak_y - neighbor_radius), min(height, peak_y + neighbor_radius + 1)):
+        for x in range(max(0, peak_x - neighbor_radius), min(width, peak_x + neighbor_radius + 1)):
             if (x, y) in visited or covered(x + 0.5, y + 0.5, excluded):
                 continue
-            if image.rgb[y - image.oy, x - image.ox].max() < threshold:
-                continue
-            visited.add((x, y))
-            result = candidate(image, x + 0.5, y + 0.5, coarse, excluded)
-            attempts.append((y, x, result))
+            attempt: tuple[int, int, CandidateRecord | None] | None = _reference_attempt(
+                image, x, y, threshold, coarse, excluded, visited
+            )
+            if attempt is not None:
+                attempts.append(attempt)
     return attempts
 
 
 def _reference_attempts(
     image: Image,
-    px: int,
-    py: int,
+    peak_x: int,
+    peak_y: int,
     width: int,
     height: int,
     threshold: float,
@@ -170,38 +195,38 @@ def _reference_attempts(
     visited: set[tuple[int, int]],
 ) -> list[ReferenceAttempt]:
     """Try the preferred basin seeds, then expand only after an accepted candidate."""
-    accepted = False
+    accepted: bool = False
     # A maximum may itself fail the original shape predicate;
     # four adjacent seeds retain the nearby qualifying basin.
-    attempts = []
-    for dx, dy in (
-        (0, 0),
-        (1, 0),
-        (-1, 0),
-        (0, 1),
-        (0, -1),
-        (1, 1),
-        (-1, 1),
-        (-1, -1),
-        (1, -1),
-    ):
-        x, y = px + dx, py + dy
+    attempts: list[tuple[int, int, CandidateRecord | None]] = []
+    for dx, dy in PREFERRED_SEED_OFFSETS:
+        x, y = peak_x + dx, peak_y + dy
         if not (0 <= x < width and 0 <= y < height):
             continue
         if (x, y) in visited:
             continue
-        if image.rgb[y - image.oy, x - image.ox].max() < threshold:
+        attempt: tuple[int, int, CandidateRecord | None] | None = _reference_attempt(
+            image, x, y, threshold, coarse, excluded, visited
+        )
+        if attempt is None:
             continue
-        visited.add((x, y))
-        result = candidate(image, x + 0.5, y + 0.5, coarse, excluded)
-        attempts.append((y, x, result))
-        if result is not None:
+        attempts.append(attempt)
+        if attempt[2] is not None:
             accepted = True
             break
     if accepted:
         attempts.extend(
             _reference_neighbors(
-                image, px, py, width, height, threshold, neighbor_radius, coarse, excluded, visited
+                image,
+                peak_x,
+                peak_y,
+                width,
+                height,
+                threshold,
+                neighbor_radius,
+                coarse,
+                excluded,
+                visited,
             )
         )
     return attempts
@@ -221,15 +246,25 @@ def _scan_reference_tile(
 ) -> tuple[list[CandidateRecord], int, int]:
     """Qualify a reference tile and merge accepted attempts in native seed order."""
     local_rows: list[CandidateRecord] = []
-    maximum_size = 0.0
-    peaks = seeds = 0
-    for px, py in peak_positions_reference(image, threshold, core, coarse):
+    maximum_size: float = 0.0
+    peaks: int = 0
+    seeds: int = 0
+    for peak_x, peak_y in peak_positions_reference(image, threshold, core, coarse):
         peaks += 1
         check_cancel(cancel)
-        if covered(px + 0.5, py + 0.5, excluded):
+        if covered(peak_x + 0.5, peak_y + 0.5, excluded):
             continue
-        attempts = _reference_attempts(
-            image, px, py, width, height, threshold, neighbor_radius, coarse, excluded, visited
+        attempts: list[tuple[int, int, CandidateRecord | None]] = _reference_attempts(
+            image,
+            peak_x,
+            peak_y,
+            width,
+            height,
+            threshold,
+            neighbor_radius,
+            coarse,
+            excluded,
+            visited,
         )
         seeds += len(attempts)
         # Native local merging scans seed rows left-to-right.
@@ -267,15 +302,16 @@ def scan_tiled(
         )
     rows: list[CandidateRecord] = []
     visited: set[tuple[int, int]] = set()
-    peaks = seeds = 0
+    peaks: int = 0
+    seeds: int = 0
     for top in range(0, height, TILE):
         for left in range(0, width, TILE):
-            tile_started = time.monotonic()
+            tile_started: float = time.monotonic()
             check_cancel(cancel)
             core, bounds, allowed = _tile_region(width, height, left, top, sky_mask, source_scale)
             if allowed is not None and not allowed.any():
                 continue
-            image = Image(read_tile(bounds), origin=bounds[:2], allowed=allowed)
+            image: Image = Image(read_tile(bounds), origin=(bounds[0], bounds[1]), allowed=allowed)
             try:
                 local_rows, count_peaks, count_seeds = _scan_reference_tile(
                     image,
@@ -324,16 +360,16 @@ def _prepare_tile(
     source_scale: int,
 ) -> PreparedTile:
     """Read one halo tile and locate peaks without writing shared visitation state."""
-    started = time.monotonic()
+    started: float = time.monotonic()
     check_cancel(token)
     left, top = column * TILE, row * TILE
     core, bounds, allowed = _tile_region(width, height, left, top, sky_mask, source_scale)
     if allowed is not None and not allowed.any():
         return None, [], np.zeros(2)
-    image = Image(read_tile(bounds), origin=bounds[:2], allowed=allowed)
-    converted = time.monotonic()
+    image: Image = Image(read_tile(bounds), origin=(bounds[0], bounds[1]), allowed=allowed)
+    converted: float = time.monotonic()
     try:
-        positions = list(peak_positions(image, threshold, core, coarse))
+        positions: list[tuple[int, int]] = list(peak_positions(image, threshold, core, coarse))
         return image, positions, np.array([converted - started, time.monotonic() - converted])
     except BaseException:
         image.clear_cache()
@@ -356,7 +392,7 @@ def _qualify_tile(
     image, positions, timing = value
     if image is None:
         return [], 0, 0, np.zeros(3)
-    started = time.monotonic()
+    started: float = time.monotonic()
     try:
         local, count = scan_tile(
             image, positions, threshold, neighbor_radius, coarse, excluded, visited, token
@@ -387,15 +423,24 @@ def _wait_tiles(
 ) -> None:
     """Collect completed preparation/qualification work without changing join order."""
     # wait only observes futures; membership below identifies their concrete result layout.
-    pending = cast(Iterable[Future[PreparedTile | TileResult]], (*preparing, *qualifying))
+    pending: Iterable[
+        Future[
+            tuple[Image | None, list[tuple[int, int]], DoubleArray]
+            | tuple[list[CandidateRecord], int, int, DoubleArray]
+        ]
+    ] = cast(Iterable[Future[PreparedTile | TileResult]], (*preparing, *qualifying))
     finished, _ = wait(pending, return_when=FIRST_COMPLETED)
     for future in finished:
         if future in preparing:
-            prepared_future = cast(Future[PreparedTile], future)
+            prepared_future: Future[tuple[Image | None, list[tuple[int, int]], DoubleArray]] = cast(
+                Future[PreparedTile], future
+            )
             prepared[preparing.pop(prepared_future)] = prepared_future.result()
         else:
-            qualified_future = cast(Future[TileResult], future)
-            key = qualifying.pop(qualified_future)
+            qualified_future: Future[tuple[list[CandidateRecord], int, int, DoubleArray]] = cast(
+                Future[TileResult], future
+            )
+            key: tuple[int, int] = qualifying.pop(qualified_future)
             results[key] = qualified_future.result()
             completed.add(key)
 
@@ -439,16 +484,21 @@ def _compiled_tiles(
     source_scale: int,
 ) -> Generator[tuple[int, int, TileResult], None, None]:
     """Schedule bounded tile work and yield completed tiles in row-major join order."""
-    visited = np.zeros((height, width), np.bool_)
+    visited: BoolArray = np.zeros((height, width), np.bool_)
     columns, row_count = (width + TILE - 1) // TILE, (height + TILE - 1) // TILE
-    keys = [(r, c) for r in range(row_count) for c in range(columns)]
+    keys: list[tuple[int, int]] = [
+        (row_index, column_index)
+        for row_index in range(row_count)
+        for column_index in range(columns)
+    ]
     results: dict[TileKey, TileResult] = {}
     completed: set[TileKey] = set()
     preparing: dict[Future[PreparedTile], TileKey] = {}
     prepared: dict[TileKey, PreparedTile] = {}
     qualifying: dict[Future[TileResult], TileKey] = {}
-    next_join = next_prepare = 0
-    prepare = partial(
+    next_join: int = 0
+    next_prepare: int = 0
+    prepare: partial[tuple[Image | None, list[tuple[int, int]], DoubleArray]] = partial(
         _prepare_tile,
         width=width,
         height=height,
@@ -459,7 +509,7 @@ def _compiled_tiles(
         sky_mask=sky_mask,
         source_scale=source_scale,
     )
-    qualify_tile = partial(
+    qualify_tile: partial[tuple[list[CandidateRecord], int, int, DoubleArray]] = partial(
         _qualify_tile,
         threshold=threshold,
         neighbor_radius=neighbor_radius,
@@ -480,7 +530,7 @@ def _compiled_tiles(
                 while next_prepare < len(keys) and len(preparing) + len(prepared) + len(
                     qualifying
                 ) < max(2, WORKERS * 2):
-                    key = keys[next_prepare]
+                    key: tuple[int, int] = keys[next_prepare]
                     preparing[proxy_pool.submit(prepare, *key)] = key
                     next_prepare += 1
                 for key in list(prepared):
@@ -488,7 +538,9 @@ def _compiled_tiles(
                         qualifying[candidate_pool.submit(qualify_tile, prepared.pop(key))] = key
                 _wait_tiles(preparing, qualifying, prepared, results, completed)
                 while divmod(next_join, columns) in results:
-                    value = results.pop(divmod(next_join, columns))
+                    value: tuple[list[CandidateRecord], int, int, DoubleArray] = results.pop(
+                        divmod(next_join, columns)
+                    )
                     yield next_join + 1, len(keys), value
                     next_join += 1
         except BaseException:
@@ -511,13 +563,16 @@ def scan_compiled(
     """Join scheduled compiled tile catalogs deterministically while accumulating phase diagnostics."""
     from .join_fast import join_catalogs_fast
 
-    token = cancel if cancel is not None else Event()
+    token: Event = cancel if cancel is not None else Event()
     rows: list[CandidateRecord] = []
-    peaks = seeds = 0
-    catalog_maximum = 0.0
-    phases = np.zeros(3)
-    join_seconds = 0.0
-    tiles = _compiled_tiles(
+    peaks: int = 0
+    seeds: int = 0
+    catalog_maximum: float = 0.0
+    phases: DoubleArray = np.zeros(3)
+    join_seconds: float = 0.0
+    tiles: Generator[
+        tuple[int, int, tuple[list[CandidateRecord], int, int, DoubleArray]], None, None
+    ] = _compiled_tiles(
         width,
         height,
         read_tile,
@@ -534,7 +589,7 @@ def scan_compiled(
         for next_join, tile_count, value in tiles:
             local, count_peaks, count_seeds, timing = value
             phases += timing
-            joining = time.monotonic()
+            joining: float = time.monotonic()
             catalog_maximum = join_catalogs_fast(rows, local, catalog_maximum)
             join_seconds += time.monotonic() - joining
             peaks += count_peaks
@@ -592,10 +647,15 @@ def _scan_coarse(
 def _normalize_rows(rows: list[CandidateRecord], sky_mask: SkyMask | None) -> list[CandidateRecord]:
     """Apply final mask filtering and one global normalization before catalog sorting."""
     if sky_mask is not None:
-        keep = sky_mask.keep(np.array([(row["x"] - 0.5, row["y"] - 0.5) for row in rows]))
+        keep: BoolArray = sky_mask.keep(
+            np.array([(row["x"] - 0.5, row["y"] - 0.5) for row in rows])
+        )
         rows = [row for row, allowed in zip(rows, keep) if allowed]
     colors, brightness, _ = normalize_catalog(
-        [(r["rgb"], r["size"], r["brightness"]) for r in rows]
+        [
+            (candidate_record["rgb"], candidate_record["size"], candidate_record["brightness"])
+            for candidate_record in rows
+        ]
     )
     for row, color, value in zip(rows, colors, brightness):
         row["normalized_rgb"] = color
@@ -612,20 +672,22 @@ def analyze(
     sky_mask: SkyMask | None = None,
 ) -> tuple[list[CandidateRecord], Diagnostics]:
     """Build globally normalized coarse/full proxies and return source rows plus timing/count diagnostics."""
-    start = time.monotonic()
+    start: float = time.monotonic()
     check_cancel(cancel)
     height, width = frame.pixels.shape[:2]
-    use_coarse = width > 256 or height > 256
-    codes = coarse_codes(frame.pixels, cancel, sky_mask) if use_coarse else full_codes(frame.pixels)
-    scale = 4 if use_coarse else 1
-    allowed = (
+    use_coarse: bool = width > 256 or height > 256
+    codes: ByteArray = (
+        coarse_codes(frame.pixels, cancel, sky_mask) if use_coarse else full_codes(frame.pixels)
+    )
+    scale: int = 4 if use_coarse else 1
+    allowed: None | BoolArray = (
         None
         if sky_mask is None
         else sky_mask.region((0, 0, codes.shape[1] * scale, codes.shape[0] * scale), sampling=scale)
     )
-    denominator = maximum_luminance(codes, cancel, allowed)
+    denominator: float = maximum_luminance(codes, cancel, allowed)
     del allowed
-    proxy_seconds = time.monotonic() - start
+    proxy_seconds: float = time.monotonic() - start
     logger.info(
         "Detector proxy %dx%d: global normalization %.8g; %.2fs",
         codes.shape[1],
@@ -634,24 +696,24 @@ def analyze(
         time.monotonic() - start,
     )
     coarse_rows: list[CandidateRecord] = []
-    coarse_started = time.monotonic()
+    coarse_started: float = time.monotonic()
     coarse_stats: Diagnostics = dict(peaks=0, candidate_seeds=0)
     if use_coarse:
         coarse_rows, coarse_stats = _scan_coarse(
             codes, denominator, threshold, neighbor_radius, cancel, sky_mask
         )
     del codes
-    coarse_seconds = time.monotonic() - coarse_started
+    coarse_seconds: float = time.monotonic() - coarse_started
 
     def full_tile(bounds: Bounds) -> FloatArray:
         """Read a decoded full-resolution RGB tile through the exact selected proxy path."""
         left, top, right, bottom = bounds
-        pixels = frame.pixels[top:bottom, left:right]
+        pixels: FloatArray = frame.pixels[top:bottom, left:right]
         return (
             full_proxy(pixels, denominator) if COMPILED else decode(full_codes(pixels), denominator)
         )
 
-    full_started = time.monotonic()
+    full_started: float = time.monotonic()
     full_rows, full_stats = scan_tiled(
         width,
         height,
@@ -662,8 +724,8 @@ def analyze(
         excluded=coarse_rows,
         sky_mask=sky_mask,
     )
-    rows = coarse_rows + full_rows
-    full_seconds = time.monotonic() - full_started
+    rows: list[CandidateRecord] = coarse_rows + full_rows
+    full_seconds: float = time.monotonic() - full_started
     rows = _normalize_rows(rows, sky_mask)
     return rows, dict(
         seconds=time.monotonic() - start,

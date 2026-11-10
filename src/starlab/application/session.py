@@ -116,14 +116,16 @@ class Session:
         if self.frame is None or not (0 <= x < self.frame.width and 0 <= y < self.frame.height):
             raise ValueError("Place the star inside the image.")
         self._remember()
-        self.stars += (Star(max((s.id for s in self.stars), default=0) + 1, x, y, 1, (1, 1, 1)),)
+        self.stars += (
+            Star(max((star.id for star in self.stars), default=0) + 1, x, y, 1, (1, 1, 1)),
+        )
         self.edited = True
         self._changed()
 
     def edit_star(self, star_id: int, **changes: Unpack[StarChanges]) -> None:
         """Update a source and invalidate measured profiles when its position changes."""
-        current = next(s for s in self.stars if s.id == star_id)
-        updated = replace(current, **changes)
+        current: Star = next(star for star in self.stars if star.id == star_id)
+        updated: Star = replace(current, **changes)
         if (updated.x, updated.y) != (current.x, current.y):
             updated = replace(
                 updated, source_profile=(), source_peak=(0.0, 0.0, 0.0), soft_weight=0.5
@@ -133,7 +135,7 @@ class Session:
         ):
             raise ValueError("Star position must be inside the image.")
         self._remember()
-        self.stars = tuple(updated if s.id == star_id else s for s in self.stars)
+        self.stars = tuple(updated if star.id == star_id else star for star in self.stars)
         self.edited = True
         self._changed()
 
@@ -142,7 +144,7 @@ class Session:
         if not source:
             return False
         target.append(self._state())
-        state = source.pop()
+        state: EditState = source.pop()
         self.settings, self.stars, self.edited = state.settings, state.stars, state.edited
         self.sky_mask = state.sky_mask
         self.detection_settings = state.detection_settings

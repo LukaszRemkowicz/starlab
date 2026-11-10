@@ -17,7 +17,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-from ...domain.effects.settings import KINDS, PARAMETERS, RANGES, EffectSettings
+from ...domain.effects.settings import KINDS, PARAMETERS, RANGES, EffectParameters, EffectSettings
 
 LABELS = {
     "quantity": "Quantity",
@@ -60,7 +60,7 @@ class ParameterControl(QWidget):
         """Build a control using the shared parameter range and display precision."""
         super().__init__(parent)
         self.key = key
-        tips = {
+        tips: dict[str, str] = {
             "quantity": "Brightness threshold for this effect. Higher values include fainter detected sources across the image.",
             "saturation": "0 preserves the source color. Positive values add saturation to this effect.",
             "rainbow": "0 adds no rainbow modulation. Increase to color the rays.",
@@ -69,11 +69,11 @@ class ParameterControl(QWidget):
         if key in tips:
             self.setToolTip(tips[key])
         self.factor = 10 if key == "angle" else 1
-        layout = QVBoxLayout(self)
+        layout: QVBoxLayout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(2)
-        row = QHBoxLayout()
-        label = QLabel(LABELS[key])
+        row: QHBoxLayout = QHBoxLayout()
+        label: QLabel = QLabel(LABELS[key])
         self.spin = QDoubleSpinBox()
         self.spin.setRange(*RANGES[key])
         self.spin.setDecimals(1 if key == "angle" else 0)
@@ -90,7 +90,7 @@ class ParameterControl(QWidget):
         layout.addLayout(row)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setTracking(True)
-        self.slider.setRange(*(int(v * self.factor) for v in RANGES[key]))
+        self.slider.setRange(*(int(boundary * self.factor) for boundary in RANGES[key]))
         self.slider.setAccessibleName(LABELS[key])
         layout.addWidget(self.slider)
         self.spin.valueChanged.connect(self._spin_changed)
@@ -112,7 +112,7 @@ class ParameterControl(QWidget):
 
     def _slider_changed(self, value: int) -> None:
         """Mirror a slider position in parameter units and emit its value once."""
-        numeric = value / self.factor
+        numeric: float = value / self.factor
         with QSignalBlocker(self.spin):
             self.spin.setValue(numeric)
         self.changed.emit(numeric)
@@ -132,13 +132,13 @@ class EffectPanel(QWidget):
         self.controls: dict[str, dict[str, ParameterControl]] = {}
         self.enabled: dict[str, QCheckBox] = {}
         self.source_counts: dict[str, QLabel] = {}
-        layout = QVBoxLayout(self)
+        layout: QVBoxLayout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         self.general = QWidget()
         self.general_box = QVBoxLayout(self.general)
         self.general_box.setContentsMargins(14, 16, 14, 14)
         self.general_box.setSpacing(16)
-        modes = QHBoxLayout()
+        modes: QHBoxLayout = QHBoxLayout()
         modes.setContentsMargins(14, 6, 14, 6)
         self.basic, self.advanced = QRadioButton("Basic"), QRadioButton("Advanced")
         self.advanced.setChecked(True)
@@ -151,8 +151,8 @@ class EffectPanel(QWidget):
         self.tabs.tabBar().setDrawBase(False)
         layout.addWidget(self.tabs)
         self.tabs.addTab(self.general, "General")
-        spikes = QWidget()
-        spike_box = QVBoxLayout(spikes)
+        spikes: QWidget = QWidget()
+        spike_box: QVBoxLayout = QVBoxLayout(spikes)
         spike_box.setContentsMargins(0, 0, 0, 0)
         self.spike_selector = QTabWidget()
         self.spike_selector.setDocumentMode(True)
@@ -160,7 +160,7 @@ class EffectPanel(QWidget):
         spike_box.addWidget(self.spike_selector)
         self.tabs.addTab(spikes, "Spikes")
         for kind in KINDS:
-            scroll = self._effect_group(kind)
+            scroll: QScrollArea = self._effect_group(kind)
             if kind in ("primary", "secondary"):
                 self.spike_selector.addTab(scroll, TITLES[kind])
             else:
@@ -170,20 +170,22 @@ class EffectPanel(QWidget):
 
     def _effect_group(self, kind: str) -> QScrollArea:
         """Build one effect group's toggle, source count, parameter controls and reset."""
-        scroll = QScrollArea()
+        scroll: QScrollArea = QScrollArea()
         scroll.setWidgetResizable(True)
         scroll.setFrameShape(QScrollArea.Shape.NoFrame)
-        body = QWidget()
+        body: QWidget = QWidget()
         body.setObjectName("parameterBody")
-        box = QVBoxLayout(body)
+        box: QVBoxLayout = QVBoxLayout(body)
         box.setContentsMargins(14, 10, 14, 10)
         box.setSpacing(8)
-        toggle = QCheckBox(f"Enable {TITLES[kind].lower()}")
-        toggle.toggled.connect(lambda checked, k=kind: self._change(k, "enabled", checked))
-        header = QHBoxLayout()
+        toggle: QCheckBox = QCheckBox(f"Enable {TITLES[kind].lower()}")
+        toggle.toggled.connect(
+            lambda checked, effect_kind=kind: self._change(effect_kind, "enabled", checked)
+        )
+        header: QHBoxLayout = QHBoxLayout()
         header.addWidget(toggle)
         header.addStretch()
-        count = QLabel("0 sources")
+        count: QLabel = QLabel("0 sources")
         count.setObjectName("muted")
         count.setToolTip(
             "Sources receiving this effect / total detected sources. Quantity changes the brightness cutoff."
@@ -199,18 +201,18 @@ class EffectPanel(QWidget):
         self.enabled[kind] = toggle
         self.controls[kind] = {}
         for key in PARAMETERS[kind]:
-            control = ParameterControl(key)
+            control: ParameterControl = ParameterControl(key)
             control.changed.connect(
-                lambda value, k=kind, p=key: self._change(
-                    k, p, int(value) if p == "points" else value
+                lambda value, effect_kind=kind, parameter_key=key: self._change(
+                    effect_kind, parameter_key, int(value) if parameter_key == "points" else value
                 )
             )
             control.edit_started.connect(self.edit_started)
             control.edit_finished.connect(self.edit_finished)
             box.addWidget(control)
             self.controls[kind][key] = control
-        reset = QPushButton("Reset this group")
-        reset.clicked.connect(lambda checked=False, k=kind: self._reset(k))
+        reset: QPushButton = QPushButton("Reset this group")
+        reset.clicked.connect(lambda checked=False, effect_kind=kind: self._reset(effect_kind))
         box.addWidget(reset)
         box.addStretch()
         scroll.setWidget(body)
@@ -218,7 +220,7 @@ class EffectPanel(QWidget):
 
     def _change(self, kind: str, key: str, value: float | bool) -> None:
         """Replace one immutable parameter group and emit the updated settings snapshot."""
-        group = replace(getattr(self.settings, kind), **{key: value})
+        group: EffectParameters = replace(getattr(self.settings, kind), **{key: value})
         self.settings = replace(self.settings, **{kind: group})
         self.settings_changed.emit(self.settings)
 
@@ -231,7 +233,7 @@ class EffectPanel(QWidget):
         """Reflect a settings snapshot without creating another user edit."""
         self.settings = settings
         for kind in KINDS:
-            group = getattr(settings, kind)
+            group: EffectParameters = getattr(settings, kind)
             with QSignalBlocker(self.enabled[kind]):
                 self.enabled[kind].setChecked(group.enabled)
             for key, control in self.controls[kind].items():

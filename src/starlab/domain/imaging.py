@@ -3,10 +3,10 @@
 from dataclasses import dataclass
 from functools import lru_cache
 from threading import Event
-from typing import Protocol
+from typing import Protocol, cast
 
 import numpy as np
-from numpy.typing import ArrayLike
+from numpy.typing import ArrayLike, NDArray
 
 from .array_types import BoolArray, ByteArray, FloatArray
 
@@ -53,7 +53,7 @@ class ImageFrame:
 
     def __post_init__(self) -> None:
         """Validate working-space values and take an independent read-only copy."""
-        data = np.array(self.pixels, dtype=np.float32, order="C", copy=True)
+        data: Pixels = np.array(self.pixels, dtype=np.float32, order="C", copy=True)
         if data.ndim != 3 or data.shape[2] not in (1, 3) or min(data.shape[:2]) < 2:
             raise ValueError("Expected an H × W × 1 or H × W × 3 image (at least 2 × 2).")
         if not np.isfinite(data).all() or data.min() < 0:
@@ -85,7 +85,7 @@ class ImageFrame:
             raise ValueError("Expected an owned, contiguous float32 image buffer.")
         if color_space not in ("linear-srgb", "linear-gray"):
             raise ValueError("Unsupported working color space.")
-        frame = object.__new__(cls)
+        frame: ImageFrame = object.__new__(cls)
         pixels.flags.writeable = False
         for key, value in (
             ("pixels", pixels),
@@ -127,14 +127,16 @@ def _display_transfer() -> tuple[ByteArray, BoolArray]:
     rounding boundary require the original gamma calculation at display time.
     This does not quantize the source or change any exported pixels.
     """
-    bits = np.arange(1 << 20, dtype=np.uint32) << 12
-    lower = bits.view(np.float32)
-    upper = (bits | 4095).view(np.float32)
-    codes = []
+    # NumPy bit-shift stubs report signed integers for these uint32 operands.
+    bits: NDArray[np.uint32] = cast(NDArray[np.uint32], np.arange(1 << 20, dtype=np.uint32) << 12)
+    lower: Pixels = bits.view(np.float32)
+    upper: Pixels = (bits | 4095).view(np.float32)
+    codes: list[ByteArray] = []
+    values: Pixels
     for values in (lower, upper):
         values = np.nan_to_num(np.clip(values, 0, 1), copy=False)
         codes.append(np.rint(linear_to_srgb(values) * 255).astype(np.uint8))
-    boundaries = codes[0] != codes[1]
+    boundaries: BoolArray = codes[0] != codes[1]
     codes[0].flags.writeable = boundaries.flags.writeable = False
     return codes[0], boundaries
 
@@ -143,12 +145,12 @@ def display_pixels(data: Pixels, color_space: str) -> ByteArray:
     """Quantize working pixels for display without changing the source or export."""
     if color_space != "linear-srgb":
         return np.ascontiguousarray(np.rint(np.clip(data, 0, 1) * 255), dtype=np.uint8)
-    values = np.asarray(data, dtype=np.float32)
+    values: Pixels = np.asarray(data, dtype=np.float32)
     table, boundaries = _display_transfer()
-    index = values.view(np.uint32) >> 12
-    result = table[index]
-    exact = boundaries[index]
+    index: NDArray[np.uint32] = cast(NDArray[np.uint32], values.view(np.uint32) >> 12)
+    result: ByteArray = table[index]
+    exact: BoolArray = boundaries[index]
     if exact.any():
-        encoded = linear_to_srgb(values[exact])
+        encoded: Pixels = linear_to_srgb(values[exact])
         result[exact] = np.rint(np.clip(encoded, 0, 1) * 255).astype(np.uint8)
     return np.ascontiguousarray(result)

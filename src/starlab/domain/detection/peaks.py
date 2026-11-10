@@ -8,24 +8,29 @@ from ..array_types import BoolArray, Bounds, FloatArray, IntArray
 from ..jit import njit
 from .candidate import Image
 from .peak_filters import uniform7_at
+from .records import IndexArray
 
 SPARSE_FLOOR_LIMIT = 256
 
 
 @njit(cache=True, nogil=True)
 def _local_mean(
-    lum: FloatArray, allowed: BoolArray | None, y: int, x: int, radius: int
+    luminance: FloatArray, allowed: BoolArray | None, y: int, x: int, radius: int
 ) -> tuple[np.float32, np.float32, np.float32]:
     """Match uniform_filter's axis order and intermediate float32 arrays."""
-    size = radius * 2 + 1
-    mean = square = count = 0.0
+    size: int = radius * 2 + 1
+    mean: float = 0.0
+    square: float = 0.0
+    count: float = 0.0
     for dx in range(-radius, radius + 1):
-        xx = min(max(x + dx, 0), lum.shape[1] - 1)
-        column = column_square = column_count = 0.0
+        sample_x: int = min(max(x + dx, 0), luminance.shape[1] - 1)
+        column: float = 0.0
+        column_square: float = 0.0
+        column_count: float = 0.0
         for dy in range(-radius, radius + 1):
-            yy = min(max(y + dy, 0), lum.shape[0] - 1)
-            if allowed is None or allowed[yy, xx]:
-                value = lum[yy, xx]
+            sample_y: int = min(max(y + dy, 0), luminance.shape[0] - 1)
+            if allowed is None or allowed[sample_y, sample_x]:
+                value: np.float32 = luminance[sample_y, sample_x]
                 column += float(value)
                 column_square += float(np.float32(value * value))
                 column_count += 1.0
@@ -38,7 +43,7 @@ def _local_mean(
 @njit(cache=True, nogil=True)
 def _select(  # noqa: C901
     rgb: FloatArray,
-    lum: FloatArray,
+    luminance: FloatArray,
     allowed: BoolArray | None,
     threshold: np.float32,
     support_threshold: np.float32,
@@ -46,37 +51,46 @@ def _select(  # noqa: C901
     global_floor: np.float32,
 ) -> tuple[BoolArray, IntArray, int, bool]:
     """Keep the ordered early-rejection/proof cascade together to bound sparse work."""
-    height, width = lum.shape
-    selected = np.zeros((height, width), np.bool_)
-    unresolved = np.empty((SPARSE_FLOOR_LIMIT, 2), np.int64)
-    unresolved_count = 0
-    need_coarse = False
+    height, width = luminance.shape
+    selected: BoolArray = np.zeros((height, width), np.bool_)
+    unresolved: IntArray = np.empty((SPARSE_FLOOR_LIMIT, 2), np.int64)
+    unresolved_count: int = 0
+    need_coarse: bool = False
     for y in range(height):
         for x in range(width):
             if allowed is not None and not allowed[y, x]:
                 continue
             if max(rgb[y, x, 0], rgb[y, x, 1], rgb[y, x, 2]) < threshold:
                 continue
-            value = lum[y, x]
+            value: np.float32 = luminance[y, x]
             # Every allowed local minimum is at least the global minimum,
             # including when the latter belongs to an excluded pixel.
             if np.float32(value - global_floor) < np.float32(0.13):
                 continue
             if coarse and value < np.float32(0.75):
                 continue
-            maximum = True
-            support = 0
-            for yy in range(max(0, y - 1), min(height, y + 2)):
-                for xx in range(max(0, x - 1), min(width, x + 2)):
-                    if allowed is None or allowed[yy, xx]:
-                        if lum[yy, xx] > value:
+            maximum: bool = True
+            support: int = 0
+            sample_y: int
+            for sample_y in range(max(0, y - 1), min(height, y + 2)):
+                sample_x: int
+                for sample_x in range(max(0, x - 1), min(width, x + 2)):
+                    if allowed is None or allowed[sample_y, sample_x]:
+                        if luminance[sample_y, sample_x] > value:
                             maximum = False
-                        if max(rgb[yy, xx, 0], rgb[yy, xx, 1], rgb[yy, xx, 2]) > support_threshold:
+                        if (
+                            max(
+                                rgb[sample_y, sample_x, 0],
+                                rgb[sample_y, sample_x, 1],
+                                rgb[sample_y, sample_x, 2],
+                            )
+                            > support_threshold
+                        ):
                             support += 1
             if not maximum or support < 3:
                 continue
             if coarse:
-                mean, _, _ = _local_mean(lum, None, y, x, 1)
+                mean, _, _ = _local_mean(luminance, None, y, x, 1)
                 # Rolling double sums can round differently at a float32 tie.
                 if abs(float(mean) - 0.6) <= 0.000001:
                     need_coarse = True
@@ -85,13 +99,13 @@ def _select(  # noqa: C901
             # A single qualifying sample proves the 129x129 minimum test.
             # Bounded probes avoid quadratic work on broad flat plateaus;
             # unresolved cases get a complete sparse search below.
-            contrast = False
+            contrast: bool = False
             for dy in (-64, 0, 64):
-                yy = min(max(y + dy, 0), height - 1)
+                sample_y = min(max(y + dy, 0), height - 1)
                 for dx in (-64, 0, 64):
-                    xx = min(max(x + dx, 0), width - 1)
-                    if allowed is None or allowed[yy, xx]:
-                        if np.float32(value - lum[yy, xx]) >= np.float32(0.13):
+                    sample_x = min(max(x + dx, 0), width - 1)
+                    if allowed is None or allowed[sample_y, sample_x]:
+                        if np.float32(value - luminance[sample_y, sample_x]) >= np.float32(0.13):
                             contrast = True
                             break
                 if contrast:
@@ -107,18 +121,18 @@ def _select(  # noqa: C901
 
 @njit(cache=True, nogil=True)
 def _resolve_floor(
-    selected: BoolArray, lum: FloatArray, allowed: BoolArray | None, unresolved: IntArray
+    selected: BoolArray, luminance: FloatArray, allowed: BoolArray | None, unresolved: IntArray
 ) -> None:
     """Evaluate the full minimum predicate only at unproven candidates."""
-    height, width = lum.shape
+    height, width = luminance.shape
     for index in range(len(unresolved)):
         y, x = unresolved[index]
-        value = lum[y, x]
-        contrast = False
-        for yy in range(max(0, y - 64), min(height, y + 65)):
-            for xx in range(max(0, x - 64), min(width, x + 65)):
-                if allowed is None or allowed[yy, xx]:
-                    if np.float32(value - lum[yy, xx]) >= np.float32(0.13):
+        value: np.float32 = luminance[y, x]
+        contrast: bool = False
+        for sample_y in range(max(0, y - 64), min(height, y + 65)):
+            for sample_x in range(max(0, x - 64), min(width, x + 65)):
+                if allowed is None or allowed[sample_y, sample_x]:
+                    if np.float32(value - luminance[sample_y, sample_x]) >= np.float32(0.13):
                         contrast = True
                         break
             if contrast:
@@ -128,30 +142,32 @@ def _resolve_floor(
 
 @njit(cache=True, nogil=True)
 def _contrast(
-    lum: FloatArray, allowed: BoolArray | None, centers: IntArray
+    luminance: FloatArray, allowed: BoolArray | None, centers: IntArray
 ) -> tuple[BoolArray, BoolArray]:
     """Screen compact-source contrast and mark decisions needing exact rolling filters."""
-    keep = np.ones(len(centers), np.bool_)
-    uncertain = np.zeros(len(centers), np.bool_)
+    keep: BoolArray = np.ones(len(centers), np.bool_)
+    uncertain: BoolArray = np.zeros(len(centers), np.bool_)
     for index in range(len(centers)):
         y, x = centers[index]
-        value = lum[y, x]
+        value: np.float32 = luminance[y, x]
         if value >= np.float32(0.75):
             continue
-        mean, square, count = _local_mean(lum, allowed, y, x, 3)
+        square: np.float32
+        mean: np.float32
+        mean, square, count = _local_mean(luminance, allowed, y, x, 3)
         if allowed is not None:
             if count > 0:
                 mean = np.float32(mean / count)
                 square = np.float32(square / count)
             else:
                 mean = square = np.float32(0)
-        variance = np.float32(square - np.float32(mean * mean))
-        std = np.float32(np.sqrt(max(variance, np.float32(0))))
-        score = np.float32(np.float32(value - mean) + std)
+        variance: np.float32 = np.float32(square - np.float32(mean * mean))
+        stddev: np.float32 = np.float32(np.sqrt(max(variance, np.float32(0))))
+        score: np.float32 = np.float32(np.float32(value - mean) + stddev)
         keep[index] = score >= np.float32(0.08)
         # This generous bound includes amplified rounding in masked variance
         # near zero. Only boundary decisions need the full rolling filters.
-        uncertainty = 0.002 * (1 + abs(float(mean)) + abs(float(square)))
+        uncertainty: float = 0.002 * (1 + abs(float(mean)) + abs(float(square)))
         uncertain[index] = not np.isfinite(score) or abs(float(score) - 0.08) <= uncertainty
     return keep, uncertain
 
@@ -160,13 +176,14 @@ def _component_centers(
     selected: NDArray[np.bool_], image: Image, core: tuple[int, int, int, int]
 ) -> list[tuple[int, int]]:
     """Find component bounding-box centers after retaining the complete halo topology."""
+    labels: IndexArray
     labels, _ = ndimage.label(selected)
-    centers = []
+    centers: list[tuple[int, int]] = []
     for region in ndimage.find_objects(labels):
         if region is not None:
-            y = (region[0].start + region[0].stop - 1) // 2
-            x = (region[1].start + region[1].stop - 1) // 2
-            if core[0] <= x + image.ox < core[2] and core[1] <= y + image.oy < core[3]:
+            y: int = (region[0].start + region[0].stop - 1) // 2
+            x: int = (region[1].start + region[1].stop - 1) // 2
+            if core[0] <= x + image.origin_x < core[2] and core[1] <= y + image.origin_y < core[3]:
                 centers.append((y, x))
     return centers
 
@@ -175,42 +192,48 @@ def peak_positions(
     image: Image, threshold: float, core: Bounds, coarse: bool = False
 ) -> list[tuple[int, int]]:
     """Return global component bounding-box centers, retaining halo topology."""
-    lum, allowed = image.lum, image.allowed
+    luminance, allowed = image.luminance, image.allowed
     selected, unresolved, unresolved_count, need_coarse = _select(
         image.rgb,
-        lum,
+        luminance,
         allowed,
         np.float32(threshold),
         np.float32(threshold * 0.05),
         coarse,
-        np.float32(lum.min()),
+        np.float32(luminance.min()),
     )
     # Dense plateaus use the linear-time filter rather than one window per
     # pixel. Sparse cases avoid allocating and filtering an entire tile.
-    if 0 < unresolved_count <= min(SPARSE_FLOOR_LIMIT, max(8, lum.size // 64)):
-        _resolve_floor(selected, lum, allowed, unresolved[:unresolved_count])
+    if 0 < unresolved_count <= min(SPARSE_FLOOR_LIMIT, max(8, luminance.size // 64)):
+        _resolve_floor(selected, luminance, allowed, unresolved[:unresolved_count])
     elif unresolved_count:
-        floor = ndimage.minimum_filter(
-            lum if allowed is None else np.where(allowed, lum, np.inf),
+        floor: FloatArray = ndimage.minimum_filter(
+            luminance if allowed is None else np.where(allowed, luminance, np.inf),
             size=129,
             mode="nearest",
         )
-        selected &= lum - floor >= np.float32(0.13)
+        selected &= luminance - floor >= np.float32(0.13)
     if need_coarse:
-        selected &= ndimage.uniform_filter(lum, size=3, mode="nearest") >= np.float32(0.6)
-    center_list = _component_centers(selected, image, core)
+        selected &= ndimage.uniform_filter(luminance, size=3, mode="nearest") >= np.float32(0.6)
+    center_list: list[tuple[int, int]] = _component_centers(selected, image, core)
     if not center_list:
         return []
-    centers = np.asarray(center_list, dtype=np.int64)
-    keep = np.ones(len(centers), np.bool_)
+    centers: IntArray = np.asarray(center_list, dtype=np.int64)
+    keep: BoolArray = np.ones(len(centers), np.bool_)
     if not coarse:
-        keep, uncertain = _contrast(lum, allowed, centers)
+        keep, uncertain = _contrast(luminance, allowed, centers)
         if uncertain.any():
-            mean, square, count = uniform7_at(lum, allowed, centers[uncertain]).T
+            square: FloatArray
+            mean: FloatArray
+            mean, square, count = uniform7_at(luminance, allowed, centers[uncertain]).T
             if allowed is not None:
                 mean = np.divide(mean, count, out=np.zeros_like(mean), where=count > 0)
                 square = np.divide(square, count, out=np.zeros_like(square), where=count > 0)
             y, x = centers[uncertain].T
-            std = np.sqrt(np.maximum(square - mean**2, 0))
-            keep[uncertain] = (lum[y, x] >= 0.75) | (lum[y, x] - mean + std >= 0.08)
-    return [(int(x) + image.ox, int(y) + image.oy) for (y, x), yes in zip(centers, keep) if yes]
+            stddev: FloatArray = np.sqrt(np.maximum(square - mean**2, 0))
+            keep[uncertain] = (luminance[y, x] >= 0.75) | (luminance[y, x] - mean + stddev >= 0.08)
+    return [
+        (int(x) + image.origin_x, int(y) + image.origin_y)
+        for (y, x), selected in zip(centers, keep)
+        if selected
+    ]

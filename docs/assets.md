@@ -27,7 +27,7 @@ Published TIFF fixtures retain their original pixel arrays and embedded color pr
 ## Secondary appearance pattern
 
 `SECONDARY_RAYS` is one ordered table of 84 `(angle, weight)` pairs in
-`domain/effects/profiles.py`. Angle units are 0.1 degree; weights are integer
+`domain/effects/constants.py`. Angle units are 0.1 degree; weights are integer
 percent before conversion to relative amplitudes. Rotation shifts angles and
 preserves weights/order. CPU geometry and GPU instance counts derive from this
 table; the shader's uniform arrays provide capacity for 84 directions. This

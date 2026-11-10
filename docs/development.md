@@ -26,6 +26,20 @@ Ruff checks selected syntax/import/error rules, import ordering, unused suppress
 
 The Windows quality workflow runs the locked environment, lint, formatting, strict type checking, ordinary tests and wheel build on pushes and pull requests. It follows the [official uv Actions integration](https://docs.astral.sh/uv/guides/integration/github/). A hosted headless test run does not establish hardware shader correctness.
 
+## Naming and local types
+
+Use names that describe a value's role, including inside numerical kernels:
+`candidate_record`, `parameters`, `sample_count`, `origin_x` and `origin_y`.
+Keep conventional coordinate names such as `x` and `y` when their meaning is
+immediate. Do not abbreviate unrelated records, controls or statistics to a
+single letter. Numeric locals carry concrete scalar or NumPy dtype annotations;
+loop and unpacked values may inherit their types from an explicitly typed producer.
+
+`domain/detection/precision.py` owns `round_to_float32`, including its Numba
+overload. This operation deliberately rounds intermediate detector calculations;
+it is not a generic conversion or a constant. Rendering appearance data belongs
+in `domain/effects/constants.py`, including the ordered secondary-ray pattern.
+
 ## Duplicate-code checks
 
 `uv run pylint src/starlab` enables only Pylint's

@@ -69,7 +69,7 @@ class JobRunner(QObject):
         if self.closing:
             return
         self.serial += 1
-        job = Job(self.serial, kind, operation)
+        job: Job = Job(self.serial, kind, operation)
         if self.active is not None:
             self.active.cancel.set()
             self.pending = job
@@ -114,7 +114,7 @@ class JobRunner(QObject):
             if self.cleanup is not None:
                 cleanup, self.cleanup = self.cleanup, None
                 self.pool.start(Job(0, "cleanup", lambda cancel: cleanup()))
-        finished = self.pool.waitForDone(timeout_ms)
+        finished: bool = self.pool.waitForDone(timeout_ms)
         if finished:
             self.shutdown_timer.stop()
         else:

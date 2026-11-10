@@ -6,19 +6,20 @@ import sys
 from PySide6.QtWidgets import QApplication
 
 from .bootstrap import create_window
+from .presentation.qt.main_window import MainWindow
 
 
 def main() -> int:
     """Create the GUI, optionally open an image, and return the Qt event-loop exit code."""
-    parser = argparse.ArgumentParser(
+    parser: argparse.ArgumentParser = argparse.ArgumentParser(
         description="Star Effects Lab — standalone TIFF diffraction effects"
     )
     parser.add_argument("image", nargs="?", help="Optional TIFF image to open")
-    args = parser.parse_args()
-    app = QApplication(sys.argv[:1])
+    args: argparse.Namespace = parser.parse_args()
+    app: QApplication = QApplication(sys.argv[:1])
     app.setApplicationName("Star Effects Lab")
     app.setOrganizationName("Star Effects Lab")
-    window = create_window()
+    window: MainWindow = create_window()
     window.show()
     if args.image and window.controller is not None:
         window.controller.open_path(args.image)

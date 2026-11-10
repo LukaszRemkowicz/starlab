@@ -12,7 +12,7 @@ uv run star-effects-lab
 uv run star-effects-lab 'D:\photos\night-sky.tif'
 ```
 
-An optional image argument opens that file at startup. Without it, use the folder button. The file dialog remembers its last directory. Python 3.12–3.14 is supported by the project metadata; uv selects an appropriate interpreter.
+An optional image argument opens that file at startup. Without it, use the folder button. The file dialog remembers its last directory. Python 3.14 is required; uv selects an appropriate interpreter.
 
 The current desktop preview requires OpenGL 3.3. This checkout has been exercised on Windows. macOS packaging and runtime verification are still pending.
 

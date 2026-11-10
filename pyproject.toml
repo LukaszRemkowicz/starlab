@@ -2,7 +2,7 @@
 name = "star-effects-lab"
 version = "0.1.0"
 description = "Standalone star diffraction effects research application"
-requires-python = ">=3.12,<3.15"
+requires-python = ">=3.14,<3.15"
 dependencies = [
     "PySide6>=6.8,<7",
     "numpy>=2.2,<3",
@@ -39,7 +39,7 @@ qt_api = "pyside6"
 
 [tool.ruff]
 line-length = 100
-target-version = "py312"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E4", "E7", "E9", "F", "I", "C90", "PLR0915", "RUF100", "ANN", "D100", "D101", "D102", "D103", "D104", "D105", "D107"]
@@ -55,7 +55,7 @@ max-statements = 50
 
 [tool.mypy]
 files = ["src/starlab"]
-python_version = "3.12"
+python_version = "3.14"
 strict = true
 ignore_missing_imports = true
 

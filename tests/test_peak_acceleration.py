@@ -68,16 +68,16 @@ def test_sparse_floor_finds_dark_pixel_missed_by_nine_probes(monkeypatch, masked
         allowed[83, 92] = False
         rgb[87, 96] = 0.1
     image = Image(rgb, allowed=allowed)
-    core = (0, 0, image.w, image.h)
+    core = (0, 0, image.width, image.height)
     # Only the center exceeds threshold; all nine probes miss the dark pixel.
     _, unresolved, count, _ = _select(
         image.rgb,
-        image.lum,
+        image.luminance,
         allowed,
         np.float32(0.78),
         np.float32(0.039),
         False,
-        image.lum.min(),
+        image.luminance.min(),
     )
     assert count == 1
     assert tuple(unresolved[0]) == (72, 75)
@@ -97,8 +97,8 @@ def test_colored_low_luminance_candidates_skip_impossible_floor_search(monkeypat
     rgb = np.zeros((141, 151, 3), np.float32)
     rgb[35:105, 35:115, 2] = 0.9
     image = Image(rgb)
-    core = (0, 0, image.w, image.h)
-    assert image.lum.max() < np.float32(0.13)
+    core = (0, 0, image.width, image.height)
+    assert image.luminance.max() < np.float32(0.13)
     assert list(reference_positions(image, 0.2, core)) == []
 
     def unexpected_floor_search(*args, **kwargs):
@@ -187,7 +187,7 @@ def test_real_photo_crop_preserves_peak_positions(name):
             y, x = np.indices(rgb.shape[:2])
             allowed = y < (rgb.shape[0] * 0.7 + x * 0.1)
         image = Image(rgb, origin=(71, 93), allowed=allowed)
-        core = (71, 93, 71 + image.w, 93 + image.h)
+        core = (71, 93, 71 + image.width, 93 + image.height)
         for coarse in (False, True):
             assert peak_positions(image, 0.2, core, coarse) == list(
                 reference_positions(image, 0.2, core, coarse)

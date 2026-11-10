@@ -1,16 +1,16 @@
 """Coordinate immutable previews, original-pixel analysis and protected image export."""
 
-from collections.abc import Callable
-from concurrent.futures import ThreadPoolExecutor
+from collections.abc import Callable, Iterator
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event
 from typing import TypedDict
 
-from ..domain.array_types import Bounds
+from ..domain.array_types import Bounds, DoubleArray, FloatArray
 from ..domain.effects.profiles import image_diagonal, radial_extent
 from ..domain.effects.render import composite, render_effects
-from ..domain.effects.settings import KINDS, EffectKind, EffectSettings
+from ..domain.effects.settings import KINDS, EffectKind, EffectParameters, EffectSettings
 from ..domain.effects.soft_filter import (
     FilterOptions,
     enlargement_records,
@@ -66,15 +66,17 @@ def preview_source_filter(
     """Build independent reduction/enlargement layers on the preview's source grid."""
     if not settings.soft.enabled or not settings.soft.soft_filter:
         return None, None
-    sources = filter_stars(stars, sky_mask)
-    options = FilterOptions(origin=origin, sampling=sampling, sky_mask=sky_mask, cancel=cancel)
-    reduction = star_reduction(
+    sources: tuple[Star, ...] = filter_stars(stars, sky_mask)
+    options: FilterOptions = FilterOptions(
+        origin=origin, sampling=sampling, sky_mask=sky_mask, cancel=cancel
+    )
+    reduction: FloatArray = star_reduction(
         pixels,
         reduction_records(sources),
         settings.soft.soft_filter,
         **options,
     )
-    enlargement = star_enlargement(
+    enlargement: FloatArray = star_enlargement(
         pixels, enlargement_records(sources), settings.soft.soft_filter, **options
     )
     return reduction, enlargement
@@ -122,19 +124,28 @@ def _region_sources(
 ) -> tuple[Star, ...]:
     """Translate contributing sources while retaining the global brightness maximum."""
     left, top, right, bottom = region
-    groups = ((kind, getattr(settings, kind)) for kind in KINDS)
-    active = [(kind, p) for kind, p in groups if p.enabled and p.intensity and p.quantity]
-    cutoff = max((radial_extent(kind, p, diagonal) for kind, p in active), default=0) + 1
-    maximum = max(stars, key=lambda star: star.brightness, default=None)
-    threshold = (
+    groups: Iterator[tuple[EffectKind, EffectParameters]] = (
+        (kind, getattr(settings, kind)) for kind in KINDS
+    )
+    active: list[tuple[EffectKind, EffectParameters]] = [
+        (kind, parameters)
+        for kind, parameters in groups
+        if parameters.enabled and parameters.intensity and parameters.quantity
+    ]
+    cutoff: float = (
+        max((radial_extent(kind, parameters, diagonal) for kind, parameters in active), default=0)
+        + 1
+    )
+    maximum: Star | None = max(stars, key=lambda star: star.brightness, default=None)
+    threshold: float = (
         min(
-            ((1 - p.quantity / 100) ** 2 * maximum.brightness for _, p in active),
+            ((1 - parameters.quantity / 100) ** 2 * maximum.brightness for _, parameters in active),
             default=float("inf"),
         )
         if maximum is not None
         else float("inf")
     )
-    relevant = tuple(
+    relevant: tuple[Star, ...] = tuple(
         star
         for star in stars
         if star.visible
@@ -142,7 +153,9 @@ def _region_sources(
         and left - cutoff <= star.x <= right + cutoff
         and top - cutoff <= star.y <= bottom + cutoff
     )
-    translated = tuple(replace(star, x=star.x - left, y=star.y - top) for star in relevant)
+    translated: tuple[Star, ...] = tuple(
+        replace(star, x=star.x - left, y=star.y - top) for star in relevant
+    )
     if maximum is not None and maximum not in relevant:
         translated += (replace(maximum, x=maximum.x - left, y=maximum.y - top, visible=False),)
     return translated
@@ -160,13 +173,15 @@ def _render_region(
     """Render a source-aligned crop while retaining full-image effect scaling."""
     check_cancel(cancel)
     left, top, right, bottom = _preview_region_bounds(frame, region, sampling)
-    diagonal = image_diagonal(frame.width, frame.height)
-    translated = _region_sources(stars, settings, (left, top, right, bottom), diagonal)
-    view = _RegionView(frame.pixels[top:bottom, left:right])
-    preview_frame = ImageFrame(
+    diagonal: int = image_diagonal(frame.width, frame.height)
+    translated: tuple[Star, ...] = _region_sources(
+        stars, settings, (left, top, right, bottom), diagonal
+    )
+    view: _RegionView = _RegionView(frame.pixels[top:bottom, left:right])
+    preview_frame: ImageFrame = ImageFrame(
         view.pixels[::sampling, ::sampling], frame.name, frame.color_space, frame.note
     )
-    effects = render_effects(
+    effects: FloatArray = render_effects(
         view, translated, settings, cancel, sampling=sampling, diagonal=diagonal
     )
     if sky_mask is not None:
@@ -215,16 +230,18 @@ def render_preview(
             sky_mask,
         )
     # Integer subsampling keeps the coordinate mapping exact and bounds preview memory.
-    limit = 1600
-    scale = max(1, (max(frame.width, frame.height) + limit - 1) // limit)
+    limit: int = 1600
+    scale: int = max(1, (max(frame.width, frame.height) + limit - 1) // limit)
     scale = 1 if full_resolution else min(scale, min(frame.width, frame.height) - 1)
-    preview_frame = (
+    preview_frame: ImageFrame = (
         frame
         if scale == 1
         else ImageFrame(frame.pixels[::scale, ::scale], frame.name, frame.color_space, frame.note)
     )
     mask_option: _MaskOption = {} if sky_mask is None else {"sky_mask": sky_mask}
-    effects = render_effects(frame, stars, settings, cancel, sampling=scale, **mask_option)
+    effects: FloatArray = render_effects(
+        frame, stars, settings, cancel, sampling=scale, **mask_option
+    )
     reduction, enlargement = preview_source_filter(
         preview_frame.pixels, stars, settings, cancel, sampling=scale, sky_mask=sky_mask
     )
@@ -241,11 +258,11 @@ def _apply_export_source_filter(
     sky_mask: SkyMask | None,
 ) -> None:
     """Apply original-pixel corrections in bounded strips before effect composition."""
-    records = reduction_records(filter_stars(stars, sky_mask))
-    large_records = enlargement_records(filter_stars(stars, sky_mask))
+    records: DoubleArray = reduction_records(filter_stars(stars, sky_mask))
+    large_records: DoubleArray = enlargement_records(filter_stars(stars, sky_mask))
     for top in range(0, frame.height, 128):
         check_cancel(cancel)
-        reduction = star_reduction(
+        reduction: FloatArray = star_reduction(
             frame.pixels[top : top + 128],
             records,
             settings.soft.soft_filter,
@@ -253,7 +270,7 @@ def _apply_export_source_filter(
             sky_mask=sky_mask,
             cancel=cancel,
         )
-        enlargement = star_enlargement(
+        enlargement: FloatArray = star_enlargement(
             frame.pixels[top : top + 128],
             large_records,
             settings.soft.soft_filter,
@@ -283,10 +300,10 @@ class ImageServices:
         """Read the image and optional encoded-source mask concurrently under one token."""
         if self.read_mask is None:
             return self.read(source, cancel), None
-        token = cancel if cancel is not None else Event()
+        token: Event = cancel if cancel is not None else Event()
         with ThreadPoolExecutor(max_workers=2, thread_name_prefix="image-open") as pool:
-            image = pool.submit(self.read, source, token)
-            mask = pool.submit(self.read_mask, source, token)
+            image: Future[ImageFrame] = pool.submit(self.read, source, token)
+            mask: Future[SkyMask] = pool.submit(self.read_mask, source, token)
             try:
                 return image.result(), mask.result()
             except BaseException:
@@ -310,11 +327,11 @@ class ImageServices:
         if settings.sky_only and sky_mask is None:
             raise ValueError("Sky mask is unavailable. Disable Sky only to analyze without it.")
         if source is not None and self.load_catalog is not None and not force:
-            cached = self.load_catalog(source, settings)
+            cached: tuple[Star, ...] | None = self.load_catalog(source, settings)
             if cached is not None:
                 check_cancel(cancel)
                 return cached
-        stars = (
+        stars: tuple[Star, ...] = (
             detect_stars(frame, settings, cancel, sky_mask=sky_mask)
             if sky_mask is not None
             else detect_stars(frame, settings, cancel)
@@ -337,8 +354,8 @@ class ImageServices:
         sky_mask: SkyMask | None = None,
     ) -> None:
         """Render full-resolution layers and pass the final pixels to the protected writer."""
-        effects = render_effects(frame, stars, settings, cancel, sky_mask=sky_mask)
-        output = effects if effects_only else composite(frame, effects)
+        effects: FloatArray = render_effects(frame, stars, settings, cancel, sky_mask=sky_mask)
+        output: FloatArray = effects if effects_only else composite(frame, effects)
         if not effects_only and settings.soft.enabled and settings.soft.soft_filter:
             _apply_export_source_filter(output, effects, frame, stars, settings, cancel, sky_mask)
         check_cancel(cancel)

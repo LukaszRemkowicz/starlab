@@ -5,7 +5,8 @@ Image-dependent results are never persisted. Numba caches compiled machine code.
 """
 
 import math
-from collections.abc import Callable, MutableSequence, Sequence
+from _thread import LockType
+from collections.abc import MutableSequence, Sequence
 from contextlib import nullcontext
 from threading import Event, Lock
 
@@ -17,7 +18,7 @@ from numba import (  # type: ignore[attr-defined]  # Public threading_layer is a
     threading_layer,
     types,
 )
-from numba.extending import overload, register_jitable
+from numba.extending import register_jitable
 from numba.typed import Dict, List
 from numpy.typing import NDArray
 
@@ -33,7 +34,16 @@ from ..array_types import (
 from ..jit import njit
 from . import numeric, rays
 from .candidate import Image
-from .records import Buffer, CandidateRow, CompiledStats, IndexArray, SortableAttempts
+from .constants import PREFERRED_SEED_OFFSETS
+from .precision import round_to_float32
+from .records import (
+    CacheKey,
+    CandidateRow,
+    CompiledStats,
+    DetectionTile,
+    IndexArray,
+    SortableAttempts,
+)
 
 Stats = CompiledStats
 # These external runtime descriptors mirror the checked Python tuple/NamedTuple layouts.
@@ -47,30 +57,17 @@ MAX_CANDIDATE_COORDS = 262144
 _WORKQUEUE_LOCK = Lock()
 
 
-# Numba compares overload/implementation Parameters, including annotations.
-# Both value parameters must stay unannotated despite their different runtime roles.
-@overload(rays.f)
-def _rounded(value) -> Callable[[float], np.float64]:  # type: ignore[no-untyped-def]  # noqa: ANN001
-    """Provide the float32-rounding overload for a Numba scalar type."""
-
-    def impl(value) -> np.float64:  # type: ignore[no-untyped-def]  # noqa: ANN001
-        """Round a compiled scalar to float32 and widen its storage to float64."""
-        return np.float64(np.float32(value))
-
-    return impl
-
-
 for _name in (
-    "add",
-    "sub",
-    "mul",
-    "div",
-    "total",
+    "add_float32",
+    "subtract_float32",
+    "multiply_float32",
+    "divide_float32",
+    "sum_float32",
     "luma",
     "inside",
     "neighbor_mean",
-    "_recenter",
-    "_repair_extents",
+    "recenter",
+    "repair_extents",
     "repair_recenter",
 ):
     register_jitable(getattr(rays, _name))
@@ -78,26 +75,28 @@ for _name in (
     "quarter_position",
     "quarter_size",
     "small_size",
+    "small_size_step",
+    "size_refinement_done",
+    "combine_variance_lanes",
     "preliminary_shape",
     "final_shape",
     "large_size_step",
     "refinement_result",
 ):
     register_jitable(getattr(numeric, _name))
-f = rays.f
 
 
-def make_image(image: Image) -> Buffer:
+def make_image(image: Image) -> DetectionTile:
     """Build contiguous decoded RGB/luma/mask arrays and empty per-tile typed caches."""
-    allowed = (
+    allowed: BoolArray = (
         np.empty((0, 0), np.bool_) if image.allowed is None else np.ascontiguousarray(image.allowed)
     )
-    return Buffer(
+    return DetectionTile(
         np.ascontiguousarray(image.rgb),
-        np.ascontiguousarray(image.lum),
+        np.ascontiguousarray(image.luminance),
         allowed,
-        image.ox,
-        image.oy,
+        image.origin_x,
+        image.origin_y,
         Dict.empty(KEY, STAT_TYPE),
         Dict.empty(KEY, COLOR_TYPE),
     )
@@ -116,24 +115,29 @@ def scan_tile(
     """Qualify global pixel-index peaks, optionally preparing candidates in parallel blocks."""
     from ..imaging import check_cancel
 
-    im = make_image(image)
-    old = np.array([(r["x"], r["y"], r["size"]) for r in excluded], np.float64).reshape(-1, 3)
+    tile: DetectionTile = make_image(image)
+    excluded_sources: DoubleArray = np.array(
+        [(record["x"], record["y"], record["size"]) for record in excluded], np.float64
+    ).reshape(-1, 3)
     rows: MutableSequence[CandidateRow] = List.empty_list(ROW_TYPE)
     maximum, seeds = 0.0, 0
-    positions = np.asarray(peaks, np.int64).reshape(-1, 2)
+    positions: IntArray = np.asarray(peaks, np.int64).reshape(-1, 2)
     if len(positions) >= PARALLEL_MIN_PEAKS:
-        indices, coords = candidate_indices(
-            im, positions, threshold, neighbor_radius, visited.shape, MAX_CANDIDATE_COORDS
+        indices: IndexArray
+        indices, coordinates = candidate_indices(
+            tile, positions, threshold, neighbor_radius, visited.shape, MAX_CANDIDATE_COORDS
         )
         set_num_threads(min(4, get_num_threads()))
-        records = np.empty((len(coords), 8))
-        for start in range(0, len(coords), 8192):
+        records: DoubleArray = np.empty((len(coordinates), 8))
+        for start in range(0, len(coordinates), 8192):
             check_cancel(cancel)
             # OpenMP/TBB support concurrent callers; workqueue needs serialization.
-            guard = _WORKQUEUE_LOCK if threading_layer() == "workqueue" else nullcontext()
+            guard: LockType | nullcontext[None] = (
+                _WORKQUEUE_LOCK if threading_layer() == "workqueue" else nullcontext()
+            )
             with guard:
                 records[start : start + 8192] = evaluate_candidates(
-                    im, coords[start : start + 8192], coarse, old
+                    tile, coordinates[start : start + 8192], coarse, excluded_sources
                 )
     else:
         indices = np.empty((0, 0), np.int32)
@@ -141,12 +145,12 @@ def scan_tile(
     for start in range(0, len(positions), 128):
         check_cancel(cancel)
         maximum, count = scan_block(
-            im,
+            tile,
             positions[start : start + 128],
             threshold,
             neighbor_radius,
             coarse,
-            old,
+            excluded_sources,
             visited,
             rows,
             maximum,
@@ -155,15 +159,22 @@ def scan_tile(
         )
         seeds += count
     result: list[CandidateRecord] = [
-        dict(x=r[0], y=r[1], size=r[2], brightness=r[3], rgb=list(r[4:7]), count=int(r[7]))
-        for r in rows
+        CandidateRecord(
+            x=record[0],
+            y=record[1],
+            size=record[2],
+            brightness=record[3],
+            rgb=list(record[4:7]),
+            count=int(record[7]),
+        )
+        for record in rows
     ]
     return result, seeds
 
 
 @njit(cache=True, nogil=True)
 def candidate_indices(
-    im: Buffer,
+    tile: DetectionTile,
     positions: IntArray,
     threshold: float,
     radius: int,
@@ -171,57 +182,76 @@ def candidate_indices(
     budget: int,
 ) -> tuple[IndexArray, IntArray]:
     """Index above-threshold neighboring pixel seeds within the bounded eager budget."""
-    indices = np.full(im.lum.shape, -1, np.int32)
+    indices: IndexArray = np.full(tile.luminance.shape, -1, np.int32)
     radius = max(1, radius)
-    for px, py in positions:
-        for y in range(max(0, py - radius), min(shape[0], py + radius + 1)):
-            for x in range(max(0, px - radius), min(shape[1], px + radius + 1)):
-                ix, iy = x - im.ox, y - im.oy
-                if im.rgb[iy, ix].max() >= threshold:
-                    indices[iy, ix] = 0
-    count = np.count_nonzero(indices >= 0)
-    if count > budget:
+    for peak_x, peak_y in positions:
+        for y in range(max(0, peak_y - radius), min(shape[0], peak_y + radius + 1)):
+            for x in range(max(0, peak_x - radius), min(shape[1], peak_x + radius + 1)):
+                pixel_x, pixel_y = x - tile.origin_x, y - tile.origin_y
+                if tile.rgb[pixel_y, pixel_x].max() >= threshold:
+                    indices[pixel_y, pixel_x] = 0
+    candidate_count: np.intp = np.count_nonzero(indices >= 0)
+    if candidate_count > budget:
         # Scheduling fallback only: avoid retaining unbounded eager records.
         return np.empty((0, 0), np.int32), np.empty((0, 2), np.int64)
-    coords = np.empty((count, 2), np.int64)
-    offset = 0
+    coordinates: IntArray = np.empty((candidate_count, 2), np.int64)
+    offset: int = 0
     for y in range(indices.shape[0]):
         for x in range(indices.shape[1]):
             if indices[y, x] >= 0:
                 indices[y, x] = offset
-                coords[offset, 0], coords[offset, 1] = x + im.ox, y + im.oy
+                coordinates[offset, 0], coordinates[offset, 1] = (
+                    x + tile.origin_x,
+                    y + tile.origin_y,
+                )
                 offset += 1
-    return indices, coords
+    return indices, coordinates
 
 
 @njit(cache=True, nogil=True, parallel=True)
 def evaluate_candidates(
-    im: Buffer, coords: IntArray, coarse: bool, excluded: DoubleArray
+    tile: DetectionTile, coordinates: IntArray, coarse: bool, excluded: DoubleArray
 ) -> DoubleArray:
     """Evaluate global integer seeds into N×8 rows; rejected candidates retain NaN X."""
-    records = np.full((len(coords), 8), np.nan)
-    for block in prange((len(coords) + 255) // 256):
-        local = Buffer(
-            im.rgb,
-            im.lum,
-            im.allowed,
-            im.ox,
-            im.oy,
+    records: DoubleArray = np.full((len(coordinates), 8), np.nan)
+    for block in prange((len(coordinates) + 255) // 256):
+        local_tile: DetectionTile = DetectionTile(
+            tile.rgb,
+            tile.luminance,
+            tile.allowed,
+            tile.origin_x,
+            tile.origin_y,
             Dict.empty(KEY, STAT_TYPE),
             Dict.empty(KEY, COLOR_TYPE),
         )
-        for i in range(block * 256, min((block + 1) * 256, len(coords))):
-            result = qualify(local, coords[i, 0] + 0.5, coords[i, 1] + 0.5, coarse, excluded)
+        for candidate_index in range(block * 256, min((block + 1) * 256, len(coordinates))):
+            result: CandidateRow | None = qualify(
+                local_tile,
+                coordinates[candidate_index, 0] + 0.5,
+                coordinates[candidate_index, 1] + 0.5,
+                coarse,
+                excluded,
+            )
             if result is not None:
-                x, y, size, brightness, r, g, b, count = result
-                records[i, 0], records[i, 1], records[i, 2], records[i, 3] = x, y, size, brightness
-                records[i, 4], records[i, 5], records[i, 6], records[i, 7] = r, g, b, count
+                x, y, size, brightness, red, green, blue, count = result
+                (
+                    records[candidate_index, 0],
+                    records[candidate_index, 1],
+                    records[candidate_index, 2],
+                    records[candidate_index, 3],
+                ) = x, y, size, brightness
+                (
+                    records[candidate_index, 4],
+                    records[candidate_index, 5],
+                    records[candidate_index, 6],
+                    records[candidate_index, 7],
+                ) = red, green, blue, count
     return records
 
 
 @njit(cache=True)
 def prepared_candidate(
-    im: Buffer,
+    tile: DetectionTile,
     x: int,
     y: int,
     coarse: bool,
@@ -231,53 +261,80 @@ def prepared_candidate(
 ) -> CandidateRow | None:
     """Read a prepared global seed result, or qualify it when eager preparation fell back."""
     if indices.size == 0:
-        return qualify(im, x + 0.5, y + 0.5, coarse, excluded)
-    index = indices[y - im.oy, x - im.ox]
+        return qualify(tile, x + 0.5, y + 0.5, coarse, excluded)
+    index: np.int32 = indices[y - tile.origin_y, x - tile.origin_x]
     if index < 0 or np.isnan(records[index, 0]):
         return None
-    row = records[index]
+    row: DoubleArray = records[index]
     return (row[0], row[1], row[2], row[3], row[4], row[5], row[6], row[7])
 
 
 @njit(cache=True)
-def merge(rows: MutableSequence[CandidateRow], new: CandidateRow, maximum: float) -> float:
+def merge(
+    rows: MutableSequence[CandidateRow], incoming_row: CandidateRow, maximum_size: float
+) -> float:
     """Merge a fresh seed with the first backward overlap and retain sorted insertion."""
-    threshold = f(new[1] - f(max(new[2], maximum) + 1))
-    for i in range(len(rows) - 1, -1, -1):
-        old = rows[i]
-        if old[1] < threshold:
+    minimum_y: float = round_to_float32(
+        incoming_row[1] - round_to_float32(max(incoming_row[2], maximum_size) + 1)
+    )
+    for row_index in range(len(rows) - 1, -1, -1):
+        existing_row: CandidateRow = rows[row_index]
+        if existing_row[1] < minimum_y:
             break
-        dx, dy = f(old[0] - new[0]), f(old[1] - new[1])
-        if f(f(dx * dx) + f(dy * dy)) < max(f(old[2] ** 2), f(new[2] ** 2)):
-            count = min(max(old[7], 1.0) + 1, 255.0)
-            weight = f(1 / count)
-            remain = f(1 - weight)
-            row = tuple8(old, new, remain, weight, count)
-            rows[i] = row
-            return max(maximum, row[2])
-    index = len(rows)
-    while index and new[1] <= rows[index - 1][1]:
-        index -= 1
-    rows.insert(index, new)
-    return max(maximum, new[2])
+        dx, dy = (
+            round_to_float32(existing_row[0] - incoming_row[0]),
+            round_to_float32(existing_row[1] - incoming_row[1]),
+        )
+        if round_to_float32(round_to_float32(dx * dx) + round_to_float32(dy * dy)) < max(
+            round_to_float32(existing_row[2] ** 2), round_to_float32(incoming_row[2] ** 2)
+        ):
+            observation_count: float = min(max(existing_row[7], 1.0) + 1, 255.0)
+            incoming_weight: float = round_to_float32(1 / observation_count)
+            existing_weight: float = round_to_float32(1 - incoming_weight)
+            row: CandidateRow = blend_row(
+                existing_row, incoming_row, existing_weight, incoming_weight, observation_count
+            )
+            rows[row_index] = row
+            return max(maximum_size, row[2])
+    insertion_index: int = len(rows)
+    while insertion_index and incoming_row[1] <= rows[insertion_index - 1][1]:
+        insertion_index -= 1
+    rows.insert(insertion_index, incoming_row)
+    return max(maximum_size, incoming_row[2])
 
 
 @njit(cache=True)
-def tuple8(
-    a: CandidateRow, b: CandidateRow, remain: float, weight: float, count: float
+def blend_row(
+    existing: CandidateRow,
+    incoming: CandidateRow,
+    existing_weight: float,
+    incoming_weight: float,
+    observation_count: float,
 ) -> CandidateRow:
     """Blend seven measured fields with float32 rounding and store the updated count."""
-    values = np.empty(7)
-    for i in range(7):
-        values[i] = f(f(a[i] * remain) + f(b[i] * weight))
-    return (values[0], values[1], values[2], values[3], values[4], values[5], values[6], count)
+    blended_fields: DoubleArray = np.empty(7)
+    for field_index in range(7):
+        blended_fields[field_index] = round_to_float32(
+            round_to_float32(existing[field_index] * existing_weight)
+            + round_to_float32(incoming[field_index] * incoming_weight)
+        )
+    return (
+        blended_fields[0],
+        blended_fields[1],
+        blended_fields[2],
+        blended_fields[3],
+        blended_fields[4],
+        blended_fields[5],
+        blended_fields[6],
+        observation_count,
+    )
 
 
 @njit(cache=True, nogil=True)
 def _neighbor_attempts(
-    im: Buffer,
-    px: int,
-    py: int,
+    tile: DetectionTile,
+    peak_x: int,
+    peak_y: int,
     threshold: float,
     neighbor_radius: int,
     coarse: bool,
@@ -288,26 +345,50 @@ def _neighbor_attempts(
     attempts: SortableAttempts,
 ) -> int:
     """Append accepted neighborhood seeds in row order and return all evaluated seeds."""
-    seeds = 0
+    seeds: int = 0
     height, width = visited.shape
-    for y in range(max(0, py - neighbor_radius), min(height, py + neighbor_radius + 1)):
-        for x in range(max(0, px - neighbor_radius), min(width, px + neighbor_radius + 1)):
+    for y in range(max(0, peak_y - neighbor_radius), min(height, peak_y + neighbor_radius + 1)):
+        for x in range(max(0, peak_x - neighbor_radius), min(width, peak_x + neighbor_radius + 1)):
             if visited[y, x] or covered(x + 0.5, y + 0.5, excluded):
                 continue
-            if im.rgb[y - im.oy, x - im.ox].max() < threshold:
+            if tile.rgb[y - tile.origin_y, x - tile.origin_x].max() < threshold:
                 continue
             visited[y, x] = True
             seeds += 1
-            result = prepared_candidate(im, x, y, coarse, excluded, indices, records)
+            result: CandidateRow | None = prepared_candidate(
+                tile, x, y, coarse, excluded, indices, records
+            )
             if result is not None:
-                sx, sy, ss, sb, sr, sg, sc, sn = result
-                attempts.append((float(y), float(x), sx, sy, ss, sb, sr, sg, sc, sn))
+                (
+                    source_x,
+                    source_y,
+                    source_size,
+                    source_brightness,
+                    source_red,
+                    source_green,
+                    source_blue,
+                    source_count,
+                ) = result
+                attempts.append(
+                    (
+                        float(y),
+                        float(x),
+                        source_x,
+                        source_y,
+                        source_size,
+                        source_brightness,
+                        source_red,
+                        source_green,
+                        source_blue,
+                        source_count,
+                    )
+                )
     return seeds
 
 
 @njit(cache=True, nogil=True)
 def scan_block(
-    im: Buffer,
+    tile: DetectionTile,
     peaks: IntArray,
     threshold: float,
     neighbor_radius: int,
@@ -320,34 +401,57 @@ def scan_block(
     records: DoubleArray,
 ) -> tuple[float, int]:
     """Process at most one cancellation block of peaks using native attempt/merge order."""
-    seeds = 0
+    seeds: int = 0
     height, width = visited.shape
-    directions = ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (-1, -1), (1, -1))
-    for p in range(len(peaks)):
-        px, py = peaks[p, 0], peaks[p, 1]
-        if covered(px + 0.5, py + 0.5, excluded):
+    for peak_index in range(len(peaks)):
+        peak_x, peak_y = peaks[peak_index, 0], peaks[peak_index, 1]
+        if covered(peak_x + 0.5, peak_y + 0.5, excluded):
             continue
         attempts: SortableAttempts = List.empty_list(ATTEMPT_TYPE)
-        accepted = False
-        for direction in directions:
-            x, y = px + direction[0], py + direction[1]
+        accepted: bool = False
+        for direction in PREFERRED_SEED_OFFSETS:
+            x, y = peak_x + direction[0], peak_y + direction[1]
             if not (0 <= x < width and 0 <= y < height) or visited[y, x]:
                 continue
-            if im.rgb[y - im.oy, x - im.ox].max() < threshold:
+            if tile.rgb[y - tile.origin_y, x - tile.origin_x].max() < threshold:
                 continue
             visited[y, x] = True
             seeds += 1
-            result = prepared_candidate(im, x, y, coarse, excluded, indices, records)
+            result: CandidateRow | None = prepared_candidate(
+                tile, x, y, coarse, excluded, indices, records
+            )
             if result is not None:
-                sx, sy, ss, sb, sr, sg, sc, sn = result
-                attempts.append((float(y), float(x), sx, sy, ss, sb, sr, sg, sc, sn))
+                (
+                    source_x,
+                    source_y,
+                    source_size,
+                    source_brightness,
+                    source_red,
+                    source_green,
+                    source_blue,
+                    source_count,
+                ) = result
+                attempts.append(
+                    (
+                        float(y),
+                        float(x),
+                        source_x,
+                        source_y,
+                        source_size,
+                        source_brightness,
+                        source_red,
+                        source_green,
+                        source_blue,
+                        source_count,
+                    )
+                )
                 accepted = True
                 break
         if accepted:
             seeds += _neighbor_attempts(
-                im,
-                px,
-                py,
+                tile,
+                peak_x,
+                peak_y,
                 threshold,
                 neighbor_radius,
                 coarse,
@@ -366,53 +470,70 @@ def scan_block(
 
 
 @njit(cache=True)
-def inside(im: Buffer, x: float, y: float) -> bool:
+def inside(tile: DetectionTile, x: float, y: float) -> bool:
     """Test global coordinates against the compiled tile bounds."""
-    width: int = im.rgb.shape[1]
-    height: int = im.rgb.shape[0]
-    return im.ox <= x < im.ox + width and im.oy <= y < im.oy + height
+    width: int = tile.rgb.shape[1]
+    height: int = tile.rgb.shape[0]
+    return (
+        tile.origin_x <= x < tile.origin_x + width and tile.origin_y <= y < tile.origin_y + height
+    )
 
 
 @njit(cache=True)
-def sample(im: Buffer, x: float, y: float) -> RGBA:
+def sample(tile: DetectionTile, x: float, y: float) -> RGBA:
     """Read a native-truncated RGB sample; invalid or excluded samples have zero alpha."""
-    ix, iy = int(x) - im.ox, int(y) - im.oy
-    if not (0 <= ix < im.rgb.shape[1] and 0 <= iy < im.rgb.shape[0]):
-        return (0.0, 0.0, 0.0, 0.0)
-    if im.allowed.size and not im.allowed[iy, ix]:
-        return (0.0, 0.0, 0.0, 0.0)
-    return (float(im.rgb[iy, ix, 0]), float(im.rgb[iy, ix, 1]), float(im.rgb[iy, ix, 2]), 1.0)
+    pixel_x, pixel_y = int(x) - tile.origin_x, int(y) - tile.origin_y
+    if not (0 <= pixel_x < tile.rgb.shape[1] and 0 <= pixel_y < tile.rgb.shape[0]):
+        return 0.0, 0.0, 0.0, 0.0
+    if tile.allowed.size and not tile.allowed[pixel_y, pixel_x]:
+        return 0.0, 0.0, 0.0, 0.0
+    return (
+        float(tile.rgb[pixel_y, pixel_x, 0]),
+        float(tile.rgb[pixel_y, pixel_x, 1]),
+        float(tile.rgb[pixel_y, pixel_x, 2]),
+        1.0,
+    )
 
 
 @njit(cache=True)
 def support(
-    im: Buffer, x: float, y: float, index: int, ring: bool
+    tile: DetectionTile, x: float, y: float, index: int, ring: bool
 ) -> tuple[FloatArray, FloatArray, FloatArray]:
     """Enumerate allowed disk/ring weights, luminance, and RGB in native square order."""
-    ix, iy = math.floor(x), math.floor(y)
-    cx, cy = (x - ix) - 0.5, (y - iy) - 0.5
-    radius = index * 0.25
-    extent = int(f(f(radius + cx) + f(1.65))) if ring else int(f(f(radius + f(0.6)) + cx))
+    pixel_x, pixel_y = math.floor(x), math.floor(y)
+    phase_x, phase_y = (x - pixel_x) - 0.5, (y - pixel_y) - 0.5
+    radius: float = index * 0.25
+    extent: int = (
+        int(round_to_float32(round_to_float32(radius + phase_x) + round_to_float32(1.65)))
+        if ring
+        else int(round_to_float32(round_to_float32(radius + round_to_float32(0.6)) + phase_x))
+    )
     lower, upper = (-extent, extent + 1) if ring else (-extent - 1, extent + 2)
-    capacity = (upper - lower) ** 2
-    weights = np.empty(capacity, np.float32)
-    values = np.empty(capacity, np.float32)
-    colors = np.empty((capacity, 3), np.float32)
-    n = 0
+    capacity: int = (upper - lower) ** 2
+    weights: FloatArray = np.empty(capacity, dtype=np.float32)
+    luminance_samples: FloatArray = np.empty(capacity, dtype=np.float32)
+    color_samples: FloatArray = np.empty((capacity, 3), dtype=np.float32)
+    sample_count: int = 0
     for dy in range(lower, upper):
-        yy = dy + iy - im.oy
-        if not 0 <= yy < im.rgb.shape[0]:
+        sample_y: int = dy + pixel_y - tile.origin_y
+        if not 0 <= sample_y < tile.rgb.shape[0]:
             continue
         for dx in range(lower, upper):
-            xx = dx + ix - im.ox
-            if not 0 <= xx < im.rgb.shape[1] or (im.allowed.size and not im.allowed[yy, xx]):
+            sample_x: int = dx + pixel_x - tile.origin_x
+            if not 0 <= sample_x < tile.rgb.shape[1] or (
+                tile.allowed.size and not tile.allowed[sample_y, sample_x]
+            ):
                 continue
-            ax, ay = np.float32(dx - cx), np.float32(dy - cy)
-            distance = np.float32(math.sqrt(np.float32(np.float32(ax * ax) + np.float32(ay * ay))))
+            offset_x, offset_y = np.float32(dx - phase_x), np.float32(dy - phase_y)
+            distance: np.float32 = np.float32(
+                math.sqrt(
+                    np.float32(np.float32(offset_x * offset_x) + np.float32(offset_y * offset_y))
+                )
+            )
             # NumPy stubs lose the concrete mixed float/float32 min/max result.
             # Keep the recovered rounding expression rather than changing its arithmetic.
             if ring:
-                weight = np.float32(
+                weight: np.float32 = np.float32(
                     max(  # type: ignore[arg-type]
                         0.0,
                         np.float32(
@@ -423,182 +544,258 @@ def support(
                 )
             else:
                 weight = np.float32(
-                    min(1.0, max(0.0, np.float32(np.float32(radius + f(0.6)) - distance)))  # type: ignore[arg-type]
+                    min(
+                        1.0,
+                        max(0.0, np.float32(np.float32(radius + round_to_float32(0.6)) - distance)),
+                    )  # type: ignore[arg-type]
                 )
             if weight > 0:
-                weights[n], values[n] = weight, im.lum[yy, xx]
-                colors[n] = im.rgb[yy, xx]
-                n += 1
-    return weights[:n], values[:n], colors[:n]
+                weights[sample_count], luminance_samples[sample_count] = (
+                    weight,
+                    tile.luminance[sample_y, sample_x],
+                )
+                color_samples[sample_count] = tile.rgb[sample_y, sample_x]
+                sample_count += 1
+    return weights[:sample_count], luminance_samples[:sample_count], color_samples[:sample_count]
 
 
 @njit(cache=True)
 def lane_sum(values: FloatArray) -> float:
     """Reduce eight float32 accumulation lanes in the recovered native combination order."""
-    count = len(values) // 8 * 8
-    lanes = np.zeros(8, np.float32)
-    for i in range(count):
-        lane = i % 8
-        lanes[lane] = np.float32(lanes[lane] + values[i])
-    if count:
-        combined = lanes[:4] + lanes[4:]
-        result = f(
-            f(float(combined[2]) + float(combined[0])) + f(float(combined[3]) + float(combined[1]))
-        )
+    lane_count: int = len(values) // 8 * 8
+    lanes: FloatArray = np.zeros(8, np.float32)
+    for value_index in range(lane_count):
+        lane: int = value_index % 8
+        lanes[lane] = np.float32(lanes[lane] + values[value_index])
+    if lane_count:
+        result: float = numeric.combine_variance_lanes(lanes)
     else:
         result = 0.0
-    for i in range(count, len(values)):
-        result = f(result + float(values[i]))
+    for value_index in range(lane_count, len(values)):
+        result = round_to_float32(result + float(values[value_index]))
     return result
 
 
 @njit(cache=True)
-def stats(im: Buffer, x: float, y: float, index: int, ring: bool = False) -> CompiledStats | None:
+def stats(
+    tile: DetectionTile, x: float, y: float, index: int, ring: bool = False
+) -> CompiledStats | None:
     """Return quarter-position weighted statistics; indices outside [0,1056) are invalid."""
     if not 0 <= index < 1056:
         return None
-    key = (int(math.floor(x * 4)), int(math.floor(y * 4)), index, int(ring))
-    if key in im.stats:
-        return im.stats[key]
-    weights, values, _ = support(im, key[0] * 0.25, key[1] * 0.25, index, ring)
-    total, weighted = np.float32(0), np.float32(0)
+    cache_key: CacheKey = (int(math.floor(x * 4)), int(math.floor(y * 4)), index, int(ring))
+    if cache_key in tile.stats:
+        return tile.stats[cache_key]
+    weights, values, _ = support(tile, cache_key[0] * 0.25, cache_key[1] * 0.25, index, ring)
+    weighted_luminance: np.float32
+    total_weight: np.float32
+    total_weight, weighted_luminance = np.float32(0), np.float32(0)
     minimum, maximum = 1.0, 0.0
-    for i in range(len(weights)):
-        total = np.float32(total + weights[i])
-        weighted = np.float32(weighted + np.float32(values[i] * weights[i]))
-        minimum, maximum = min(minimum, float(values[i])), max(maximum, float(values[i]))
-    if total == 0:
-        result = Stats(1.0, 0.0, 0.0, 0.0, 0.0)
+    for sample_index in range(len(weights)):
+        total_weight = np.float32(total_weight + weights[sample_index])
+        weighted_luminance = np.float32(
+            weighted_luminance + np.float32(values[sample_index] * weights[sample_index])
+        )
+        minimum, maximum = (
+            min(minimum, float(values[sample_index])),
+            max(maximum, float(values[sample_index])),
+        )
+    if total_weight == 0:
+        result: CompiledStats = Stats(1.0, 0.0, 0.0, 0.0, 0.0)
     else:
-        mean = f(float(weighted) / float(total))
-        variance = np.empty(len(weights), np.float32)
-        for i in range(len(weights)):
-            delta = np.float32(values[i] - np.float32(mean))
-            variance[i] = np.float32(np.float32(delta * delta) * weights[i])
-        std = f(math.sqrt(f(lane_sum(variance) / lane_sum(weights))))
-        result = Stats(minimum, mean, maximum, std, f(mean - std))
-    if len(im.stats) >= 8192:
-        im.stats.clear()
-    im.stats[key] = result
+        mean: float = round_to_float32(float(weighted_luminance) / float(total_weight))
+        variance: FloatArray = np.empty(len(weights), np.float32)
+        for sample_index in range(len(weights)):
+            delta: np.float32 = np.float32(values[sample_index] - np.float32(mean))
+            variance[sample_index] = np.float32(np.float32(delta * delta) * weights[sample_index])
+        stddev: float = round_to_float32(
+            math.sqrt(round_to_float32(lane_sum(variance) / lane_sum(weights)))
+        )
+        result = Stats(minimum, mean, maximum, stddev, round_to_float32(mean - stddev))
+    if len(tile.stats) >= 8192:
+        tile.stats.clear()
+    tile.stats[cache_key] = result
     return result
 
 
 @njit(cache=True)
-def color(im: Buffer, x: float, y: float, index: int, ring: bool = False) -> DoubleArray:
+def color(tile: DetectionTile, x: float, y: float, index: int, ring: bool = False) -> DoubleArray:
     """Return three weighted float32 RGB channels stored as float64, or zeroes."""
     if not 0 <= index < 1056:
         return np.zeros(3)
-    key = (int(math.floor(x * 4)), int(math.floor(y * 4)), index, int(ring))
-    if key in im.colors:
-        return np.array(im.colors[key])
-    weights, _, values = support(im, key[0] * 0.25, key[1] * 0.25, index, ring)
-    total = np.float32(0)
-    sums = np.zeros(3, np.float32)
-    for i in range(len(weights)):
-        total = np.float32(total + weights[i])
+    cache_key: CacheKey = (int(math.floor(x * 4)), int(math.floor(y * 4)), index, int(ring))
+    if cache_key in tile.colors:
+        return np.array(tile.colors[cache_key])
+    weights, _, values = support(tile, cache_key[0] * 0.25, cache_key[1] * 0.25, index, ring)
+    total_weight: np.float32 = np.float32(0)
+    channel_sums: FloatArray = np.zeros(3, np.float32)
+    for sample_index in range(len(weights)):
+        total_weight = np.float32(total_weight + weights[sample_index])
         for channel in range(3):
-            sums[channel] = np.float32(sums[channel] + np.float32(values[i, channel] * weights[i]))
-    result = np.zeros(3)
-    if total > 0:
+            channel_sums[channel] = np.float32(
+                channel_sums[channel]
+                + np.float32(values[sample_index, channel] * weights[sample_index])
+            )
+    result: DoubleArray = np.zeros(3)
+    if total_weight > 0:
         for channel in range(3):
-            result[channel] = np.float64(np.float32(sums[channel] / total))
-    if len(im.colors) >= 4096:
-        im.colors.clear()
-    im.colors[key] = (result[0], result[1], result[2])
+            result[channel] = np.float64(np.float32(channel_sums[channel] / total_weight))
+    if len(tile.colors) >= 4096:
+        tile.colors.clear()
+    tile.colors[cache_key] = (result[0], result[1], result[2])
     return result
 
 
 @njit(cache=True)
 def _extend_ray(
-    im: Buffer,
+    tile: DetectionTile,
     x: float,
     y: float,
     dx: int,
     dy: int,
     center: tuple[float, float, float, float],
-    lum: NDArray[np.float64],
-    distance: NDArray[np.float64],
+    luminance_samples: NDArray[np.float64],
+    color_distances: NDArray[np.float64],
     available: int,
     needed: int,
 ) -> int:
     """Fill ray samples through needed, stopping at bounds; return the filled count."""
     while available <= needed:
-        px, py = rays.add(x, available * dx), rays.add(y, available * dy)
-        if not inside(im, px, py):
-            break
-        value = sample(im, px, py)
-        lum[available] = rays.luma(value)
-        a, b, c = (
-            rays.sub(center[0], value[0]),
-            rays.sub(center[1], value[1]),
-            rays.sub(center[2], value[2]),
+        sample_x, sample_y = (
+            rays.add_float32(x, available * dx),
+            rays.add_float32(y, available * dy),
         )
-        distance[available] = f(
-            math.sqrt(rays.add(rays.add(rays.mul(b, b), rays.mul(a, a)), rays.mul(c, c)))
+        if not inside(tile, sample_x, sample_y):
+            break
+        sample_rgba: RGBA = sample(tile, sample_x, sample_y)
+        luminance_samples[available] = rays.luma(sample_rgba)
+        red_delta, green_delta, blue_delta = (
+            rays.subtract_float32(center[0], sample_rgba[0]),
+            rays.subtract_float32(center[1], sample_rgba[1]),
+            rays.subtract_float32(center[2], sample_rgba[2]),
+        )
+        color_distances[available] = round_to_float32(
+            math.sqrt(
+                rays.add_float32(
+                    rays.add_float32(
+                        rays.multiply_float32(green_delta, green_delta),
+                        rays.multiply_float32(red_delta, red_delta),
+                    ),
+                    rays.multiply_float32(blue_delta, blue_delta),
+                )
+            )
         )
         available += 1
     return available
 
 
 @njit(cache=True)
-def initial(im: Buffer, x: float, y: float) -> tuple[bool, float, float, float]:
-    """Trace native ray extents, repair outliers, and validate the recentered size estimate."""
-    center = sample(im, x, y)
-    center_luma = rays.luma(center)
-    limit = 32 if center_luma < f(0.75) else 266
-    radii = np.full(8, -1.0)
+def initial(tile: DetectionTile, x: float, y: float) -> tuple[bool, float, float, float]:
+    """Trace native ray extents, repair outliers, and validate the re-centered size estimate."""
+    center: RGBA = sample(tile, x, y)
+    center_luma: float = rays.luma(center)
+    limit: int = 32 if center_luma < round_to_float32(0.75) else 266
+    radii: DoubleArray = np.full(8, -1.0)
     for direction in range(8):
         dx, dy = rays.DIRECTIONS[direction]
-        length = f(math.sqrt(2)) if direction % 2 else 1.0
-        lum, distance = np.zeros(266), np.zeros(266)
-        lum[0] = center_luma
+        length: float = round_to_float32(math.sqrt(2)) if direction % 2 else 1.0
+        luminance_samples, color_distances = np.zeros(266), np.zeros(266)
+        luminance_samples[0] = center_luma
+        rejected: bool
+        available: int
         available, rejected = 1, False
-        for k in range(1, limit):
-            width = int(rays.add(rays.mul(k, 0.25), 1.0))
-            start = k - width + 1
-            available = _extend_ray(im, x, y, dx, dy, center, lum, distance, available, k)
-            if available <= k:
-                radii[direction] = rays.mul(k, length)
+        for sample_index in range(1, limit):
+            width: int = int(rays.add_float32(rays.multiply_float32(sample_index, 0.25), 1.0))
+            start: int = sample_index - width + 1
+            available = _extend_ray(
+                tile,
+                x,
+                y,
+                dx,
+                dy,
+                center,
+                luminance_samples,
+                color_distances,
+                available,
+                sample_index,
+            )
+            if available <= sample_index:
+                radii[direction] = rays.multiply_float32(sample_index, length)
                 rejected = True
                 break
-            prev = rays.total(lum[start - width : start])
-            current = rays.total(lum[start : k + 1])
-            prev_color = rays.mul(rays.total(distance[start - width : start]), 0.125)
-            current_color = rays.mul(rays.total(distance[start : k + 1]), 0.125)
-            delta = rays.sub(rays.sub(prev, prev_color), rays.sub(current, current_color))
-            if delta > rays.mul(width, f(0.04)) or -delta > rays.mul(width, f(0.015)):
-                end = min(k + width, limit - 1)
-                available = _extend_ray(im, x, y, dx, dy, center, lum, distance, available, end)
+            previous_luminance: float = rays.sum_float32(luminance_samples[start - width : start])
+            current_luminance: float = rays.sum_float32(luminance_samples[start : sample_index + 1])
+            previous_color_distance: float = rays.multiply_float32(
+                rays.sum_float32(color_distances[start - width : start]), 0.125
+            )
+            current_color_distance: float = rays.multiply_float32(
+                rays.sum_float32(color_distances[start : sample_index + 1]), 0.125
+            )
+            delta: float = rays.subtract_float32(
+                rays.subtract_float32(previous_luminance, previous_color_distance),
+                rays.subtract_float32(current_luminance, current_color_distance),
+            )
+            if delta > rays.multiply_float32(
+                width, round_to_float32(0.04)
+            ) or -delta > rays.multiply_float32(width, round_to_float32(0.015)):
+                end: int = min(sample_index + width, limit - 1)
+                available = _extend_ray(
+                    tile, x, y, dx, dy, center, luminance_samples, color_distances, available, end
+                )
                 if available <= end:
-                    radii[direction] = rays.mul(k, length)
+                    radii[direction] = rays.multiply_float32(sample_index, length)
                     rejected = True
                     break
-                next_sum = rays.total(lum[k + 1 : end + 1])
-                next_color = rays.mul(rays.total(distance[k + 1 : end + 1]), 0.125)
-                next_delta = rays.sub(
-                    rays.sub(current, current_color), rays.sub(next_sum, next_color)
+                next_luminance: float = rays.sum_float32(
+                    luminance_samples[sample_index + 1 : end + 1]
                 )
-                if delta > rays.mul(width, f(0.04)) and rays.sub(delta, next_delta) > rays.mul(
-                    width, f(0.01)
+                next_color_distance: float = rays.multiply_float32(
+                    rays.sum_float32(color_distances[sample_index + 1 : end + 1]), 0.125
+                )
+                next_delta: float = rays.subtract_float32(
+                    rays.subtract_float32(current_luminance, current_color_distance),
+                    rays.subtract_float32(next_luminance, next_color_distance),
+                )
+                if delta > rays.multiply_float32(
+                    width, round_to_float32(0.04)
+                ) and rays.subtract_float32(delta, next_delta) > rays.multiply_float32(
+                    width, round_to_float32(0.01)
                 ):
-                    background = min(next_sum, current)
-                    ratio = rays.div(rays.sub(current, background), rays.sub(prev, background))
-                    radii[direction] = rays.mul(
-                        rays.add(rays.mul(ratio, width), rays.sub(start, 0.625)), length
+                    background: float = min(next_luminance, current_luminance)
+                    ratio: float = rays.divide_float32(
+                        rays.subtract_float32(current_luminance, background),
+                        rays.subtract_float32(previous_luminance, background),
+                    )
+                    radii[direction] = rays.multiply_float32(
+                        rays.add_float32(
+                            rays.multiply_float32(ratio, width), rays.subtract_float32(start, 0.625)
+                        ),
+                        length,
                     )
                     rejected = True
                     break
-                if -delta > rays.mul(width, f(0.015)) and -next_delta > rays.mul(width, f(0.015)):
+                if -delta > rays.multiply_float32(
+                    width, round_to_float32(0.015)
+                ) and -next_delta > rays.multiply_float32(width, round_to_float32(0.015)):
                     return False, x, y, 0.0
         if not rejected and direction == 0:
             return False, x, y, 0.0
-    ok, position, repaired = repair((x, y), radii)
-    xx, yy = position
-    if not ok or abs(rays.sub(xx, x)) > 2 or abs(rays.sub(yy, y)) > 2 or not inside(im, xx, yy):
+    valid_extents, position, repaired = repair((x, y), radii)
+    center_x, center_y = position
+    if (
+        not valid_extents
+        or abs(rays.subtract_float32(center_x, x)) > 2
+        or abs(rays.subtract_float32(center_y, y)) > 2
+        or not inside(tile, center_x, center_y)
+    ):
         return False, x, y, 0.0
-    positives = [r for r in repaired if r > 0]
-    size = rays.div(rays.total(positives), len(positives)) if len(positives) else 0.0
-    return 0 < size <= 128, xx, yy, size
+    positive_radii: list[float] = [radius for radius in repaired if radius > 0]
+    size: float = (
+        rays.divide_float32(rays.sum_float32(positive_radii), len(positive_radii))
+        if len(positive_radii)
+        else 0.0
+    )
+    return 0 < size <= 128, center_x, center_y, size
 
 
 @njit(cache=True)
@@ -611,101 +808,118 @@ def luma_color(value: DoubleArray) -> float:
 
 
 @njit(cache=True, error_model="numpy")
-def shrink(im: Buffer, x: float, y: float, size: float) -> float:
+def shrink(tile: DetectionTile, x: float, y: float, size: float) -> float:
     """Shrink the initial radius using native disk/ring luminance thresholds."""
-    index = int(size * 1.32)
+    index: int = int(size * 1.32)
     if index > 8:
-        a, b = (
-            luma_color(color(im, x, y, index, True)),
-            luma_color(color(im, x, y, int(0.4 * size))),
+        ring_luminance, disk_luminance = (
+            luma_color(color(tile, x, y, index, True)),
+            luma_color(color(tile, x, y, int(0.4 * size))),
         )
-        ratio = a / b if b else (math.nan if not a else math.inf)
-        threshold, lower = 0.475 * (a + b) * ratio, int(2 * size + 0.125)
+        ratio: float = (
+            ring_luminance / disk_luminance
+            if disk_luminance
+            else (math.nan if not ring_luminance else math.inf)
+        )
+        threshold, minimum_index = (
+            0.475 * (ring_luminance + disk_luminance) * ratio,
+            int(2 * size + 0.125),
+        )
     elif size >= 2:
-        threshold, lower = 0.9 * luma_color(color(im, x, y, 4)), 6
+        threshold, minimum_index = 0.9 * luma_color(color(tile, x, y, 4)), 6
     else:
         return size
     index = int(size * 4 + 0.125)
-    while index > lower and luma_color(color(im, x, y, index, True)) < threshold:
+    while index > minimum_index and luma_color(color(tile, x, y, index, True)) < threshold:
         index -= 1
     return 0.25 * (index + 2)
 
 
 @njit(cache=True)
-def refine_position(im: Buffer, x: float, y: float, size: float) -> tuple[float, float, bool]:
+def refine_position(
+    tile: DetectionTile, x: float, y: float, size: float
+) -> tuple[float, float, bool]:
     """Hill-climb in native direction/tie order and report whether the center moved."""
-    x, y = f(x), f(y)
-    index = max(1, int(size * 4))
-    initial_stats = stats(im, x, y, index)
+    x, y = round_to_float32(x), round_to_float32(y)
+    index: int = max(1, int(size * 4))
+    initial_stats: CompiledStats | None = stats(tile, x, y, index)
     if initial_stats is None:
         return x, y, False
-    best, step, changed = initial_stats.score, max(f(size * 0.125), 0.25), False
-    q = 0.7071067690849304
-    directions = (
+    best, step, changed = initial_stats.score, max(round_to_float32(size * 0.125), 0.25), False
+    diagonal_step: float = 0.7071067690849304
+    directions: tuple[Position, ...] = (
         (1.0, 0.0),
-        (q, q),
+        (diagonal_step, diagonal_step),
         (0.0, 1.0),
-        (-q, q),
+        (-diagonal_step, diagonal_step),
         (-1.0, 0.0),
-        (-q, -q),
+        (-diagonal_step, -diagonal_step),
         (0.0, -1.0),
-        (q, -q),
+        (diagonal_step, -diagonal_step),
     )
     for _ in range(6):
-        selected = -1
-        for i in range(8):
-            dx, dy = directions[i]
-            value = stats(im, f(x + f(dx * step)), f(y + f(dy * step)), index)
+        selected: int = -1
+        for direction_index in range(8):
+            dx, dy = directions[direction_index]
+            value: CompiledStats | None = stats(
+                tile,
+                round_to_float32(x + round_to_float32(dx * step)),
+                round_to_float32(y + round_to_float32(dy * step)),
+                index,
+            )
             if value is not None and value.score > best + 1e-6:
-                best, selected = value.score, i
+                best, selected = value.score, direction_index
         if selected < 0:
             break
         dx, dy = directions[selected]
-        x, y = f(x + f(dx * step)), f(y + f(dy * step))
-        changed, step = True, max(f(step * f(0.8)), 0.25)
+        x, y = (
+            round_to_float32(x + round_to_float32(dx * step)),
+            round_to_float32(y + round_to_float32(dy * step)),
+        )
+        changed, step = True, max(round_to_float32(step * round_to_float32(0.8)), 0.25)
     return x, y, changed
 
 
 @njit(cache=True)
-def refine_size(im: Buffer, x: float, y: float, size: float) -> tuple[float, bool]:
+def refine_size(tile: DetectionTile, x: float, y: float, size: float) -> tuple[float, bool]:
     """Refine source radius in native iteration order and report a size change."""
-    original, direction = size, 0
+    direction: int
+    initial_size, direction = size, 0
     for iteration in range(2, 8):
-        old, step = size, max(size * 0.05 / iteration, 0.25)
+        stop: bool = False
+        previous_size, step = size, max(size * 0.05 / iteration, 0.25)
         if size < 1.25:
             # Only indices outside [0,1056) yield None; fixed index10 is always valid.
-            peak, background = color(im, x, y, 5).max(), stats(im, x, y, 10, True).minimum  # type: ignore[union-attr]
-            if peak > background:
-                size = numeric.small_size((peak - background) / (1 - background))
-                direction = 1 if size > old else -1 if size < old else direction
-            else:
-                size, direction = size + 0.25, 1
+            peak, background = color(tile, x, y, 5).max(), stats(tile, x, y, 10, True).minimum  # type: ignore[union-attr]
+            size, direction = numeric.small_size_step(size, direction, peak, background)
         else:
-            a, b, c = (
-                stats(im, x, y, int(8 * size) + 4, True),
-                stats(im, x, y, int(2.4 * size)),
-                stats(im, x, y, int(4 * size) - 2, True),
+            outer_stats, inner_stats, edge_stats = (
+                stats(tile, x, y, int(8 * size) + 4, True),
+                stats(tile, x, y, int(2.4 * size)),
+                stats(tile, x, y, int(4 * size) - 2, True),
             )
-            size, direction, stop = numeric.large_size_step(size, step, direction, a, b, c)
-            if stop:
-                break
-        if size == old:
+            size, direction, stop = numeric.large_size_step(
+                size, step, direction, outer_stats, inner_stats, edge_stats
+            )
+        if numeric.size_refinement_done(size, previous_size, stop):
             break
-    return size, size != original
+    return size, size != initial_size
 
 
 @njit(cache=True)
 def covered(x: float, y: float, excluded: DoubleArray) -> bool:
     """Test a global point against N×3 float64 exclusion disks [x,y,size]."""
-    for i in range(len(excluded)):
-        if (x - excluded[i, 0]) ** 2 + (y - excluded[i, 1]) ** 2 < excluded[i, 2] ** 2:
+    for source_index in range(len(excluded)):
+        if (x - excluded[source_index, 0]) ** 2 + (y - excluded[source_index, 1]) ** 2 < excluded[
+            source_index, 2
+        ] ** 2:
             return True
     return False
 
 
 @njit(cache=True)
 def _refine_candidate(
-    im: Buffer,
+    tile: DetectionTile,
     x: float,
     y: float,
     size: float,
@@ -714,51 +928,63 @@ def _refine_candidate(
 ) -> tuple[float, float, float] | None:
     """Alternate native refinement stages, including rollback and convergence limits."""
     old_x, old_y = x, y
-    x, y, moved = refine_position(im, x, y, size)
-    size, resized = refine_size(im, x, y, size)
+    x, y, moved = refine_position(tile, x, y, size)
+    size, resized = refine_size(tile, x, y, size)
+    maximum: float
     limit, maximum = int(size + 8), 1.5 * size + 2
     if not coarse:
         maximum = min(maximum, 20.0)
-    converged = False
+    converged: bool = False
     for _ in range(limit):
         if not moved and not resized:
             converged = True
             break
-        if not inside(im, x, y):
+        if not inside(tile, x, y):
             x, y, converged = old_x, old_y, True
             break
         old_x, old_y = x, y
-        x, y, moved = refine_position(im, x, y, size)
+        x, y, moved = refine_position(tile, x, y, size)
         if moved or resized:
-            size, resized = refine_size(im, x, y, size)
+            size, resized = refine_size(tile, x, y, size)
         if size > maximum or covered(x, y, excluded):
             return None
     return numeric.refinement_result(x, y, size, converged)
 
 
 @njit(cache=True)
-def _accept_shape(im: Buffer, x: float, y: float, size: float) -> bool:
+def _accept_shape(tile: DetectionTile, x: float, y: float, size: float) -> bool:
     """Evaluate the final shape supports in their original sampling order."""
-    n = max(1, int(4 * size))
-    if n < 12:
-        a, b = stats(im, x, y, max(1, n - 2)), stats(im, x, y, 2 * n + 4, True)
-        if a is None or b is None or not (a.score >= b.score and a.score - b.score >= 0.13):
-            return False
-    else:
-        a, b, c, d, e = (
-            stats(im, x, y, n // 2),
-            stats(im, x, y, n - 3),
-            stats(im, x, y, n - 3, True),
-            stats(im, x, y, (6 * n) // 5 + 4, True),
-            stats(im, x, y, 2 * n + 4, True),
+    size_index: int = max(1, int(4 * size))
+    if size_index < 12:
+        inner_disk, outer_disk = (
+            stats(tile, x, y, max(1, size_index - 2)),
+            stats(tile, x, y, 2 * size_index + 4, True),
         )
         if (
-            a is None
-            or b is None
-            or c is None
-            or d is None
-            or e is None
-            or not numeric.final_shape(size, a, b, c, d, e)
+            inner_disk is None
+            or outer_disk is None
+            or not (
+                inner_disk.score >= outer_disk.score and inner_disk.score - outer_disk.score >= 0.13
+            )
+        ):
+            return False
+    else:
+        inner_disk, outer_disk, inner_ring, middle_ring, outer_ring = (
+            stats(tile, x, y, size_index // 2),
+            stats(tile, x, y, size_index - 3),
+            stats(tile, x, y, size_index - 3, True),
+            stats(tile, x, y, (6 * size_index) // 5 + 4, True),
+            stats(tile, x, y, 2 * size_index + 4, True),
+        )
+        if (
+            inner_disk is None
+            or outer_disk is None
+            or inner_ring is None
+            or middle_ring is None
+            or outer_ring is None
+            or not numeric.final_shape(
+                size, inner_disk, outer_disk, inner_ring, middle_ring, outer_ring
+            )
         ):
             return False
     return True
@@ -766,20 +992,30 @@ def _accept_shape(im: Buffer, x: float, y: float, size: float) -> bool:
 
 @njit(cache=True)
 def qualify(
-    im: Buffer, x: float, y: float, coarse: bool, excluded: DoubleArray
+    tile: DetectionTile, x: float, y: float, coarse: bool, excluded: DoubleArray
 ) -> CandidateRow | None:
     """Qualify a half-pixel seed and return its eight-field raw source row on success."""
-    ok, x, y, size = initial(im, x, y)
-    if not ok:
+    size: float
+    valid_seed, x, y, size = initial(tile, x, y)
+    if not valid_seed:
         return None
-    size = shrink(im, x, y, size)
-    n = int(4 * size)
-    delta = n // 8 + 4
-    if n >= delta:
-        a, b = stats(im, x, y, n - delta, True), stats(im, x, y, n + delta, True)
-        if a is None or b is None or not numeric.preliminary_shape(a, b, n):
+    size = shrink(tile, x, y, size)
+    size_index: int = int(4 * size)
+    ring_offset: int = size_index // 8 + 4
+    if size_index >= ring_offset:
+        inner_stats, outer_stats = (
+            stats(tile, x, y, size_index - ring_offset, True),
+            stats(tile, x, y, size_index + ring_offset, True),
+        )
+        if (
+            inner_stats is None
+            or outer_stats is None
+            or not numeric.preliminary_shape(inner_stats, outer_stats, size_index)
+        ):
             return None
-    refined = _refine_candidate(im, x, y, size, coarse, excluded)
+    refined: tuple[float, float, float] | None = _refine_candidate(
+        tile, x, y, size, coarse, excluded
+    )
     if refined is None:
         return None
     x, y, size = refined
@@ -788,33 +1024,33 @@ def qualify(
         numeric.quarter_position(y),
         numeric.quarter_size(size),
     )
-    if not _accept_shape(im, x, y, size):
+    if not _accept_shape(tile, x, y, size):
         return None
-    if not inside(im, x, y) or (coarse and size <= 4):
+    if not inside(tile, x, y) or (coarse and size <= 4):
         return None
-    count = 1 - int((size - 1) * -0.5)
-    rgb = np.zeros(3)
-    for i in range(count):
-        rgb += color(im, x, y, int(4 * size) + 4 * i, True)
-    rgb[1] = 0.4 * rgb[0] + 0.3 * (rgb[1] + rgb[2])
-    rgb /= rgb.mean()
-    source = color(im, x, y, int(4 * size) + 2)
-    brightness = np.float64(
+    ring_count: int = 1 - int((size - 1) * -0.5)
+    color_sum: DoubleArray = np.zeros(3)
+    for ring_index in range(ring_count):
+        color_sum += color(tile, x, y, int(4 * size) + 4 * ring_index, True)
+    color_sum[1] = 0.4 * color_sum[0] + 0.3 * (color_sum[1] + color_sum[2])
+    color_sum /= color_sum.mean()
+    source: DoubleArray = color(tile, x, y, int(4 * size) + 2)
+    brightness: np.float64 = np.float64(
         np.float32(np.float32(np.float32(source[0] + source[1]) + source[2]) / np.float32(3))
     )
-    return (x, y, size, brightness, rgb[0], rgb[1], rgb[2], 1.0)
+    return x, y, size, brightness, color_sum[0], color_sum[1], color_sum[2], 1.0
 
 
 @njit(cache=True)
 def repair(position: Position, radii: DoubleArray) -> tuple[bool, Position, DoubleArray]:
-    """3DA00. Repaired array is returned even on failure (native mutates it).
+    """Return repaired radii even when extent repair fails.
 
     Outlier marking uses the ORIGINAL adjacent values; repair uses the marked
     adjacent values, never newly repaired ones. Successful non-outliers retain
     original values. Native diagonal recenter factor really is sqrt(2).
     """
     radii = radii.copy()
-    position = (f(position[0]), f(position[1]))
-    if not rays._repair_extents(radii):
+    position = (round_to_float32(position[0]), round_to_float32(position[1]))
+    if not rays.repair_extents(radii):
         return False, position, radii
-    return True, rays._recenter(position, radii), radii
+    return True, rays.recenter(position, radii), radii

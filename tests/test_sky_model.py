@@ -1,7 +1,37 @@
 import numpy as np
+import pytest
 
 from starlab.domain.imaging import ImageFrame
 from starlab.infrastructure.sky_mask import OnnxSkySegmenter, SkyMaskService
+
+
+@pytest.mark.parametrize(
+    ("cached_shape", "matches"),
+    [
+        ([16, 24], True),
+        ([16.0, 24.0], True),
+        ([16.5, 24], False),
+        ([16, 25], False),
+        ([16], False),
+        ([16, 24, 3], False),
+        ([[16, 24]], False),
+        (16, False),
+        (["16", "24"], False),
+    ],
+)
+def test_cached_mask_requires_matching_shape_pair(tmp_path, cached_shape, matches):
+    path = tmp_path / "mask.npz"
+    classes = np.ones((8, 12), np.uint8)
+    np.savez(path, cell_px=2, classes=classes, shape=cached_shape)
+
+    mask = SkyMaskService._load_cached(path, (16, 24))
+
+    if matches:
+        assert mask is not None
+        assert mask.shape == (16, 24)
+        np.testing.assert_array_equal(mask.classes, classes)
+    else:
+        assert mask is None
 
 
 def test_packaged_model_matches_the_starligner_recorded_logits():

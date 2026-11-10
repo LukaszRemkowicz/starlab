@@ -24,11 +24,13 @@ def load_preset(path: Path | str) -> EffectSettings:
 def save_preset(path: Path | str, settings: EffectSettings) -> None:
     """Serialize validated settings, replacing the destination atomically."""
     path = Path(path)
-    text = json.dumps(preset_data(settings), indent=2, allow_nan=False)
-    fd, temp = tempfile.mkstemp(prefix=".preset-", suffix=".json", dir=path.parent)
+    text: str = json.dumps(preset_data(settings), indent=2, allow_nan=False)
+    file_descriptor, temporary_path = tempfile.mkstemp(
+        prefix=".preset-", suffix=".json", dir=path.parent
+    )
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as stream:
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
             stream.write(text + "\n")
-        os.replace(temp, path)
+        os.replace(temporary_path, path)
     finally:
-        Path(temp).unlink(missing_ok=True)
+        Path(temporary_path).unlink(missing_ok=True)

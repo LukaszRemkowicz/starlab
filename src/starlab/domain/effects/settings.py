@@ -103,7 +103,7 @@ class EffectParameters:
         if type(self.enabled) is not bool:
             raise ValueError("enabled must be boolean.")
         for key, (low, high) in RANGES.items():
-            value = getattr(self, key)
+            value: float = getattr(self, key)
             if type(value) not in (int, float) or not isfinite(value) or not low <= value <= high:
                 raise ValueError(f"{key} must be finite, between {low} and {high}.")
         if type(self.points) is not int:
@@ -125,11 +125,14 @@ class EffectSettings:
 
     def __post_init__(self) -> None:
         """Require validated parameter records for every effect group."""
-        if any(not isinstance(getattr(self, f.name), EffectParameters) for f in fields(self)):
+        if any(
+            not isinstance(getattr(self, parameter_field.name), EffectParameters)
+            for parameter_field in fields(self)
+        ):
             raise ValueError("All effect groups must contain EffectParameters.")
 
     @classmethod
     def disabled(cls) -> "EffectSettings":
         """Return the default control values with every group switched off."""
-        base = cls()
-        return cls(**{k: replace(getattr(base, k), enabled=False) for k in KINDS})
+        base: EffectSettings = cls()
+        return cls(**{kind: replace(getattr(base, kind), enabled=False) for kind in KINDS})

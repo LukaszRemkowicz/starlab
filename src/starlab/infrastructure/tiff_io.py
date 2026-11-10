@@ -15,7 +15,10 @@ import numpy as np
 import tifffile
 from numpy.typing import NDArray
 from PIL import ImageCms
+from PIL.ImageCms import ImageCmsProfile
+from tifffile import TiffPage, TiffTag
 
+from ..domain.array_types import DoubleArray, FloatArray
 from ..domain.imaging import ImageFrame, Pixels, check_cancel, linear_to_srgb, srgb_to_linear
 from ..domain.jit import njit
 
@@ -34,11 +37,11 @@ def _profile_characteristics(profile: bytes) -> tuple[bytes, dict[bytes, bytes]]
         raise ValueError("Invalid ICC size.")
     if profile[36:40] != b"acsp" or profile[8] not in (2, 4):
         raise ValueError("Unsupported ICC header.")
-    count = struct.unpack_from(">I", profile, 128)[0]
-    table_end = 132 + count * 12
+    count: int = struct.unpack_from(">I", profile, 128)[0]
+    table_end: int = 132 + count * 12
     if table_end > len(profile):
         raise ValueError("Invalid ICC tag table.")
-    tags = {}
+    tags: dict[bytes, bytes] = {}
     for index in range(count):
         signature, offset, size = struct.unpack_from(">4sII", profile, 132 + index * 12)
         if offset < table_end or offset + size > len(profile) or signature in tags:
@@ -64,8 +67,10 @@ def _matches_fixed_tag(value: bytes, expected: bytes) -> bool:
     """Compare fixed-point ICC tag values within the supported matrix tolerance."""
     if len(value) != len(expected) or value[:8] != expected[:8]:
         return False
-    actual_values = np.frombuffer(value[8:], dtype=">i4").astype(np.float64) / 65536
-    expected_values = np.frombuffer(expected[8:], dtype=">i4").astype(np.float64) / 65536
+    actual_values: DoubleArray = np.frombuffer(value[8:], dtype=">i4").astype(np.float64) / 65536
+    expected_values: DoubleArray = (
+        np.frombuffer(expected[8:], dtype=">i4").astype(np.float64) / 65536
+    )
     return bool(np.allclose(actual_values, expected_values, atol=0.0005, rtol=0))
 
 
@@ -79,15 +84,15 @@ def _matches_srgb_curve(value: bytes, expected: bytes) -> bool:
     # within one 16-bit linear-light output code. No names or profile hashes.
     if len(value) < 12 or value[:8] != b"curv\0\0\0\0":
         return False
-    count = struct.unpack_from(">I", value, 8)[0]
+    count: int = struct.unpack_from(">I", value, 8)[0]
     if not 2 <= count <= 65536 or len(value) != 12 + count * 2:
         return False
-    curve = np.frombuffer(value[12:], dtype=">u2").astype(np.float64) / 65535
+    curve: DoubleArray = np.frombuffer(value[12:], dtype=">u2").astype(np.float64) / 65535
     if np.any(np.diff(curve) < 0):
         return False
-    codes = np.arange(65536, dtype=np.float64) / 65535
-    decoded = np.interp(codes, np.linspace(0, 1, count), curve)
-    srgb = np.where(codes <= 0.04045, codes / 12.92, ((codes + 0.055) / 1.055) ** 2.4)
+    codes: DoubleArray = np.arange(65536, dtype=np.float64) / 65535
+    decoded: DoubleArray = np.interp(codes, np.linspace(0, 1, count), curve)
+    srgb: DoubleArray = np.where(codes <= 0.04045, codes / 12.92, ((codes + 0.055) / 1.055) ** 2.4)
     return bool(np.max(np.abs(decoded - srgb)) <= 1 / 65535)
 
 
@@ -113,7 +118,7 @@ def _matches_white_point(
         return True
     # Legacy v2 sRGB uses D65 wtpt with D50-adapted colorants and no chad.
     # https://registry.color.org/rgb-registry/srgbprofiles
-    d65 = b"XYZ \0\0\0\0" + struct.pack(">iii", 62289, 65536, 71372)
+    d65: bytes = b"XYZ \0\0\0\0" + struct.pack(">iii", 62289, 65536, 71372)
     return header[0] == 2 and b"chad" not in tags and _matches_fixed_tag(tags[b"wtpt"], d65)
 
 
@@ -125,7 +130,7 @@ def _matches_srgb(
     reference_header, reference_tags = reference
     if header[4:] != reference_header[4:]:
         return False
-    required = {b"rXYZ", b"gXYZ", b"bXYZ", b"rTRC", b"gTRC", b"bTRC", b"wtpt"}
+    required: set[bytes] = {b"rXYZ", b"gXYZ", b"bXYZ", b"rTRC", b"gTRC", b"bTRC", b"wtpt"}
     if not required <= tags.keys() or tags.keys() - required - {b"chad", b"chrm", b"bkpt"}:
         return False  # Never ignore LUT or unknown transform tags.
     for channel in (b"r", b"g", b"b"):
@@ -145,20 +150,22 @@ def _check_profile(profile: bytes | None, rgb: bool) -> str:
             "Untagged image: sRGB assumed." if rgb else "Untagged grayscale: linear gray assumed."
         )
     try:
-        parsed = ImageCms.ImageCmsProfile(io.BytesIO(profile))
-        name = ImageCms.getProfileName(parsed).strip()
-        characteristics = _profile_characteristics(profile)
+        parsed: ImageCmsProfile = ImageCms.ImageCmsProfile(io.BytesIO(profile))
+        name: str = ImageCms.getProfileName(parsed).strip()
+        characteristics: tuple[bytes, dict[bytes, bytes]] = _profile_characteristics(profile)
     except Exception as exc:
         raise ValueError("Invalid ICC profile. Convert the image to sRGB in your editor.") from exc
-    reference = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
-    reference_characteristics = _profile_characteristics(reference)
+    reference: bytes = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes()
+    reference_characteristics: tuple[bytes, dict[bytes, bytes]] = _profile_characteristics(
+        reference
+    )
     if not rgb or not _matches_srgb(characteristics, reference_characteristics):
         raise ValueError(
             f"Profile '{name}' is not supported by this prototype's strict ICC check. "
             "Convert to sRGB in your editor, then export an untagged RGB TIFF. "
             "Removing a profile alone does not convert colors."
         )
-    suffix = (
+    suffix: str = (
         " (validated sRGB matrix/TRC variant)"
         if characteristics != reference_characteristics
         else ""
@@ -166,12 +173,12 @@ def _check_profile(profile: bytes | None, rgb: bool) -> str:
     return f"Embedded sRGB profile: {name}{suffix}"
 
 
-def _validated_page(tif: tifffile.TiffFile) -> tuple[tifffile.TiffPage, str]:
+def _validated_page(tiff_file: tifffile.TiffFile) -> tuple[tifffile.TiffPage, str]:
     """Accept one supported page and describe its validated color interpretation."""
-    if len(tif.pages) != 1:
+    if len(tiff_file.pages) != 1:
         raise ValueError("Use a single-page, flattened TIFF (no image stacks).")
-    page = cast(tifffile.TiffPage, tif.pages[0])
-    orientation = page.tags.get(274)
+    page: TiffPage = cast(tifffile.TiffPage, tiff_file.pages[0])
+    orientation: TiffTag | None = page.tags.get(274)
     if orientation and orientation.value != 1:
         raise ValueError(
             "Unsupported TIFF orientation. Normalize rotation/mirroring in your editor."
@@ -182,7 +189,7 @@ def _validated_page(tif: tifffile.TiffFile) -> tuple[tifffile.TiffPage, str]:
         raise ValueError("Use RGB or grayscale TIFF without alpha, palette or CMYK.")
     if min(page.imagelength, page.imagewidth) < 2:
         raise ValueError("Expected an image of at least 2 × 2 pixels.")
-    tag = page.tags.get(34675)
+    tag: TiffTag | None = page.tags.get(34675)
     return page, _check_profile(tag.value if tag else None, page.photometric == 2)
 
 
@@ -190,19 +197,19 @@ def _mapped_pixels(page: tifffile.TiffPage) -> EncodedPixels:
     """Expose validated unsigned samples as H×W×C, mapping/decoding only as needed."""
     # Direct mapping for compatible uncompressed TIFFs; other layouts and
     # compressed files decode into tifffile's temporary map before sampling.
-    data = page.asarray(out="memmap")
+    data: EncodedPixels = page.asarray(out="memmap")
     if page.planarconfig == 2 and data.ndim == 3:
         data = np.moveaxis(data, 0, -1)
     if data.ndim == 2:
         data = data[..., None]
-    return cast(EncodedPixels, data)
+    return data
 
 
 @lru_cache(maxsize=4)
 def _integer_transfer(maximum: int, rgb: bool) -> Pixels:
     """Build an immutable scalar conversion table for uint8/uint16 input codes."""
-    codes = np.arange(maximum + 1, dtype=np.float32) / maximum
-    values = srgb_to_linear(codes) if rgb else codes
+    codes: Pixels | DoubleArray = np.arange(maximum + 1, dtype=np.float32) / maximum
+    values: Pixels | DoubleArray = srgb_to_linear(codes) if rgb else codes
     values.flags.writeable = False
     # Weak-scalar division preserves float32; NumPy stubs conservatively include float64.
     return cast(Pixels, values)
@@ -221,12 +228,14 @@ def _convert_integer_image(
     data: EncodedPixels, path: Path, note: str, cancel: Event | None
 ) -> ImageFrame:
     """Convert validated samples in cancellable strips, then transfer buffer ownership."""
-    rgb = data.shape[2] == 3
-    normalized = np.empty(data.shape, np.float32)
-    table = _integer_transfer(np.iinfo(data.dtype).max, rgb)
+    rgb: bool = data.shape[2] == 3
+    normalized: FloatArray = np.empty(data.shape, np.float32)
+    table: FloatArray = _integer_transfer(np.iinfo(data.dtype).max, rgb)
     for row in range(0, data.shape[0], ROWS_PER_BLOCK):
         check_cancel(cancel)
-        source = np.asarray(data[row : row + ROWS_PER_BLOCK], dtype=data.dtype.newbyteorder("="))
+        source: EncodedPixels = np.asarray(
+            data[row : row + ROWS_PER_BLOCK], dtype=data.dtype.newbyteorder("=")
+        )
         _transfer_integer_block(source, table, normalized[row : row + ROWS_PER_BLOCK])
     check_cancel(cancel)
     return ImageFrame._from_owned_validated(
@@ -241,9 +250,9 @@ def read_tiff(path: Path | str, cancel: Event | None = None) -> ImageFrame:
     """Read one TIFF into immutable working pixels, validating format and ICC first."""
     check_cancel(cancel)
     path = Path(path)
-    with tifffile.TiffFile(path) as tif:
-        page, note = _validated_page(tif)
-        data = _mapped_pixels(page)
+    with tifffile.TiffFile(path) as tiff_file:
+        page, note = _validated_page(tiff_file)
+        data: EncodedPixels = _mapped_pixels(page)
         return _convert_integer_image(data, path, note, cancel)
 
 
@@ -260,11 +269,11 @@ def read_tiff_preview(
     if max_edge < 2:
         raise ValueError("Preview edge must be at least two pixels.")
     path = Path(path)
-    with tifffile.TiffFile(path) as tif:
-        page, note = _validated_page(tif)
+    with tifffile.TiffFile(path) as tiff_file:
+        page, note = _validated_page(tiff_file)
         width, height = page.imagewidth, page.imagelength
-        stride = max(1, (max(width, height) + max_edge - 1) // max_edge)
-        data = _mapped_pixels(page)[::stride, ::stride]
+        stride: int = max(1, (max(width, height) + max_edge - 1) // max_edge)
+        data: EncodedPixels = _mapped_pixels(page)[::stride, ::stride]
         # Keep ImageFrame's 2×2 minimum for exceptionally thin panoramas.
         if min(data.shape[:2]) < 2:
             data = cast(EncodedPixels, np.repeat(data, 2, axis=0 if data.shape[0] == 1 else 1))
@@ -281,7 +290,7 @@ def write_tiff(
     """Write atomically. A cancellation before replacement preserves the existing destination."""
     path = Path(path)
     if source_path is not None:
-        source = Path(source_path)
+        source: Path = Path(source_path)
         if path.resolve() == source.resolve() or (
             path.exists() and source.exists() and path.samefile(source)
         ):
@@ -289,19 +298,25 @@ def write_tiff(
     if pixels.shape != frame.pixels.shape or not np.isfinite(pixels).all() or pixels.min() < 0:
         raise ValueError("Invalid output pixels.")
     check_cancel(cancel)
-    rgb = pixels.shape[2] == 3
-    output = np.empty(pixels.shape, np.uint16)
+    rgb: bool = pixels.shape[2] == 3
+    output: NDArray[np.uint16] = np.empty(pixels.shape, np.uint16)
     for row in range(0, pixels.shape[0], ROWS_PER_BLOCK):
         check_cancel(cancel)
-        block = pixels[row : row + ROWS_PER_BLOCK]
-        encoded = linear_to_srgb(block) if rgb else block
+        block: FloatArray = pixels[row : row + ROWS_PER_BLOCK]
+        encoded: FloatArray = linear_to_srgb(block) if rgb else block
         output[row : row + ROWS_PER_BLOCK] = np.rint(np.clip(encoded, 0, 1) * 65535).astype(
             np.uint16
         )
-    profile = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes() if rgb else None
-    tags = [(34675, "B", len(profile), profile, False)] if profile else []
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tif", dir=path.parent)
-    os.close(fd)
+    profile: bytes | None = (
+        ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes() if rgb else None
+    )
+    tags: list[tuple[int, str, int, bytes, bool]] = (
+        [(34675, "B", len(profile), profile, False)] if profile else []
+    )
+    file_descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{path.stem}-", suffix=".tif", dir=path.parent
+    )
+    os.close(file_descriptor)
     try:
         tifffile.imwrite(
             temporary,

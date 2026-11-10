@@ -18,7 +18,7 @@ import numpy as np
 import tifffile
 from numba import get_num_threads, prange, set_num_threads
 
-from ..domain.array_types import FloatArray
+from ..domain.array_types import FloatArray, IntArray
 from ..domain.imaging import ImageFrame, check_cancel, linear_to_srgb
 from ..domain.jit import njit
 from ..domain.sky_mask import EncodedArray, SkyMask, SkySegmenter, build_sky_mask
@@ -48,12 +48,12 @@ class _ImageDimensions:
 def _integer_block_mean(strip: EncodedArray, factor: int) -> FloatArray:
     """Average unsigned box samples exactly using an integer accumulator."""
     height, width, channels = strip.shape
-    result = np.empty((height // factor, width // factor, channels), np.float32)
-    divisor = np.float32(factor * factor)
+    result: FloatArray = np.empty((height // factor, width // factor, channels), np.float32)
+    divisor: np.float32 = np.float32(factor * factor)
     for row in prange(result.shape[0]):
         for col in range(result.shape[1]):
             for channel in range(channels):
-                total = np.uint32(0)
+                total: np.uint32 = np.uint32(0)
                 for y in range(factor):
                     for x in range(factor):
                         total += strip[row * factor + y, col * factor + x, channel]
@@ -67,7 +67,7 @@ def _block_mean(strip: EncodedArray, factor: int) -> FloatArray:
     if strip.dtype.kind == "u" and strip.dtype.itemsize <= 2 and factor <= 16:
         if not strip.dtype.isnative:
             strip = strip.astype(np.uint16)
-        threads = get_num_threads()
+        threads: int = get_num_threads()
         try:
             set_num_threads(min(4, threads))
             return _integer_block_mean(strip, factor)
@@ -86,15 +86,15 @@ class OnnxSkySegmenter:
 
     def __init__(self) -> None:
         """Validate the packaged weight hash before opening its network graph."""
-        model = MODEL_DIRECTORY / "sky-mask.onnx"
-        meta = cast(
+        model: Path = MODEL_DIRECTORY / "sky-mask.onnx"
+        model_metadata: _ModelMetadata = cast(
             _ModelMetadata,
             json.loads((MODEL_DIRECTORY / "sky-mask.json").read_text(encoding="utf-8")),
         )
         self.identity = hashlib.sha256(model.read_bytes()).hexdigest()
-        if self.identity != meta["onnx_sha256"]:
+        if self.identity != model_metadata["onnx_sha256"]:
             raise ValueError("Sky model does not match its recorded identity.")
-        self.tile, self.overlap = int(meta["tile"]), int(meta["overlap"])
+        self.tile, self.overlap = int(model_metadata["tile"]), int(model_metadata["overlap"])
         self.network = cv2.dnn.readNetFromONNX(str(model))
 
     def sky_logits(self, image: FloatArray) -> FloatArray:
@@ -126,48 +126,51 @@ class SkyMaskService:
         self.segmenter: SkySegmenter | None = segmenter
         self.last_frame: weakref.ReferenceType[ImageFrame | _ImageDimensions] | None = None
         self.last_mask: SkyMask | None = None
-        recipe = Path(__file__).parents[1] / "domain/sky_mask.py"
-        meta = (MODEL_DIRECTORY / "sky-mask.json").read_bytes()
-        metadata = cast(_ModelMetadata, json.loads(meta))
+        recipe: Path = Path(__file__).parents[1] / "domain/sky_mask.py"
+        metadata_bytes: bytes = (MODEL_DIRECTORY / "sky-mask.json").read_bytes()
+        metadata: _ModelMetadata = cast(_ModelMetadata, json.loads(metadata_bytes))
         self.model_identity: str = cast(
             str, getattr(segmenter, "identity", metadata["onnx_sha256"])
         )
         self.recipe = hashlib.sha256(
-            recipe.read_bytes() + Path(__file__).read_bytes() + meta
+            recipe.read_bytes() + Path(__file__).read_bytes() + metadata_bytes
         ).hexdigest()
 
     def from_source(self, source: Path, cancel: Event | None = None) -> SkyMask:
         """Build a full-coordinate mask directly from an encoded TIFF source."""
-        with tifffile.TiffFile(source) as tif:
-            page, _ = _validated_page(tif)
-            dimensions = _ImageDimensions(page.imagewidth, page.imagelength)
+        with tifffile.TiffFile(source) as tiff_file:
+            page, _ = _validated_page(tiff_file)
+            dimensions: _ImageDimensions = _ImageDimensions(page.imagewidth, page.imagelength)
         return self(dimensions, source, cancel)
 
     def _cache_path(self, source: Path | str | None) -> Path | None:
         """Identify optional persisted masks without opening their data."""
         if source is None or not self.persistent_cache:
             return None
-        path = Path(source)
-        stat = path.stat()
-        identity = (
+        path: Path = Path(source)
+        stat: os.stat_result = path.stat()
+        identity: tuple[str, int, int, str, str] = (
             os.path.normcase(str(path.resolve())),
             stat.st_size,
             stat.st_mtime_ns,
             self.recipe,
             self.model_identity,
         )
-        key = hashlib.sha256(repr(identity).encode()).hexdigest()
+        key: str = hashlib.sha256(repr(identity).encode()).hexdigest()
         return self.cache_directory / f"{key}.npz"
 
-    def _load_cached(self, path: Path | None, shape: tuple[int, int]) -> SkyMask | None:
+    @staticmethod
+    def _load_cached(path: Path | None, shape: tuple[int, int]) -> SkyMask | None:
         """Read an optional cache entry; malformed or unavailable data is a miss."""
         if path is None:
             return None
         try:
             with np.load(path, allow_pickle=False) as stored:
-                mask = SkyMask(int(stored["cell_px"]), stored["classes"], tuple(stored["shape"]))
-            return mask if mask.shape == shape else None
-        except (OSError, ValueError, KeyError):
+                stored_shape: IntArray = stored["shape"]
+                if stored_shape.shape != (2,) or not np.array_equal(stored_shape, shape):
+                    return None
+                return SkyMask(int(stored["cell_px"]), stored["classes"], shape)
+        except OSError, ValueError, KeyError:
             return None
 
     def _from_encoded_source(
@@ -175,9 +178,9 @@ class SkyMaskService:
     ) -> SkyMask:
         """Run mask preprocessing on encoded TIFF samples, never working RGB."""
         assert self.segmenter is not None
-        with tifffile.TiffFile(source) as tif:
-            page, _ = _validated_page(tif)
-            raw = _mapped_pixels(page)
+        with tifffile.TiffFile(source) as tiff_file:
+            page, _ = _validated_page(tiff_file)
+            raw: EncodedArray = _mapped_pixels(page)
             return build_sky_mask(
                 shape,
                 lambda top, bottom: raw[top:bottom],
@@ -193,18 +196,19 @@ class SkyMaskService:
 
         def read(top: int, bottom: int) -> FloatArray:
             """Return encoded source-domain rows for mask preprocessing."""
-            pixels = frame.pixels[top:bottom]
+            pixels: FloatArray = frame.pixels[top:bottom]
             return linear_to_srgb(pixels) if frame.color_space == "linear-srgb" else pixels
 
         return build_sky_mask(
             (frame.height, frame.width), read, self.segmenter, cancel, block_mean=_block_mean
         )
 
-    def _save_cached(self, path: Path | None, mask: SkyMask) -> None:
+    @staticmethod
+    def _save_cached(path: Path | None, mask: SkyMask) -> None:
         """Atomically persist an optional mask without making cache writes mandatory."""
         if path is None:
             return
-        temporary = None
+        temporary: Path | None = None
         try:
             path.parent.mkdir(parents=True, exist_ok=True)
             with tempfile.NamedTemporaryFile(
@@ -235,8 +239,8 @@ class SkyMaskService:
         if self.last_frame is not None and self.last_frame() is frame:
             assert self.last_mask is not None
             return self.last_mask
-        cache = self._cache_path(source)
-        mask = self._load_cached(cache, (frame.height, frame.width))
+        cache: Path | None = self._cache_path(source)
+        mask: SkyMask | None = self._load_cached(cache, (frame.height, frame.width))
         if mask is None:
             if self.segmenter is None:
                 self.segmenter = OnnxSkySegmenter()

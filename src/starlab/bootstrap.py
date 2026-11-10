@@ -15,8 +15,8 @@ def create_window(*, backend: Literal["auto", "cpu", "gpu"] = "auto") -> MainWin
     Auto retains native GPU previews and mandatory sky masking on desktop platforms.
     Explicit gpu also attempts a real context under a caller-selected Qt platform.
     """
-    window = MainWindow()
-    services = ImageServices(read_tiff, write_tiff, read_preview=read_tiff_preview)
+    window: MainWindow = MainWindow()
+    services: ImageServices = ImageServices(read_tiff, write_tiff, read_preview=read_tiff_preview)
     from PySide6.QtGui import QGuiApplication
 
     if backend == "gpu" or (backend == "auto" and QGuiApplication.platformName() != "offscreen"):
@@ -26,7 +26,7 @@ def create_window(*, backend: Literal["auto", "cpu", "gpu"] = "auto") -> MainWin
         services.preview = GpuPreviewRenderer()
         services.sky_mask = SkyMaskService(persistent_cache=False)
         services.read_mask = services.sky_mask.from_source
-    controller = Controller(
+    controller: Controller = Controller(
         window,
         services,
         load_preset,

@@ -9,6 +9,9 @@ from threading import Lock
 import numpy as np
 from numpy.typing import NDArray
 
+from ..array_types import ByteArray
+
+# Pin the approved archive identity; recalculating the expected digest would accept changed data.
 ANALYSIS_ARCHIVE_SHA256 = "9bd9d8c4798fd340c8356422eff55f2bbfb1e0bf6546c0f56868caed9e8e9a61"
 
 
@@ -40,7 +43,9 @@ def load_color_cube(path: Path | None = None) -> NDArray[np.uint8]:
     the transform; it is not interchangeable with the compressed numeric data.
     """
     path = path or Path(__file__).with_name("full_lcms_lut.npz")
-    metadata = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    metadata: dict[str, str | list[int]] = json.loads(
+        path.with_suffix(".json").read_text(encoding="utf-8")
+    )
     if metadata.get("shape") != [256, 256, 256, 3] or metadata.get("dtype") != "uint8":
         raise ValueError("Color-transform metadata has unsupported dimensions or dtype.")
     archive: bytes = path.read_bytes()
@@ -48,7 +53,9 @@ def load_color_cube(path: Path | None = None) -> NDArray[np.uint8]:
         raise ValueError("Color-transform archive does not match its recorded identity.")
     with np.load(io.BytesIO(archive), allow_pickle=False) as stored:
         cube: NDArray[np.uint8] = stored["delta"]
-        baselines = tuple(stored[channel] for channel in ("red", "green", "blue"))
+        baselines: tuple[ByteArray, ...] = tuple(
+            stored[channel] for channel in ("red", "green", "blue")
+        )
     if (
         cube.shape != (256, 256, 256, 3)
         or cube.dtype != np.uint8
@@ -79,6 +86,8 @@ class ColorTransform:
     def table(self) -> NDArray[np.uint8]:
         """Return the validated RGB8 cube, reconstructing it once under the lock."""
         with self._lock:
-            if self._table is None:
-                self._table = load_color_cube()
-            return self._table
+            table: ByteArray | None = self._table
+            if table is None:
+                table = load_color_cube()
+                self._table = table
+            return table

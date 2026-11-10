@@ -7,59 +7,72 @@ from typing import overload
 
 import numpy as np
 
-from ..array_types import BoolArray, CandidateRecord, CoordinateKey, DoubleArray
+from ..array_types import BoolArray, CandidateRecord, CoordinateKey, DoubleArray, FloatArray
 from ..jit import njit
+from .precision import round_to_float32
 
 Y_KEY = itemgetter("y")
-
-
-@njit(cache=True, inline="always")
-def rounded(value: float) -> np.float64:
-    """Round through float32 while retaining double-width tuple storage."""
-    return np.float64(np.float32(value))
 
 
 @njit(cache=True, nogil=True)
 def merge_snapshot(snapshot: DoubleArray, incoming: DoubleArray) -> tuple[BoolArray, BoolArray]:
     """Merge N×8 raw rows in place; return incoming-append and old-update masks."""
-    append = np.ones(len(incoming), np.bool_)
-    updated = np.zeros(len(snapshot), np.bool_)
-    xy = snapshot[:, :2].astype(np.float32)
-    sizes = np.empty(len(snapshot), np.float32)
-    for i in range(len(snapshot)):
-        sizes[i] = rounded(snapshot[i, 2] * snapshot[i, 2])
-    for row in range(len(incoming)):
-        new = incoming[row]
-        x, y = np.float32(new[0]), np.float32(new[1])
-        size = rounded(new[2] * new[2])
-        for i in range(len(snapshot)):
-            dy = np.float32(xy[i, 1] - y)
-            radius = max(sizes[i], size)
-            if np.float32(dy * dy) >= radius:
+    append_mask: BoolArray = np.ones(len(incoming), np.bool_)
+    updated_mask: BoolArray = np.zeros(len(snapshot), np.bool_)
+    positions: FloatArray = snapshot[:, :2].astype(np.float32)
+    squared_sizes: FloatArray = np.empty(len(snapshot), np.float32)
+    for snapshot_index in range(len(snapshot)):
+        squared_sizes[snapshot_index] = round_to_float32(
+            snapshot[snapshot_index, 2] * snapshot[snapshot_index, 2]
+        )
+    for incoming_index in range(len(incoming)):
+        incoming_row: DoubleArray = incoming[incoming_index]
+        x, y = np.float32(incoming_row[0]), np.float32(incoming_row[1])
+        incoming_squared_size: float = round_to_float32(incoming_row[2] * incoming_row[2])
+        for snapshot_index in range(len(snapshot)):
+            dy: np.float32 = np.float32(positions[snapshot_index, 1] - y)
+            maximum_squared_size: float | np.float32 = max(
+                squared_sizes[snapshot_index], incoming_squared_size
+            )
+            if np.float32(dy * dy) >= maximum_squared_size:
                 continue
-            dx = np.float32(xy[i, 0] - x)
-            if np.float32(np.float32(dx * dx) + np.float32(dy * dy)) >= radius:
+            dx: np.float32 = np.float32(positions[snapshot_index, 0] - x)
+            if np.float32(np.float32(dx * dx) + np.float32(dy * dy)) >= maximum_squared_size:
                 continue
-            append[row] = False
-            updated[i] = True
-            old = snapshot[i]
-            count = min(max(old[7], 1) + max(new[7], 1), 255.0)
-            weight = rounded(max(new[7], 1) / count)
-            remaining = rounded(1 - weight)
+            append_mask[incoming_index] = False
+            updated_mask[snapshot_index] = True
+            existing_row: DoubleArray = snapshot[snapshot_index]
+            observation_count: float = min(max(existing_row[7], 1) + max(incoming_row[7], 1), 255.0)
+            weight: float = round_to_float32(max(incoming_row[7], 1) / observation_count)
+            remaining: float = round_to_float32(1 - weight)
             for channel in range(7):
-                old[channel] = rounded(
-                    rounded(old[channel] * remaining) + rounded(new[channel] * weight)
+                existing_row[channel] = round_to_float32(
+                    round_to_float32(existing_row[channel] * remaining)
+                    + round_to_float32(incoming_row[channel] * weight)
                 )
-            old[7] = count
-            xy[i, 0], xy[i, 1] = old[0], old[1]
-            sizes[i] = rounded(old[2] * old[2])
-    return append, updated
+            existing_row[7] = observation_count
+            positions[snapshot_index, 0], positions[snapshot_index, 1] = (
+                existing_row[0],
+                existing_row[1],
+            )
+            squared_sizes[snapshot_index] = round_to_float32(existing_row[2] * existing_row[2])
+    return append_mask, updated_mask
 
 
 def packed(rows: Sequence[CandidateRecord]) -> DoubleArray:
     """Pack records into N×8 float64 [x,y,size,brightness,r,g,b,count] rows."""
     return np.array(
-        [(r["x"], r["y"], r["size"], r["brightness"], *r["rgb"], r["count"]) for r in rows],
+        [
+            (
+                candidate_record["x"],
+                candidate_record["y"],
+                candidate_record["size"],
+                candidate_record["brightness"],
+                *candidate_record["rgb"],
+                candidate_record["count"],
+            )
+            for candidate_record in rows
+        ],
         np.float64,
     ).reshape(-1, 8)
 
@@ -89,28 +102,39 @@ def join_catalogs_fast(
     incoming.sort(key=Y_KEY)
     if not destination:
         destination.extend(incoming)
-        return max((r["size"] for r in incoming), default=0.0)
+        return max((candidate_record["size"] for candidate_record in incoming), default=0.0)
     if not incoming:
         return maximum
-    sorted_input = maximum is not None
-    previous = maximum if maximum is not None else max(r["size"] for r in destination)
-    maximum = max(previous, max(r["size"] for r in incoming))
-    lower = min(r["y"] for r in incoming) - maximum - 1
-    upper = max(r["y"] for r in incoming) + maximum + 1
-    left = min(r["x"] for r in incoming) - maximum - 1
-    right = max(r["x"] for r in incoming) + maximum + 1
-    candidates = (
+    sorted_input: bool = maximum is not None
+    previous_maximum: float = (
+        maximum
+        if maximum is not None
+        else max(candidate_record["size"] for candidate_record in destination)
+    )
+    maximum = max(previous_maximum, max(candidate_record["size"] for candidate_record in incoming))
+    minimum_y: float = min(candidate_record["y"] for candidate_record in incoming) - maximum - 1
+    maximum_y: float = max(candidate_record["y"] for candidate_record in incoming) + maximum + 1
+    minimum_x: float = min(candidate_record["x"] for candidate_record in incoming) - maximum - 1
+    maximum_x: float = max(candidate_record["x"] for candidate_record in incoming) + maximum + 1
+    candidates: list[CandidateRecord] = (
         destination[
-            bisect_left(destination, lower, key=Y_KEY) : bisect_right(destination, upper, key=Y_KEY)
+            bisect_left(destination, minimum_y, key=Y_KEY) : bisect_right(
+                destination, maximum_y, key=Y_KEY
+            )
         ]
         if sorted_input
         else destination
     )
-    snapshot = [r for r in candidates if lower <= r["y"] <= upper and left <= r["x"] <= right]
-    data = packed(snapshot)
-    append, updated = merge_snapshot(data, packed(incoming))
-    for snapshot_index in np.flatnonzero(updated):
-        record, values = snapshot[snapshot_index], data[snapshot_index]
+    snapshot: list[CandidateRecord] = [
+        candidate_record
+        for candidate_record in candidates
+        if minimum_y <= candidate_record["y"] <= maximum_y
+        and minimum_x <= candidate_record["x"] <= maximum_x
+    ]
+    snapshot_data: DoubleArray = packed(snapshot)
+    append_mask, updated_mask = merge_snapshot(snapshot_data, packed(incoming))
+    for snapshot_index in np.flatnonzero(updated_mask):
+        record, values = snapshot[snapshot_index], snapshot_data[snapshot_index]
         fields: tuple[tuple[CoordinateKey, int], ...] = (
             ("x", 0),
             ("y", 1),
@@ -122,6 +146,6 @@ def join_catalogs_fast(
         record["rgb"] = values[4:7].tolist()
         record["count"] = int(values[7])
         maximum = max(maximum, record["size"])
-    destination.extend(row for row, keep in zip(incoming, append) if keep)
+    destination.extend(row for row, keep in zip(incoming, append_mask) if keep)
     destination.sort(key=Y_KEY)
     return maximum

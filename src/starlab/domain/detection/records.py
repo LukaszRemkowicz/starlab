@@ -35,14 +35,14 @@ class CompiledStats(NamedTuple):
     score: float
 
 
-class Buffer(NamedTuple):
+class DetectionTile(NamedTuple):
     """Numba image tile: float32 RGB/luma, optional empty mask, origin, typed caches."""
 
     rgb: FloatArray
-    lum: FloatArray
+    luminance: FloatArray
     allowed: BoolArray
-    ox: int
-    oy: int
+    origin_x: int
+    origin_y: int
     stats: MutableMapping[CacheKey, CompiledStats]
     colors: MutableMapping[CacheKey, RGB]
 
