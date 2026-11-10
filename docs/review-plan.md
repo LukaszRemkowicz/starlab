@@ -10,7 +10,7 @@ The user authorized implementation after the complete baseline review, in the ex
 - [x] Item6: decompose responsibility hotspots, correct state/lifecycle defects, add complexity gates and focused regressions.368 full-suite cases pass; real GPU/CPU correction errors remain below1.5e-7. Two documented numerical state-machine exceptions remain.
 - [x] Item7: add accurate docstrings, boundary/local types and enforced annotation/type checks.
 - [x] Item8: name secondary-pattern units and derive Python ray counts from its data.
-- [ ] Item9: document executable shader stages and maintain CPU/GPU numerical distinction; shader coverage belongs to item11.
+- [x] Item9: document executable shader stages and maintain CPU/GPU numerical distinction; shader coverage belongs to item11.
 - [ ] Item10: isolate state/resource ownership in focused objects, without wrapping numerical kernels in class hierarchies.
 - [ ] Item11: strengthen independent oracles, one-to-one matching, event synchronization and actual GPU checks.
 - [ ] Item12: verify excluded experiment files remain absent and no source/test import depends on them.

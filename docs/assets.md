@@ -33,3 +33,23 @@ preserves weights/order. CPU geometry and GPU instance counts derive from this
 table; the shader's uniform arrays provide capacity for84 directions. This
 pattern controls the look of Secondary rays. It is independent of the detector's
 eight-direction sampling stencil, and is not a polymorphic abstraction.
+
+## GPU shader stages
+
+The vertex shader expands one measured source into ray/radial quads, rotates
+ray directions and maps full-image pixel centers to viewport coordinates.
+Uniform `kind` selects Primary0, Secondary1, Soft2, Ring3, source shrink4 or
+source grow5. The84-direction array capacity is distinct from the active count.
+
+The fragment shader evaluates transverse antialiasing and longitudinal ray
+falloff, radial halo/ring profiles, optional rainbow modulation, or source-profile
+correction magnitudes. Pixel-center and image-y/OpenGL-y conventions are explicit
+in the source. Reduced radial previews integrate64 subpixel positions to avoid
+missing narrow emitters; full-resolution evaluation uses the native point grid.
+
+The Python renderer owns GL resources, uniforms, draw order and blend modes.
+It combines source corrections before added effect layers. Shader output alone
+is therefore not a finished photograph. CPU export uses independent NumPy/Numba
+profiles; duplicating the mathematics across execution languages is intentional.
+Numerical GPU tests must compile and execute both shader files on a real context;
+CPU fixture tests alone cannot detect a broken uniform or shader change.

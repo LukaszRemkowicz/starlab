@@ -1,4 +1,9 @@
 #version 330 core
+// Pass IDs supplied by GpuPreviewRenderer. Radial passes start at SOFT;
+// source-profile corrections run before the added effect groups are composited.
+const int SOFT = 2;
+const int SOURCE_SHRINK = 4;
+const int SOURCE_GROW = 5;
 uniform vec2 outputSize, origin;
 uniform float sampling, scale, cutoff, coefficient, widening, rayLength;
 uniform float rainbow, frequency, phase, softSize, softPower;
@@ -30,21 +35,24 @@ float transverse(float cross,float a,float footprint) {
     return sum/7.0;
 }
 float radialFlare(float r) {
-    if(kind==2) return max(5.7*pow(max(1.0-r/softSize,0.0),softPower)-0.00025,0.0);
+    if(kind==SOFT) return max(5.7*pow(max(1.0-r/softSize,0.0),softPower)-0.00025,0.0);
     float inner=ringPeak*(1.0-(0.03+0.0097*innerWidth));
     float outer=ringPeak*(1.03+0.02*outerWidth);
     return r<ringPeak ? pow(clamp((r-inner)/(ringPeak-inner),0.0,1.0),innerPower)
         : pow(clamp((outer-r)/(outer-ringPeak),0.0,1.0),outerPower);
 }
 void main() {
+    // OpenGL y runs upward; original-image y runs downward.
     vec2 world=origin+vec2(gl_FragCoord.x-0.5,outputSize.y-gl_FragCoord.y-0.5)*sampling;
     vec2 delta=world-center;
     float radius=length(delta);
-    if(kind>=4) {
+    // These passes output positive correction magnitudes, not final RGB.
+    // The renderer combines them with the source before Screen composition.
+    if(kind>=SOURCE_SHRINK) {
         float sigma=measuredWidth/2.354820045;
         float u=dot(delta,delta)/(sigma*sigma);
-        if(measuredWidth<=0.0 || u>=(kind==4 ? 9.0 : 36.0)) discard;
-        if(kind==5) {
+        if(measuredWidth<=0.0 || u>=(kind==SOURCE_SHRINK ? 9.0 : 36.0)) discard;
+        if(kind==SOURCE_GROW) {
             float wings=(exp(-u/4.5)-exp(-u/2.0))*pow(1.0-u/36.0,2.0);
             fragColor=vec4(softFilter*(2.0*filterWeight-1.0)*sourcePeak*wings,1.0);
             return;
@@ -56,7 +64,7 @@ void main() {
         return;
     }
     if(radius>cutoff+(sampling>1.0 ? sampling*0.71 : 0.0)) discard;
-    if(kind>=2 && sampling>1.0) {
+    if(kind>=SOFT && sampling>1.0) {
         // Integrate emitted, clamped light, not a single point that can miss
         // the whole star. Full-resolution export/profile evaluation is unchanged.
         vec3 sum=vec3(0);
@@ -68,7 +76,7 @@ void main() {
         return;
     }
     float value;
-    if(kind<2) {
+    if(kind<SOFT) {
         bool horizontal=abs(direction.x)>=abs(direction.y);
         float along=horizontal ? world.x-integerOrigin.x : world.y-integerOrigin.y;
         bool positive=horizontal ? direction.x>0.0 : direction.y>0.0;
@@ -87,8 +95,9 @@ void main() {
     } else {
         value=radialFlare(radius);
     }
+    // Per-source light is clamped before the renderer blends overlapping quads.
     vec3 result=light*value;
-    if(kind<2 && rainbow>0.0) {
+    if(kind<SOFT && rainbow>0.0) {
         float u=radius*scale*125000.0/pow(107.0-frequency,2.0);
         float theta=radians((floor(u)+36.0*(50.0-phase))*0.1);
         vec3 modulation=gray!=0 ? vec3(sin(theta)) : vec3(sin(theta),cos(theta),-sin(theta));
