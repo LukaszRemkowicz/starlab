@@ -4,7 +4,7 @@ The user authorized implementation after the complete baseline review, in the ex
 
 - [x] Complete review and record baseline, asset explanations and preservation constraints in code-review.md.
 - [x] Item2: validate/document analysis lookup data and read-only ownership.22 focused tests pass.
-- [ ] Item3: remove genuine duplication/dead scanning work; preserve independent numerical backends.
+- [x] Item3: remove genuine duplication/dead scanning work; preserve independent numerical backends.348 full-suite cases pass after shared ray/tile/image/history helpers and TIFF-drop regressions.
 - [ ] Item4: replace categorical branch dispatch with match where clearer.
 - [x] Item5: separate/validate universal transform loading and metadata meaning. Archive/schema checks precede reconstruction; stored values/operation order remain unchanged.
 - [ ] Item6: decompose responsibility hotspots, correct state/lifecycle defects, add complexity gates and focused regressions.

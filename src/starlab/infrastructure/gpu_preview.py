@@ -28,6 +28,7 @@ from ..domain.effects.profiles import (
     gain,
     image_diagonal,
     radial_extent,
+    ray_coefficients,
     sine,
 )
 from ..domain.effects.settings import KINDS
@@ -240,18 +241,13 @@ class GpuPreviewRenderer:
                 continue
             rays = p.points if kind == "primary" else 84 if kind == "secondary" else 1
             self._attributes(self.buffers[kind], rays)
-            sharp = (
-                (p.sharpness / 90) ** 1.4
-                if p.sharpness <= 90
-                else (1 + 0.251416 * ((p.sharpness - 90) / 10) ** 1.4 / scale)
-            )
-            coefficient = (4 * sharp + 0.08) * scale
+            coefficient, widening = ray_coefficients(p, scale)
             values = dict(
                 kind=kind_index,
                 rayCount=rays,
                 cutoff=radial_extent(kind, p, diagonal),
                 coefficient=coefficient,
-                widening=0.15 * (p.spread / 100) ** 2 * coefficient,
+                widening=widening,
                 rayLength=p.length,
                 intensity=gain(kind, p),
                 threshold=threshold,

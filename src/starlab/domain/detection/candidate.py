@@ -308,19 +308,3 @@ def merge_candidate(rows, new, maximum_size):
         index -= 1
     rows.insert(index, new)
     return max(maximum_size, new["size"])
-
-
-def detect_candidates(image, roi=None, coarse=False, excluded=()):
-    yy, xx = np.where(image.rgb.max(axis=2) >= 0.2)
-    rows = []
-    maximum_size = 0.0
-    for x, y in zip(xx, yy):
-        if roi is not None and not (roi[0] <= x < roi[2] and roi[1] <= y < roi[3]):
-            continue
-        if covered(x + 0.5, y + 0.5, excluded):
-            continue
-        new = candidate(image, float(x) + 0.5, float(y) + 0.5, coarse, excluded)
-        if new is None:
-            continue
-        maximum_size = merge_candidate(rows, new, maximum_size)
-    return rows

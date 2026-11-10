@@ -13,6 +13,7 @@ import numpy as np
 from numba import get_num_threads, njit, prange, set_num_threads, threading_layer, types
 from numba.extending import overload, register_jitable
 from numba.typed import Dict, List
+from numpy.typing import NDArray
 
 from . import numeric, rays
 
@@ -394,6 +395,38 @@ def color(im, x, y, index, ring=False):
 
 
 @njit(cache=True)
+def _extend_ray(
+    im: Buffer,
+    x: float,
+    y: float,
+    dx: int,
+    dy: int,
+    center: tuple[float, float, float, float],
+    lum: NDArray[np.float64],
+    distance: NDArray[np.float64],
+    available: int,
+    needed: int,
+) -> int:
+    """Fill ray samples through needed, stopping at bounds; return the filled count."""
+    while available <= needed:
+        px, py = rays.add(x, available * dx), rays.add(y, available * dy)
+        if not inside(im, px, py):
+            break
+        value = sample(im, px, py)
+        lum[available] = rays.luma(value)
+        a, b, c = (
+            rays.sub(center[0], value[0]),
+            rays.sub(center[1], value[1]),
+            rays.sub(center[2], value[2]),
+        )
+        distance[available] = f(
+            math.sqrt(rays.add(rays.add(rays.mul(b, b), rays.mul(a, a)), rays.mul(c, c)))
+        )
+        available += 1
+    return available
+
+
+@njit(cache=True)
 def initial(im, x, y):
     center = sample(im, x, y)
     center_luma = rays.luma(center)
@@ -408,23 +441,8 @@ def initial(im, x, y):
         for k in range(1, limit):
             width = int(rays.add(rays.mul(k, 0.25), 1.0))
             start = k - width + 1
-            needed = k
-            while available <= needed:
-                px, py = rays.add(x, available * dx), rays.add(y, available * dy)
-                if not inside(im, px, py):
-                    break
-                value = sample(im, px, py)
-                lum[available] = rays.luma(value)
-                a, b, c = (
-                    rays.sub(center[0], value[0]),
-                    rays.sub(center[1], value[1]),
-                    rays.sub(center[2], value[2]),
-                )
-                distance[available] = f(
-                    math.sqrt(rays.add(rays.add(rays.mul(b, b), rays.mul(a, a)), rays.mul(c, c)))
-                )
-                available += 1
-            if available <= needed:
+            available = _extend_ray(im, x, y, dx, dy, center, lum, distance, available, k)
+            if available <= k:
                 radii[direction] = rays.mul(k, length)
                 rejected = True
                 break
@@ -435,23 +453,7 @@ def initial(im, x, y):
             delta = rays.sub(rays.sub(prev, prev_color), rays.sub(current, current_color))
             if delta > rays.mul(width, f(0.04)) or -delta > rays.mul(width, f(0.015)):
                 end = min(k + width, limit - 1)
-                while available <= end:
-                    px, py = rays.add(x, available * dx), rays.add(y, available * dy)
-                    if not inside(im, px, py):
-                        break
-                    value = sample(im, px, py)
-                    lum[available] = rays.luma(value)
-                    a, b, c = (
-                        rays.sub(center[0], value[0]),
-                        rays.sub(center[1], value[1]),
-                        rays.sub(center[2], value[2]),
-                    )
-                    distance[available] = f(
-                        math.sqrt(
-                            rays.add(rays.add(rays.mul(b, b), rays.mul(a, a)), rays.mul(c, c))
-                        )
-                    )
-                    available += 1
+                available = _extend_ray(im, x, y, dx, dy, center, lum, distance, available, end)
                 if available <= end:
                     radii[direction] = rays.mul(k, length)
                     rejected = True

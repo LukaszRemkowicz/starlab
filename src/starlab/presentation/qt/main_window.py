@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...domain.effects.settings import EffectSettings
+from .drop_paths import local_tiff_path
 from .effect_panel import EffectPanel
 from .image_view import ImageView
 from .theme import STYLE, icon
@@ -48,15 +49,18 @@ class Canvas(QWidget):
         self.setAcceptDrops(True)
 
     def dragEnterEvent(self, event):
-        if event.mimeData().hasUrls() and any(u.isLocalFile() for u in event.mimeData().urls()):
+        if local_tiff_path(event.mimeData()) is not None:
+            event.acceptProposedAction()
+
+    def dragMoveEvent(self, event):
+        if local_tiff_path(event.mimeData()) is not None:
             event.acceptProposedAction()
 
     def dropEvent(self, event):
-        for url in event.mimeData().urls():
-            if url.isLocalFile():
-                self.file_dropped.emit(url.toLocalFile())
-                event.acceptProposedAction()
-                break
+        path = local_tiff_path(event.mimeData())
+        if path is not None:
+            self.file_dropped.emit(path)
+            event.acceptProposedAction()
 
 
 class MainWindow(QMainWindow):

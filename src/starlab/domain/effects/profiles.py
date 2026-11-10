@@ -6,6 +6,8 @@ from threading import RLock
 
 import numpy as np
 
+from .settings import EffectParameters
+
 SECONDARY_RAYS = (
     (40, 27),
     (75, 9),
@@ -140,11 +142,28 @@ def image_diagonal(width, height):
     return int(np.float32(math.hypot(width, height)) + np.float32(1))
 
 
+def length_envelope(length: float) -> int:
+    """Round CPU ray support upward so nearby length edits can reuse geometry."""
+    return max(10, math.ceil(length / 10) * 10)
+
+
+def ray_coefficients(p: EffectParameters, scale: float) -> tuple[float, float]:
+    """Return transverse sharpness and radial widening in full-image pixel units."""
+    sharp = (
+        (p.sharpness / 90) ** 1.4
+        if p.sharpness <= 90
+        else 1 + 0.251416 * ((p.sharpness - 90) / 10) ** 1.4 / scale
+    )
+    coefficient = (4 * sharp + 0.08) * scale
+    widening = 0.15 * (p.spread / 100) ** 2 * coefficient
+    return coefficient, widening
+
+
 def geometry_key(kind, p):
     if kind in ("primary", "secondary"):
         # Length changes reuse transverse AA. Bounded support envelopes
         # avoid allocating a whole-image maximum-length kernel for short rays.
-        envelope = max(10, math.ceil(p.length / 10) * 10)
+        envelope = length_envelope(p.length)
         return (
             kind,
             envelope,
@@ -213,14 +232,9 @@ def scene_batch_size(kind, p, diagonal, sampling):
     """Bound estimated sparse contributions, including long full-size exports."""
     if kind in ("primary", "secondary"):
         scale = 800 / max(diagonal, 1414)
-        envelope = max(10, math.ceil(p.length / 10) * 10)
+        envelope = length_envelope(p.length)
         cutoff = min((0.000015 ** (-(envelope + 25) / 190) - 1) / scale, diagonal + 2)
-        sharp = (
-            (p.sharpness / 90) ** 1.4
-            if p.sharpness <= 90
-            else 1 + 0.251416 * ((p.sharpness - 90) / 10) ** 1.4 / scale
-        )
-        coefficient = (4 * sharp + 0.08) * scale
+        coefficient, _ = ray_coefficients(p, scale)
         band = (1 + cutoff * 0.15 * (p.spread / 100) ** 2 * coefficient) / (
             coefficient / math.sqrt(2)
         ) + 0.875
@@ -262,16 +276,10 @@ def sampled_ray_scene(width, height, positions, p, diagonal, sampling, angle):
     thousands of tiny profile allocations during an angle or sharpness edit.
     """
     scale = 800 / max(diagonal, 1414)
-    envelope = max(10, math.ceil(p.length / 10) * 10)
+    envelope = length_envelope(p.length)
     cutoff = min((0.000015 ** (-(envelope + 25) / 190) - 1) / scale, diagonal + 2)
     extent = math.ceil(cutoff + 1)
-    sharp = (
-        (p.sharpness / 90) ** 1.4
-        if p.sharpness <= 90
-        else 1 + 0.251416 * ((p.sharpness - 90) / 10) ** 1.4 / scale
-    )
-    coefficient = (4 * sharp + 0.08) * scale
-    widening = 0.15 * (p.spread / 100) ** 2 * coefficient
+    coefficient, widening = ray_coefficients(p, scale)
     sin, cos = sine(angle), sine(angle + 900)
     horizontal = abs(sin) >= abs(cos)
     axis = 0 if horizontal else 1
@@ -352,7 +360,7 @@ def sparse_profile(kind, p, diagonal, phase, sampling, residue, angle=0, bounds=
         return cached
     cutoff = radial_extent(kind, p, diagonal)
     if kind in ("primary", "secondary"):
-        envelope = max(10, math.ceil(p.length / 10) * 10)
+        envelope = length_envelope(p.length)
         cutoff = min(
             (0.000015 ** (-(envelope + 25) / 190) - 1) * max(diagonal, 1414) / 800, diagonal + 2
         )
@@ -360,13 +368,7 @@ def sparse_profile(kind, p, diagonal, phase, sampling, residue, angle=0, bounds=
     center_x, center_y = phase[0] / 4 - 0.5, phase[1] / 4 - 0.5
     if kind in ("primary", "secondary"):
         scale = 800 / max(diagonal, 1414)
-        sharp = (
-            (p.sharpness / 90) ** 1.4
-            if p.sharpness <= 90
-            else 1 + 0.251416 * ((p.sharpness - 90) / 10) ** 1.4 / scale
-        )
-        coefficient = (4 * sharp + 0.08) * scale
-        widening = 0.15 * (p.spread / 100) ** 2 * coefficient
+        coefficient, widening = ray_coefficients(p, scale)
         sin, cos = sine(angle), sine(angle + 900)
         horizontal = abs(sin) >= abs(cos)
         dominant = abs(sin) if horizontal else abs(cos)

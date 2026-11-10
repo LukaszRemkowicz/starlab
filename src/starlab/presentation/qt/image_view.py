@@ -5,6 +5,19 @@ from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView
 
 from ...domain.imaging import Pixels, display_pixels
 from ...domain.stars import Star
+from .drop_paths import local_tiff_path
+
+
+def _pixmap(data: Pixels, color_space: str) -> QPixmap:
+    """Create a GUI-thread pixmap with copied image storage independent of NumPy."""
+    rgb = display_pixels(data, color_space)
+    if rgb.shape[2] == 1:
+        rgb = np.repeat(rgb, 3, axis=2)
+    rgb = np.ascontiguousarray(rgb)
+    image = QImage(
+        rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0], QImage.Format.Format_RGB888
+    ).copy()
+    return QPixmap.fromImage(image)
 
 
 class ImageView(QGraphicsView):
@@ -51,14 +64,7 @@ class ImageView(QGraphicsView):
         *,
         preserve_detail=False,
     ) -> None:
-        rgb = display_pixels(data, color_space)
-        if rgb.shape[2] == 1:
-            rgb = np.repeat(rgb, 3, axis=2)
-        rgb = np.ascontiguousarray(rgb)
-        image = QImage(
-            rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0], QImage.Format.Format_RGB888
-        ).copy()
-        self.item.setPixmap(QPixmap.fromImage(image))
+        self.item.setPixmap(_pixmap(data, color_space))
         if not preserve_detail:
             self.detail_item.setPixmap(QPixmap())
         self.item.setScale(scale)
@@ -94,14 +100,7 @@ class ImageView(QGraphicsView):
         return self.mapToScene(self.viewport().rect()).boundingRect().intersected(self.sceneRect())
 
     def set_region_pixels(self, data, color_space, scale, origin):
-        rgb = display_pixels(data, color_space)
-        if rgb.shape[2] == 1:
-            rgb = np.repeat(rgb, 3, axis=2)
-        rgb = np.ascontiguousarray(rgb)
-        image = QImage(
-            rgb.data, rgb.shape[1], rgb.shape[0], rgb.strides[0], QImage.Format.Format_RGB888
-        ).copy()
-        self.detail_item.setPixmap(QPixmap.fromImage(image))
+        self.detail_item.setPixmap(_pixmap(data, color_space))
         self.detail_item.setScale(scale)
         self.detail_item.setPos(origin[0] + (1 - scale) / 2, origin[1] + (1 - scale) / 2)
         self.viewport().update()
@@ -188,14 +187,15 @@ class ImageView(QGraphicsView):
                 )
 
     def dragEnterEvent(self, event) -> None:
-        if event.mimeData().hasUrls():
+        if local_tiff_path(event.mimeData()) is not None:
             event.acceptProposedAction()
 
     def dragMoveEvent(self, event) -> None:
-        event.acceptProposedAction()
+        if local_tiff_path(event.mimeData()) is not None:
+            event.acceptProposedAction()
 
     def dropEvent(self, event) -> None:
-        urls = event.mimeData().urls()
-        if urls and urls[0].isLocalFile():
-            self.file_dropped.emit(urls[0].toLocalFile())
+        path = local_tiff_path(event.mimeData())
+        if path is not None:
+            self.file_dropped.emit(path)
             event.acceptProposedAction()

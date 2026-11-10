@@ -26,6 +26,14 @@ GROUP_CACHE = ArrayCache(32)
 LIGHT_CACHE = ArrayCache(64)
 
 
+def _grouped_ray_scene(kind: str, sampling: int, source_count: int, region: bool) -> bool:
+    """Select the ray path whose contributions are sorted for grouped reduction."""
+    return ((sampling > 1 and source_count > 8) or region) and kind in (
+        "primary",
+        "secondary",
+    )
+
+
 def _scene(width, height, stars, kind, p, sampling, cancel, diagonal=None):
     region = diagonal is not None
     diagonal = diagonal or image_diagonal(width, height)
@@ -37,7 +45,7 @@ def _scene(width, height, stars, kind, p, sampling, cancel, diagonal=None):
     out_width = (width + sampling - 1) // sampling
     indices, profiles, radii, sources = [], [], [], []
     rays = directions(kind, p)
-    if ((sampling > 1 and len(stars) > 8) or region) and kind in ("primary", "secondary"):
+    if _grouped_ray_scene(kind, sampling, len(stars), region):
         for start in range(0, len(stars), 512):
             for angle, weight in rays:
                 check_cancel(cancel)
@@ -183,10 +191,7 @@ def _group(frame, stars, maximum, kind, p, sampling, cancel, diagonal=None):
             check_cancel(cancel)
             pixels = indices[start : start + 131072]
             factors = 1 - np.clip(light[start : start + 131072] * intensity, 0, 1)
-            if ((sampling > 1 and len(subset) > 8) or diagonal is not None) and kind in (
-                "primary",
-                "secondary",
-            ):
+            if _grouped_ray_scene(kind, sampling, len(subset), diagonal is not None):
                 boundaries = np.r_[0, np.flatnonzero(np.diff(pixels)) + 1]
                 transmission[pixels[boundaries]] *= np.multiply.reduceat(
                     factors, boundaries, axis=0

@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import replace
 from math import ceil, floor
 from pathlib import Path
@@ -556,20 +557,15 @@ class Controller(QObject):
         self.debounce.start(0)
 
     def undo(self) -> None:
-        previous_stars, previous_mask = self.session.stars, self.session.sky_mask
-        if not self.exclusive and self.session.undo():
-            if (
-                self.session.stars is not previous_stars
-                or self.session.sky_mask is not previous_mask
-            ):
-                self._clear_effect_history()
-            self._restore_detection_controls()
-            self.window.mark_custom()
-            self.refresh()
+        self._restore_history(self.session.undo)
 
     def redo(self) -> None:
+        self._restore_history(self.session.redo)
+
+    def _restore_history(self, restore: Callable[[], bool]) -> None:
+        """Restore an edit and invalidate cached effects when its catalog or mask changes."""
         previous_stars, previous_mask = self.session.stars, self.session.sky_mask
-        if not self.exclusive and self.session.redo():
+        if not self.exclusive and restore():
             if (
                 self.session.stars is not previous_stars
                 or self.session.sky_mask is not previous_mask

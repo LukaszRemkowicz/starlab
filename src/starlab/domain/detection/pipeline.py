@@ -14,9 +14,11 @@ from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from threading import Event
 
 import numpy as np
+from numpy.typing import NDArray
 from scipy import ndimage
 
 from ..imaging import check_cancel
+from ..sky_mask import SkyMask
 from .candidate import Image, candidate, covered, merge_candidate
 from .catalog import join_catalogs
 from .numeric import normalize_catalog
@@ -27,6 +29,30 @@ TILE = 1024
 HALO = 272  # Covers native 266-pixel rays and the largest disk/ring support.
 logger = logging.getLogger(__name__)
 COMPILED = True
+
+
+def _tile_region(
+    width: int,
+    height: int,
+    left: int,
+    top: int,
+    sky_mask: SkyMask | None,
+    source_scale: int,
+) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int], NDArray[np.bool_] | None]:
+    """Return tile core, clipped halo bounds, and allowed pixels at source scale."""
+    core = (left, top, min(width, left + TILE), min(height, top + TILE))
+    bounds = (
+        max(0, left - HALO),
+        max(0, top - HALO),
+        min(width, core[2] + HALO),
+        min(height, core[3] + HALO),
+    )
+    allowed = (
+        None
+        if sky_mask is None
+        else sky_mask.region(tuple(v * source_scale for v in bounds), sampling=source_scale)
+    )
+    return core, bounds, allowed
 
 
 def peak_positions_reference(image, threshold, core, coarse=False):
@@ -126,18 +152,7 @@ def scan_tiled(
             local_rows = []
             maximum_size = 0.0
             check_cancel(cancel)
-            core = (left, top, min(width, left + TILE), min(height, top + TILE))
-            bounds = (
-                max(0, left - HALO),
-                max(0, top - HALO),
-                min(width, core[2] + HALO),
-                min(height, core[3] + HALO),
-            )
-            allowed = (
-                None
-                if sky_mask is None
-                else sky_mask.region(tuple(v * source_scale for v in bounds), sampling=source_scale)
-            )
+            core, bounds, allowed = _tile_region(width, height, left, top, sky_mask, source_scale)
             if allowed is not None and not allowed.any():
                 continue
             image = Image(read_tile(bounds), origin=bounds[:2], allowed=allowed)
@@ -244,18 +259,7 @@ def scan_compiled(
         started = time.monotonic()
         check_cancel(token)
         left, top = column * TILE, row * TILE
-        core = (left, top, min(width, left + TILE), min(height, top + TILE))
-        bounds = (
-            max(0, left - HALO),
-            max(0, top - HALO),
-            min(width, core[2] + HALO),
-            min(height, core[3] + HALO),
-        )
-        allowed = (
-            None
-            if sky_mask is None
-            else sky_mask.region(tuple(v * source_scale for v in bounds), sampling=source_scale)
-        )
+        core, bounds, allowed = _tile_region(width, height, left, top, sky_mask, source_scale)
         if allowed is not None and not allowed.any():
             return None, [], np.zeros(2)
         image = Image(read_tile(bounds), origin=bounds[:2], allowed=allowed)

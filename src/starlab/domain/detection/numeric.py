@@ -3,8 +3,9 @@
 Float32 compatibility rounding is used where quantized results require it."""
 
 import math
-import struct
 from dataclasses import dataclass
+
+from .rays import f
 
 LUMA = (0.2126390039920807, 0.7151686549186707, 0.07219231128692627)
 
@@ -104,9 +105,6 @@ def refine_position(position, size, sample):
 
     Direction order is the native jump table97B3C: E,SE,S,SW,W,NW,N,NE.
     """
-
-    def f(value):
-        return struct.unpack("<f", struct.pack("<f", value))[0]
 
     x, y = map(f, position)
     index = max(1, int(size * 4))
