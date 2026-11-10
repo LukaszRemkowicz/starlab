@@ -297,3 +297,36 @@ def test_production_gpu_window_displays_every_mode(qtbot, channels):
     finally:
         assert controller.shutdown()
     assert renderer.context is None and renderer.source_texture is None
+
+
+@pytest.mark.parametrize("channels", [1, 3], ids=["gray", "rgb"])
+def test_native_soft_filter_changes_halo_hierarchy_and_invalidates_group_cache(gpu, channels):
+    render, _ = gpu
+    frame, stars = _scene(channels)
+    base = EffectSettings.disabled()
+    settings = replace(
+        base, soft=replace(base.soft, enabled=True, quantity=100, intensity=40, size=35)
+    )
+    previews = [
+        render(
+            frame,
+            stars,
+            replace(settings, soft=replace(settings.soft, soft_filter=value)),
+            full_resolution=True,
+        )
+        for value in (0, 50, 100, 0, 100)
+    ]
+    small_halos = [preview.effects[37, 42, 0] for preview in previews]
+    large_halos = [preview.effects[53, 109, 0] for preview in previews]
+    assert small_halos[0] > small_halos[1] > small_halos[2]
+    assert small_halos[2] == 0
+    assert 0 < large_halos[0] < large_halos[1] < large_halos[2]
+    np.testing.assert_array_equal(previews[0].effects, previews[3].effects)
+    np.testing.assert_array_equal(previews[2].effects, previews[4].effects)
+    expected = render_preview(
+        frame,
+        stars,
+        replace(settings, soft=replace(settings.soft, soft_filter=100)),
+        full_resolution=True,
+    )
+    _assert_parity(previews[2].effects, expected.effects)

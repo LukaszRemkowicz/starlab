@@ -19,7 +19,7 @@ Photometry estimates local background planes and signed aperture flux on origina
 3. Combine enabled Primary, Secondary, Soft Flare and Ring Flare layers with Screen composition.
 4. Compose those layers over the corrected base and convert to display or export encoding.
 
-The CPU and GPU may calculate independent layer buffers in a different scheduling order; the final composition always follows the order above. Halo controls do not select or scale the source prefilter. The catalogue is not detected again when a slider moves. Missing or uncertain measurements receive no source-profile correction.
+The CPU and GPU may calculate independent layer buffers in a different scheduling order; the final composition always follows the order above. Halo controls do not select or scale the source prefilter. Soft filter also biases the Soft Flare emission layer using the same fixed source-size preference: it suppresses small-source halos and strengthens large-source halos. Other emission groups remain unchanged. The catalogue is not detected again when a slider moves. Missing or uncertain measurements receive no source-profile correction.
 
 Source corrections preserve the exact central sample of a centered source model and taper at their support boundary. Overlapping corrections of the same kind use a per-channel maximum, avoiding stacked subtraction. This is a digital approximation of source-wing editing, not a complete optical or deblending model.
 

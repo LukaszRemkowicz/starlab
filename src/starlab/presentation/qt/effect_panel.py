@@ -64,7 +64,7 @@ class ParameterControl(QWidget):
             "quantity": "Brightness threshold for this effect. Higher values include fainter detected sources across the image.",
             "saturation": "0 preserves the source color. Positive values add saturation to this effect.",
             "rainbow": "0 adds no rainbow modulation. Increase to color the rays.",
-            "soft_filter": "First shrink small stars and enlarge large stars in the original image, then apply effects. Independent of halo Quantity, Intensity and Size; 0 leaves source pixels unchanged.",
+            "soft_filter": "Shrink small stars and enlarge large stars in the original image before effects. Also fade Soft Flare halos on small measured stars and strengthen them on large stars. The source correction is independent of halo Quantity, Intensity and Size; 0 disables both filter operations.",
         }
         if key in tips:
             self.setToolTip(tips[key])

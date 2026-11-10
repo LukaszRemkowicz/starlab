@@ -6,7 +6,7 @@ from typing import TypedDict
 
 import numpy as np
 
-from ..array_types import Bounds, DoubleArray
+from ..array_types import Bounds, DoubleArray, FloatArray
 from ..imaging import Pixels, check_cancel
 from ..jit import njit
 from ..sky_mask import SkyMask
@@ -20,6 +20,15 @@ class FilterOptions(TypedDict):
     sampling: int
     sky_mask: SkyMask | None
     cancel: Event | None
+
+
+def soft_halo_factors(stars: tuple[Star, ...], strength: float) -> FloatArray:
+    """Bias halo light toward large measured sources; unmeasured sources remain neutral."""
+    weights: FloatArray = np.array(
+        [star.soft_weight if star.source_profile else 0.5 for star in stars], dtype=np.float32
+    )
+    amount: float = strength / 100
+    return 1 + amount * (2 * weights - 1)
 
 
 def reduction_records(stars: tuple[Star, ...]) -> DoubleArray:

@@ -26,6 +26,7 @@ from .profiles import (
     sparse_profile,
 )
 from .settings import KINDS, EffectKind, EffectParameters, EffectSettings
+from .soft_filter import soft_halo_factors
 
 type LitArrays = tuple[IndexArray, Pixels]
 
@@ -213,7 +214,9 @@ def _lit_scene(
         stars,
         maximum,
         kind,
-        replace(parameters, intensity=0, soft_filter=0),
+        replace(
+            parameters, intensity=0, soft_filter=parameters.soft_filter if kind == "soft" else 0
+        ),
         sampling,
         diagonal,
     )
@@ -238,6 +241,8 @@ def _lit_scene(
     if channels == 1:
         colors = colors.mean(axis=1, keepdims=True)
     amplitudes: FloatArray = colors * factors[:, None]
+    if kind == "soft" and parameters.soft_filter:
+        amplitudes *= soft_halo_factors(stars, parameters.soft_filter)[:, None]
     scale: float = 800 / max(diagonal or image_diagonal(frame.width, frame.height), 1414)
     rays: bool = kind in ("primary", "secondary")
     values: FloatArray | DoubleArray = profile
@@ -296,7 +301,7 @@ def _group(
         stars,
         maximum,
         kind,
-        replace(parameters, soft_filter=0),
+        parameters if kind == "soft" else replace(parameters, soft_filter=0),
         sampling,
         diagonal,
     )

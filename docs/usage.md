@@ -14,7 +14,7 @@ Primary and Secondary have separate controls under Spikes. Primary exposes the p
 
 Quantity controls an effect's source-brightness cutoff; it is not a detection-count limit. Increasing it can admit fainter measured sources. Intensity changes emitted effect light. Saturation0 leaves the measured source color unchanged before compositing; positive values increase effect saturation. Very strong light can still clip in the displayed or exported result.
 
-Soft filter is separate from halo selection. It reduces small source wings and expands larger source profiles on the original image before any effect layers are composited. Halo Quantity, Intensity, Size and color controls do not change this prefilter. It remains active at `Quantity = 0` / `Intensity = 0` while Soft Flare is enabled. The counter beside Enable soft flare reports halo selection, not the number of source corrections.
+Soft filter is separate from halo selection. It reduces small source wings and expands larger source profiles on the original image before any effect layers are composited. Halo Quantity, Intensity, Size and color controls do not change this prefilter. It remains active at `Quantity = 0` / `Intensity = 0` while Soft Flare is enabled. The counter beside Enable soft flare reports halo selection, not the number of source corrections. The slider additionally fades Soft Flare halos on small measured sources and strengthens them on large sources, so the halo does not undo the small-star reduction. Unmeasured sources keep their ordinary halo. At 0 both the source correction and this halo bias are neutral.
 
 ## Preview and manual edits
 

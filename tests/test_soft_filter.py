@@ -117,8 +117,6 @@ def test_filter_changes_original_stars_before_halo_selection_and_other_effects()
     assert result[48, 115, 2] == frame.pixels[48, 115, 2]
     for value in [20, 73, 100]:
         halo = render_preview(frame, stars, settings(value), full_resolution=True)
-        neutral = render_preview(frame, stars, settings(0), full_resolution=True)
-        np.testing.assert_array_equal(halo.effects, neutral.effects)
         np.testing.assert_allclose(halo.enlargement / value, p.enlargement / 100, atol=1e-7)
     glow = np.full_like(frame.pixels, 0.2)
     filtered = frame.pixels - p.reduction + p.enlargement
@@ -227,7 +225,9 @@ def test_disabling_soft_clears_reduction_from_overview_and_zoom_immediately(qtbo
 
 def test_manual_sources_keep_normal_glow_with_filter_enabled():
     frame, stars = scene()
-    manual = tuple(Star(s.id, s.x, s.y, s.brightness, s.color) for s in stars)
+    manual = tuple(
+        Star(s.id, s.x, s.y, s.brightness, s.color, soft_weight=s.soft_weight) for s in stars
+    )
     before = render_preview(frame, manual, settings(0), full_resolution=True)
     after = render_preview(frame, manual, settings(100), full_resolution=True)
     np.testing.assert_array_equal(after.effects, before.effects)
@@ -278,3 +278,20 @@ def test_catalog_change_clears_old_reduction(qtbot):
     assert c.preview.enlargement is None and c.overview.enlargement is None
     assert not c.preview.effects.any()
     assert c.shutdown()
+
+
+def test_soft_filter_suppresses_small_star_halos_and_strengthens_large_star_halos():
+    frame, stars = scene()
+    previews = [
+        render_preview(frame, stars, settings(value), full_resolution=True)
+        for value in (0, 50, 100, 0, 100)
+    ]
+    small_halos = [preview.effects[48, 40, 2] for preview in previews]
+    large_halos = [preview.effects[48, 115, 2] for preview in previews]
+    assert small_halos[0] > small_halos[1] > small_halos[2]
+    assert small_halos[2] == 0
+    assert 0 < large_halos[0] < large_halos[1] < large_halos[2]
+    np.testing.assert_array_equal(previews[0].effects, previews[3].effects)
+    np.testing.assert_array_equal(previews[2].effects, previews[4].effects)
+    # Suppressing the halo must still shrink the measured small source itself.
+    assert previews[2].reduction[48, 42, 2] > 0

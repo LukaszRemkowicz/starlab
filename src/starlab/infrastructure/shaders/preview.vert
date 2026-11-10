@@ -42,6 +42,10 @@ void main() {
     if (gray!=0) c=vec3((c.r+c.g+c.b)/3.0);
     light=c*max(brightness-threshold,0.0)/max((1.0-threshold)*brightness,1e-20)*intensity;
     light *= rayWeights[ray];
+    // Halo weighting complements the independent source prefilter: small
+    // measured stars lose added glow as the filter grows; large stars gain it.
+    if (kind==SOFT && profileWidth>0.0)
+        light *= 1.0+softFilter*(2.0*sizeWeight-1.0);
     filterWeight=sizeWeight; measuredWidth=profileWidth;
     sourceBackground=background; sourceGradientX=gradientX; sourceGradientY=gradientY;
     sourcePeak=measuredPeak;

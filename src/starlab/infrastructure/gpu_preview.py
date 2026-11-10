@@ -318,6 +318,7 @@ class GpuPreviewRenderer:
             phase=parameters.phase,
             softSize=1 + (max(diagonal, 1414) // 3) * (parameters.size / 100) ** 3,
             softPower=0.6 + 0.124 * parameters.falloff,
+            softFilter=parameters.soft_filter / 100 if kind == "soft" else 0,
             ringPeak=(1 + 0.01 * (parameters.size + 25) ** 2) * max(diagonal, 1414) / 3768,
             innerWidth=parameters.inner_width,
             outerWidth=parameters.outer_width,
@@ -365,7 +366,7 @@ class GpuPreviewRenderer:
     ) -> Pixels | None:
         """Reuse or draw one effect layer, independently of source correction."""
         key: GroupKey = (
-            replace(parameters, soft_filter=0),
+            parameters if kind == "soft" else replace(parameters, soft_filter=0),
             region,
             sampling,
             diagonal,
