@@ -67,13 +67,17 @@ def packed(rows: Sequence[CandidateRecord]) -> DoubleArray:
 @overload
 def join_catalogs_fast(
     destination: list[CandidateRecord], incoming: list[CandidateRecord], maximum: float
-) -> float: ...
+) -> float:
+    """Merge with a known running maximum and return its updated value."""
+    ...
 
 
 @overload
 def join_catalogs_fast(
     destination: list[CandidateRecord], incoming: list[CandidateRecord], maximum: None = None
-) -> float | None: ...
+) -> float | None:
+    """Merge without a running maximum; an empty incoming list may return None."""
+    ...
 
 
 def join_catalogs_fast(

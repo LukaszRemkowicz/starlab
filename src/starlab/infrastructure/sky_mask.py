@@ -192,6 +192,7 @@ class SkyMaskService:
         assert self.segmenter is not None
 
         def read(top: int, bottom: int) -> FloatArray:
+            """Return encoded source-domain rows for mask preprocessing."""
             pixels = frame.pixels[top:bottom]
             return linear_to_srgb(pixels) if frame.color_space == "linear-srgb" else pixels
 

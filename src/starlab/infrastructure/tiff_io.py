@@ -61,6 +61,7 @@ def _profile_characteristics(profile: bytes) -> tuple[bytes, dict[bytes, bytes]]
 
 
 def _matches_fixed_tag(value: bytes, expected: bytes) -> bool:
+    """Compare fixed-point ICC tag values within the supported matrix tolerance."""
     if len(value) != len(expected) or value[:8] != expected[:8]:
         return False
     actual_values = np.frombuffer(value[8:], dtype=">i4").astype(np.float64) / 65536
@@ -70,6 +71,7 @@ def _matches_fixed_tag(value: bytes, expected: bytes) -> bool:
 
 @lru_cache(maxsize=16)
 def _matches_srgb_curve(value: bytes, expected: bytes) -> bool:
+    """Accept the reference curve or a numerically equivalent monotone sampled curve."""
     if value == expected:
         return True
     # Accept sampled v2 curveType, alongside the reference's parametric curve.
@@ -137,6 +139,7 @@ def _matches_srgb(
 
 
 def _check_profile(profile: bytes | None, rgb: bool) -> str:
+    """Validate color interpretation and return the import note or raise ValueError."""
     if not profile:
         return (
             "Untagged image: sRGB assumed." if rgb else "Untagged grayscale: linear gray assumed."
