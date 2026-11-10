@@ -78,6 +78,7 @@ def engine_signature() -> str:
     paths = [
         directory / "stars.py",
         directory / "imaging.py",
+        directory / "jit.py",
         directory / "sky_mask.py",
         directory / "photometry.py",
         Path(__file__).with_name("sky_mask.py"),

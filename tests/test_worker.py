@@ -4,7 +4,7 @@ from starlab.bootstrap import create_window
 
 
 def test_timed_out_close_finishes_automatically_and_cleans_up_on_job_thread(qtbot, monkeypatch):
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.show()
     runner = window.controller.runner

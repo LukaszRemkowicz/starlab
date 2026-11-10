@@ -21,7 +21,7 @@ def _slider_window(qtbot: "QtBot") -> tuple["MainWindow", "QSlider", QPoint]:
     from starlab.bootstrap import create_window
     from starlab.domain.imaging import ImageFrame
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.show()
     window.controller.session.open(ImageFrame(np.zeros((32, 32, 3), np.float32)))

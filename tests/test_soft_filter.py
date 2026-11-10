@@ -202,7 +202,7 @@ def test_disabling_soft_clears_reduction_from_overview_and_zoom_immediately(qtbo
     from starlab.application.use_cases import Preview
     from starlab.bootstrap import create_window
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     frame, stars = scene()
     c = window.controller
@@ -266,7 +266,7 @@ def test_catalog_change_clears_old_reduction(qtbot):
     from starlab.application.use_cases import Preview
     from starlab.bootstrap import create_window
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     c = window.controller
     frame, stars = scene()

@@ -11,8 +11,8 @@ The user authorized implementation after the complete baseline review, in the ex
 - [x] Item7: add accurate docstrings, boundary/local types and enforced annotation/type checks.
 - [x] Item8: name secondary-pattern units and derive Python ray counts from its data.
 - [x] Item9: document executable shader stages and maintain CPU/GPU numerical distinction; shader coverage belongs to item11.
-- [ ] Item10: isolate state/resource ownership in focused objects, without wrapping numerical kernels in class hierarchies.
-- [ ] Item11: strengthen independent oracles, one-to-one matching, event synchronization and actual GPU checks.
+- [x] Item10: isolate state/resource ownership in focused objects, without wrapping numerical kernels in class hierarchies.
+- [x] Item11: strengthen independent oracles, one-to-one matching, event synchronization and actual GPU checks.
 - [ ] Item12: verify excluded experiment files remain absent and no source/test import depends on them.
 - [ ] Finish with full tests, static checks, wheel/CLI validation, real GPU verification, review of changes and a commit-to-item report.
 

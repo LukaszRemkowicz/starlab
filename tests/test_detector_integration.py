@@ -6,6 +6,7 @@ from threading import Event
 
 import numpy as np
 import pytest
+from scipy.optimize import linear_sum_assignment
 
 from starlab.domain.detection import pipeline
 from starlab.domain.detection.candidate import Image
@@ -17,17 +18,29 @@ from starlab.infrastructure.tiff_io import read_tiff
 EVIDENCE = Path(__file__).resolve().parents[1] / "tests/fixtures/detection"
 
 
+def native_matches(stars, native, tolerance=1):
+    if not stars or not native:
+        return []
+    actual = np.array([(s.x + 0.5, s.y + 0.5) for s in stars])
+    expected = np.array([row["xy_20"] for row in native])
+    distance = np.sum((actual[:, None] - expected[None]) ** 2, axis=2)
+    valid = distance < tolerance**2
+    # One forbidden edge costs more than every possible valid edge combined:
+    # the assignment maximizes distinct in-tolerance matches before distance.
+    cost = np.where(valid, distance / tolerance**2, max(distance.shape) + 1)
+    rows, columns = linear_sum_assignment(cost)
+    return [(stars[i], native[j]) for i, j in zip(rows, columns) if valid[i, j]]
+
+
 def test_native_grid_geometry_color_and_global_brightness():
     frame = read_tiff(EVIDENCE / "grid-1536.tif")
     native = json.loads((EVIDENCE / "grid-catalog.json").read_text())["records"]
     stats = {}
     stars = detect_stars(frame, diagnostics=stats)
     assert len(stars) == len(native) == 8
-    for star in stars:
-        record = min(
-            native,
-            key=lambda r: (r["xy_20"][0] - 0.5 - star.x) ** 2 + (r["xy_20"][1] - 0.5 - star.y) ** 2,
-        )
+    matched = native_matches(stars, native)
+    assert len(matched) == len(native)
+    for star, record in matched:
         assert (star.x, star.y) == tuple(v - 0.5 for v in record["xy_20"])
         assert star.radius == record["size_30"]
         np.testing.assert_allclose(star.color, record["rgb_00"], atol=2e-6, rtol=0)
@@ -51,22 +64,18 @@ def test_positive_coarse_pass_and_fast_seed_coverage():
     stars = detect_stars(read_tiff(EVIDENCE / "coarse-1024.tif"), diagnostics=stats)
     assert len(stars) == 2 and stats["coarse_count"] == 1
     native = json.loads((EVIDENCE / "coarse-catalog.json").read_text())["records"]
-    for star in stars:
-        record = min(
-            native,
-            key=lambda r: (r["xy_20"][0] - 0.5 - star.x) ** 2 + (r["xy_20"][1] - 0.5 - star.y) ** 2,
-        )
+    matched = native_matches(stars, native)
+    assert len(matched) == len(stars) == len(native)
+    for star, record in matched:
         assert (star.x, star.y) == tuple(v - 0.5 for v in record["xy_20"])
         assert abs(star.radius - record["size_30"]) < 0.126
     # Explicit approximate-seeding tradeoff on a crowded real sky crop:
     # the saved original has256; the fast path must retain at least99%.
     sky = detect_stars(read_tiff(EVIDENCE / "pano-sky-middle.tif"))
     native = json.loads((EVIDENCE / "sky-catalog.json").read_text())["records"]
-    matched = sum(
-        any((s.x + 0.5 - r["xy_20"][0]) ** 2 + (s.y + 0.5 - r["xy_20"][1]) ** 2 < 1 for s in sky)
-        for r in native
-    )
-    assert matched >= 254
+    matched = native_matches(sky, native)
+    assert len(matched) / len(native) >= 0.99
+    assert len(matched) == len(sky), "Detections must not reuse references or add false sources."
     for side in ("left", "right"):
         assert len(detect_stars(read_tiff(EVIDENCE / f"pano-sky-{side}.tif"))) == 13
 

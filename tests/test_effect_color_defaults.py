@@ -31,6 +31,14 @@ def test_explicit_saturation_is_preserved_and_affects_only_effect_light():
     )
     assert parse_preset(preset_data(settings)).soft.saturation == 30
     effects = render_effects(frame, (star,), settings)
+    assert effects.max() > 0
+    # Saturation 30 maps this source to RGB (0, 0.4, 2.1) before scalar gains.
+    np.testing.assert_allclose(effects[64, 64] / effects[64, 64, 2], [0, 4 / 21, 1], rtol=1e-6)
+    neutral = render_effects(
+        frame, (star,), replace(settings, soft=replace(settings.soft, saturation=0))
+    )
+    np.testing.assert_allclose(neutral[64, 64] / neutral[64, 64, 2], [1 / 3, 2 / 3, 1], rtol=1e-6)
+    assert not np.allclose(effects, neutral)
     result = composite(frame, effects)
     np.testing.assert_array_equal(result[~effects.any(axis=2)], frame.pixels[~effects.any(axis=2)])
     np.testing.assert_array_equal(frame.pixels[0, 0], np.array([0.02, 0.04, 0.06], np.float32))

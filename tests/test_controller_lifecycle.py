@@ -14,7 +14,7 @@ from starlab.domain.sky_mask import SkyMask
 
 @pytest.fixture
 def document(qtbot):
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.show()
     controller = window.controller

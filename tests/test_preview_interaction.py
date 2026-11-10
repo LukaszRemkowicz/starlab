@@ -19,7 +19,7 @@ def test_drag_displays_completed_frames_and_finishes_with_latest_value(qtbot, mo
         return Preview(frame, np.full_like(frame.pixels, settings.primary.intensity / 200), 1)
 
     monkeypatch.setattr(controller_module, "render_preview", slow_preview)
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     controller = window.controller
     controller.session.open(ImageFrame(np.zeros((32, 32, 3), np.float32)))

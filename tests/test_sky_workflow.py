@@ -9,7 +9,7 @@ from starlab.domain.stars import Star
 
 
 def test_mask_precedes_detection_and_sliders_reuse_it(qtbot, monkeypatch):
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     controller = window.controller
     frame = ImageFrame(np.zeros((64, 96, 3), np.float32))
@@ -62,7 +62,7 @@ def test_catalog_undo_restores_its_mask():
 
 
 def test_detector_selector_exposes_larger_stars_with_correct_units(qtbot):
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.detection_method.setCurrentIndex(1)
     assert window.detection_method.currentData() == "multiscale"
@@ -80,7 +80,7 @@ def test_cancel_after_mask_restores_committed_catalog_controls(qtbot, monkeypatc
 
     from starlab.domain.imaging import check_cancel
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     controller = window.controller
     controller.session.open(ImageFrame(np.zeros((32, 48, 3), np.float32)))
@@ -112,7 +112,7 @@ def test_cancel_after_mask_restores_committed_catalog_controls(qtbot, monkeypatc
 def test_mask_icon_restores_view_without_reanalysis(qtbot):
     from PySide6.QtCore import Qt
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.show()
     controller = window.controller

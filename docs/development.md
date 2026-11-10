@@ -19,11 +19,34 @@ uv run ruff format --check src tests
 uv run mypy
 ```
 
-Qt tests use the offscreen platform through their test configuration. They exercise application workflows without driving a user's desktop. Numerical tests cover image validation, color transforms, detector regressions, CPU kernel agreement, masks, source corrections, rendering profiles, history and stale preview handling. Some UI tests have timeouts and require generic Numba specializations to be available; a first run after numerical-code edits can compile them.
+Ordinary Qt tests explicitly request the CPU test backend and use the offscreen platform. They exercise application workflows without driving a user's desktop; they do not silently stand in for production GPU/model wiring. Numerical tests cover image validation, color transforms, detector regressions, CPU kernel agreement, masks, source corrections, rendering profiles, history and stale preview handling. Some UI tests have timeouts and require generic Numba specializations to be available; a first run after numerical-code edits can compile them.
 
-Ruff checks selected syntax/import/error rules, import ordering, unused suppressions, McCabe complexity (maximum10) and statement count (maximum50). Two function-scoped exceptions document numerical state machines whose exact accumulator/rejection order is intentional: the two-axis rolling filter and conservative sparse peak screening. No module-wide complexity suppressions are used. Annotation and public-documentation rules are also enabled. Mypy checks all production modules in strict mode; array aliases distinguish dtype, and protocols describe service boundaries. The signature-preserving JIT adapter keeps static checking across Numba decorators without changing runtime compilation. Two overload-factory parameters remain intentionally unannotated because Numba requires their annotations to equal the implementation parameters. Untyped external-library stubs are isolated by boundary casts; strict checking does not prove array shape or numerical accuracy. Independent image and workflow checks remain necessary.
+Ruff checks selected syntax/import/error rules, import ordering, unused suppressions, McCabe complexity (maximum 10) and statement count (maximum 50). Two function-scoped exceptions document numerical state machines whose exact accumulator/rejection order is intentional: the two-axis rolling filter and conservative sparse peak screening. No module-wide complexity suppressions are used. Annotation and public-documentation rules are also enabled. Mypy checks all production modules in strict mode; array aliases distinguish dtype, and protocols describe service boundaries. The signature-preserving JIT adapter keeps static checking across Numba decorators without changing runtime compilation. Two overload-factory parameters remain intentionally unannotated because Numba requires their annotations to equal the implementation parameters. Untyped external-library stubs are isolated by boundary casts; strict checking does not prove array shape or numerical accuracy. Independent image and workflow checks remain necessary.
 
 The Windows quality workflow runs the locked environment, lint, formatting, strict type checking, ordinary tests and wheel build on pushes and pull requests. It follows the [official uv Actions integration](https://docs.astral.sh/uv/guides/integration/github/). A hosted headless test run does not establish hardware shader correctness.
+
+## Native GPU checks
+
+Run the opt-in suite on a desktop with a working OpenGL 3.3 context:
+
+```powershell
+uv run pytest tests/test_gpu_integration.py --run-gpu -q
+```
+
+The test configuration selects the native Qt platform for this command. Missing
+context support is a failure when explicitly requested; the ordinary suite reports
+these cases as skipped. The suite exercises actual shader compilation, gray/RGB,
+all four groups, combined composition, both source corrections, masked regions,
+reduced radial invariants, window display modes and worker-owned cleanup.
+Primary/Soft/Ring comparisons use a 2e-5 linear-light absolute budget; Secondary
+uses 1e-3 because its near-diagonal rasterization differs slightly between CPU
+and GPU. These are backend comparison budgets, not camera calibration claims.
+
+Test oracles also include fixed captured images/catalogues, literal high-precision
+pixel values for overlap/correction math, and one-to-one catalogue assignment.
+Assertions must establish a positive effect before comparing control behavior.
+The encoded-mask test examines actual network input instead of merely accepting
+constant fake logits. Tests do not assert documentation wording or source layout.
 
 ## Layout
 

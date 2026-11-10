@@ -24,7 +24,7 @@ def test_zoom_does_not_replace_a_ready_result_with_original(qtbot):
     from starlab.application.use_cases import Preview
     from starlab.bootstrap import create_window
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.show()
     controller = window.controller
@@ -44,7 +44,7 @@ def test_disabled_spikes_never_return_from_overview_or_an_older_frame(qtbot):
     from starlab.application.use_cases import Preview
     from starlab.bootstrap import create_window
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.show()
     controller = window.controller

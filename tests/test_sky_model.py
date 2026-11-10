@@ -54,18 +54,25 @@ def test_mask_service_reads_encoded_tiff_and_reuses_disk_cache(tmp_path):
         tile = 8
         overlap = 2
         identity = "test-model"
-        calls = 0
+
+        def __init__(self):
+            self.tiles = []
 
         def sky_logits(self, tile):
-            self.calls += 1
+            self.tiles.append(tile.copy())
             return np.ones(tile.shape[:2], np.float32) * 2
 
     net = Network()
     service = SkyMaskService(cache_directory=tmp_path / "cache", segmenter=net)
-    # Different linear pixels prove the source TIFF is used for the model input.
+    # The TIFF's block levels 40000/12000 normalize around median 26000 to +1/-1.
+    # Constant working pixels would instead normalize to zero.
     frame = ImageFrame(np.ones(data.shape, np.float32))
     mask = service(frame, source)
-    assert net.calls > 0 and mask.classes.shape == (8, 12)
+    assert net.tiles and mask.classes.shape == (8, 12)
+    expected_tile = np.ones((8, 8, 3), np.float32)
+    expected_tile[4:] = -1
+    for tile in net.tiles:
+        np.testing.assert_array_equal(tile, expected_tile)
 
     class UnusedNetwork(Network):
         def sky_logits(self, tile):

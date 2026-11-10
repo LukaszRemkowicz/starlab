@@ -53,3 +53,33 @@ def test_analysis_uses_cache_and_manual_request_forces_detection(tmp_path, monke
     assert not calls
     assert service.analyze(frame, source, force=True) == ()
     assert calls == ["detect", "save"]
+
+
+def test_jit_configuration_change_invalidates_persisted_catalog(tmp_path, monkeypatch):
+    """A compiler-option change must not reuse a previously computed source catalog."""
+    from pathlib import Path
+
+    source, target = tmp_path / "source.tif", tmp_path / "catalog.json"
+    source.write_bytes(b"image")
+    monkeypatch.setattr(catalog_cache, "cache_path", lambda _, settings=None: target)
+    original_read = Path.read_bytes
+    changed = False
+
+    def read_bytes(path):
+        data = original_read(path)
+        return (
+            data + b"\n# Changed JIT configuration" if changed and path.name == "jit.py" else data
+        )
+
+    monkeypatch.setattr(Path, "read_bytes", read_bytes)
+    settings = DetectionSettings()
+    stars = (Star(1, 2, 3, 0.5, (0.5, 0.5, 0.5)),)
+    catalog_cache.engine_signature.cache_clear()
+    try:
+        catalog_cache.save_catalog(source, settings, stars)
+        assert catalog_cache.load_catalog(source, settings) == stars
+        changed = True
+        catalog_cache.engine_signature.cache_clear()  # Simulate a fresh process.
+        assert catalog_cache.load_catalog(source, settings) is None
+    finally:
+        catalog_cache.engine_signature.cache_clear()

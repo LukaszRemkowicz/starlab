@@ -11,7 +11,7 @@ from starlab.domain.imaging import ImageFrame, display_pixels
 def test_thumbnail_is_visible_before_full_import_finishes(qtbot, preview_scale):
     from starlab.bootstrap import create_window
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.auto_detect.setChecked(False)
     release = Event()
@@ -48,7 +48,7 @@ def test_original_zoom_uses_source_pixels_not_thumbnail(qtbot):
     data = np.repeat(((x % 8) / 7).astype(np.float32)[..., None], 3, axis=2)
     frame = ImageFrame(data)
     thumbnail = ImageFrame(frame.pixels[::8, ::8])
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.show()
     controller = window.controller
@@ -90,7 +90,7 @@ def test_detector_and_effect_counts_are_distinct(qtbot):
     from starlab.domain.effects.settings import EffectSettings
     from starlab.domain.stars import Star
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     stars = (Star(1, 1, 1, 0.87, (0.87,) * 3), Star(2, 2, 2, 0.001, (0.001,) * 3))
     settings = EffectSettings.disabled()

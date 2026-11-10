@@ -1,20 +1,31 @@
 from dataclasses import replace
 
 import numpy as np
+import pytest
 import tifffile
 from PySide6.QtCore import Qt
 
 
-def test_window_load_detect_render_export_and_undo(qtbot, tmp_path):
-    from starlab.bootstrap import create_window
-
+def _write_star_image(tmp_path):
     y, x = np.mgrid[:128, :160]
     gray = 0.02 + 0.6 * np.exp(-((x - 70.3) ** 2 + (y - 53.7) ** 2) / 7)
     data = np.repeat(np.rint(gray[..., None] * 65535).astype(np.uint16), 3, axis=2)
-    source, target = tmp_path / "stars.tif", tmp_path / "result.tif"
+    source = tmp_path / "stars.tif"
     tifffile.imwrite(source, data, photometric="rgb")
-    window = create_window()
+    return source, data
+
+
+def test_window_load_detect_render_export_and_undo(qtbot, tmp_path, monkeypatch):
+    """Check GUI orchestration with deterministic analysis independent of cold detector JIT."""
+    from starlab.bootstrap import create_window
+    from starlab.domain.stars import Star
+
+    source, data = _write_star_image(tmp_path)
+    target = tmp_path / "result.tif"
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
+    catalog = (Star(1, 70.3, 53.7, 0.6, (0.6, 0.6, 0.6)),)
+    monkeypatch.setattr(window.controller.services, "analyze", lambda *args, **kwargs: catalog)
     window.show()
     window.controller.open_path(source)
     qtbot.waitUntil(
@@ -22,8 +33,7 @@ def test_window_load_detect_render_export_and_undo(qtbot, tmp_path):
         timeout=10000,
     )
     # Opening a TIFF must detect stars automatically, without a second hidden step.
-    assert window.controller.session.stars
-    assert abs(window.controller.session.stars[0].x - 70.3) < 0.25
+    assert window.controller.session.stars is catalog
     before = window.controller.preview.effects.copy()
     window.effect_panel.controls["primary"]["intensity"].spin.setValue(150)
     qtbot.waitUntil(
@@ -43,6 +53,28 @@ def test_window_load_detect_render_export_and_undo(qtbot, tmp_path):
     assert result.shape == data.shape
     assert np.any(result > data)
     assert window.controller.shutdown()
+
+
+@pytest.mark.slow
+def test_numerical_import_detection_and_preview_with_cold_jit(qtbot, tmp_path):
+    """Allow 60s for cold JIT correctness; this budget does not assert interactive latency."""
+    from starlab.bootstrap import create_window
+
+    source, _ = _write_star_image(tmp_path)
+    window = create_window(backend="cpu")
+    qtbot.addWidget(window)
+    window.show()
+    controller = window.controller
+    try:
+        controller.open_path(source)
+        qtbot.waitUntil(lambda: not controller.runner.busy, timeout=60000)
+        assert not window.error_label.text()
+        assert controller.session.frame is not None and controller.session.stars
+        assert abs(controller.session.stars[0].x - 70.3) < 0.25
+        assert abs(controller.session.stars[0].y - 53.7) < 0.25
+        assert controller.preview is not None and controller.preview.effects.any()
+    finally:
+        assert controller.shutdown()
 
 
 def test_effect_panel_preserves_settings_across_modes_and_tabs(qtbot):
@@ -88,7 +120,7 @@ def test_worker_replaces_stale_job_and_shuts_down(qtbot):
 def test_empty_window_disables_export_and_has_accessible_controls(qtbot):
     from starlab.bootstrap import create_window
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.show()
     assert not window.export_button.isEnabled()
@@ -103,7 +135,7 @@ def test_queued_export_cannot_be_replaced_by_preview(qtbot, tmp_path):
     from starlab.bootstrap import create_window
     from starlab.domain.imaging import ImageFrame, check_cancel
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     controller = window.controller
     controller.session.open(ImageFrame(np.zeros((32, 32, 3), np.float32)))
@@ -125,7 +157,7 @@ def test_actual_size_requests_full_resolution_preview(qtbot):
     from starlab.bootstrap import create_window
     from starlab.domain.imaging import ImageFrame
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.controller.session.open(ImageFrame(np.zeros((64, 1700, 3), np.float32)))
     window.controller.refresh()
@@ -193,7 +225,7 @@ def test_reference_layout_retains_every_effect_control(qtbot):
     from starlab.bootstrap import create_window
     from starlab.domain.effects.settings import PARAMETERS
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     panel = window.effect_panel
     assert [panel.tabs.tabText(i) for i in range(4)] == [
@@ -216,7 +248,7 @@ def test_hold_before_restores_view_and_preset_updates_session(qtbot):
     from starlab.bootstrap import create_window
     from starlab.domain.imaging import ImageFrame
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.controller.session.open(ImageFrame(np.zeros((32, 32, 3), np.float32)))
     window.set_loaded(True)
@@ -277,7 +309,7 @@ def test_activity_timer_and_exclusive_controls(qtbot):
     from starlab.bootstrap import create_window
     from starlab.domain.imaging import ImageFrame
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.controller.session.open(ImageFrame(np.zeros((32, 32, 3), np.float32)))
     window.set_loaded(True)
@@ -295,7 +327,7 @@ def test_activity_timer_and_exclusive_controls(qtbot):
 def test_undo_preset_allows_reselecting_same_preset(qtbot):
     from starlab.bootstrap import create_window
 
-    window = create_window()
+    window = create_window(backend="cpu")
     qtbot.addWidget(window)
     window.preset_combo.setCurrentIndex(1)
     assert window.controller.session.settings.primary.intensity == 12
