@@ -16,7 +16,7 @@ NPZ is a NumPy archive of named arrays. The JSON file describes its correspondin
 
 `analysis_luts.npz` is 5,624 bytes: `read` is 256 float32 values and `write` is 4,096 uint8 values (5,120 array bytes in total). The loader verifies the archive SHA-256 before exposing read-only arrays. READ approximates gamma 2.4 but differs from a freshly calculated power by up to about 1.13e-6; retaining stored values preserves threshold decisions. WRITE quantizes normalized analysis levels back to byte codes. Neither array is a source-detection result or a cached photograph.
 
-The RGB8 transform archive covers 256×256×256 input colors and reconstructs a uint8 three-channel table from compressed residuals. The loader verifies the compressed archive hash, metadata and array dimensions/dtypes, then the reconstructed-table hash. The archive is236,561 bytes, whereas the resulting table is50,331,648 bytes (48MiB), plus three256-byte baseline arrays during reconstruction. JSON also records the historical generator/adapter identity and library versions; these provenance fields do not execute or replace the transform. See the JSON metadata for the exact encoding and parameters. The sky model likewise validates its ONNX SHA-256 against recorded metadata before use.
+The RGB8 transform archive covers 256×256×256 input colors and reconstructs a uint8 three-channel table from compressed residuals. The loader verifies the compressed archive hash, metadata and array dimensions/dtypes, then the reconstructed-table hash. The archive is 236,561 bytes, whereas the resulting table is 50,331,648 bytes (48 MiB), plus three 256-byte baseline arrays during reconstruction. JSON also records the historical generator/adapter identity and library versions; these provenance fields do not execute or replace the transform. See the JSON metadata for the exact encoding and parameters. The sky model likewise validates its ONNX SHA-256 against recorded metadata before use.
 
 ## Test fixtures
 
@@ -26,11 +26,11 @@ Published TIFF fixtures retain their original pixel arrays and embedded color pr
 
 ## Secondary appearance pattern
 
-`SECONDARY_RAYS` is one ordered table of84 `(angle, weight)` pairs in
-`domain/effects/profiles.py`. Angle units are0.1degree; weights are integer
+`SECONDARY_RAYS` is one ordered table of 84 `(angle, weight)` pairs in
+`domain/effects/profiles.py`. Angle units are 0.1 degree; weights are integer
 percent before conversion to relative amplitudes. Rotation shifts angles and
 preserves weights/order. CPU geometry and GPU instance counts derive from this
-table; the shader's uniform arrays provide capacity for84 directions. This
+table; the shader's uniform arrays provide capacity for 84 directions. This
 pattern controls the look of Secondary rays. It is independent of the detector's
 eight-direction sampling stencil, and is not a polymorphic abstraction.
 
@@ -38,13 +38,13 @@ eight-direction sampling stencil, and is not a polymorphic abstraction.
 
 The vertex shader expands one measured source into ray/radial quads, rotates
 ray directions and maps full-image pixel centers to viewport coordinates.
-Uniform `kind` selects Primary0, Secondary1, Soft2, Ring3, source shrink4 or
-source grow5. The84-direction array capacity is distinct from the active count.
+Uniform `kind` selects Primary 0, Secondary 1, Soft 2, Ring 3, source shrink 4 or
+source grow 5. The 84-direction array capacity is distinct from the active count.
 
 The fragment shader evaluates transverse antialiasing and longitudinal ray
 falloff, radial halo/ring profiles, optional rainbow modulation, or source-profile
 correction magnitudes. Pixel-center and image-y/OpenGL-y conventions are explicit
-in the source. Reduced radial previews integrate64 subpixel positions to avoid
+in the source. Reduced radial previews integrate 64 subpixel positions to avoid
 missing narrow emitters; full-resolution evaluation uses the native point grid.
 
 The Python renderer owns GL resources, uniforms, draw order and blend modes.

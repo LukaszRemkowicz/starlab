@@ -27,7 +27,7 @@ Numba compiles hot CPU loops, including source qualification, catalogue joining,
 
 ## Current maintenance boundary
 
-This publication preserves the existing numerical behavior and reorganizes its public identity and documentation. It does not claim that function complexity, duplication, comprehensive typing or class design has already been audited. Those are separate review tasks. Classes are used where objects own state or resources; numerical kernels are currently functions.
+The completed [code review](code-review.md) covers production modules, shaders, test oracles and asset ownership. The [results](review-results.md) record implemented corrections and measured checks. Complexity, annotation and public-documentation rules plus strict type checking now run in CI. Classes represent state or resource ownership; numerical kernels remain functions. Backend agreement is verified for recorded fixtures and one Windows GPU, not every possible image or driver.
 
 ## State ownership and numerical functions
 

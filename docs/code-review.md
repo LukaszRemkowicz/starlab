@@ -2,21 +2,23 @@
 
 Reviewed baseline: `2780097`, 10 November 2026. Scope: all 44 production Python modules, both GLSL shaders, 28 Python test modules, packaged numerical/model data, build configuration and fixture manifests. Review preceded implementation. Independent read-only passes covered detection, Qt, and effects/tests; the coordinating pass covered application, I/O, assets and cross-layer behavior.
 
+Implemented changes, final checks and commit references are recorded in [Review results](review-results.md). Findings below describe the reviewed baseline, including defects subsequently fixed.
+
 ## Baseline evidence
 
-- Full suite:341 tests passed in16.79s.
--328 functions/nested functions/methods;287 have no function docstring,230 no return annotation,214 at least one untyped explicit argument.
-- Existing Ruff selects only `E4,E7,E9,F,I`. A separate complexity run reports21 `C901` findings and88 findings across selected complexity/branch/statement/argument rules. These findings are diagnostic, not proof of defects.
-- The largest method is GPU preview `__call__` at283 lines; detection orchestrators reach146–154 lines; Qt completion handling is104 lines.
+- Full suite: 341 tests passed in 16.79 s.
+- 328 functions/nested functions/methods; 287 have no function docstring, 230 no return annotation, 214 at least one untyped explicit argument.
+- Existing Ruff selects only `E4,E7,E9,F,I`. A separate complexity run reports 21 `C901` findings and 88 findings across selected complexity/branch/statement/argument rules. These findings are diagnostic, not proof of defects.
+- The largest method is GPU preview `__call__` at 283 lines; detection orchestrators reach 146–154 lines; Qt completion handling is 104 lines.
 - No tests assert documentation prose. Numerical fixtures and compiled/reference comparisons are useful, but they do not establish production GPU correctness.
 
 ## Explanations requested
 
 | Item | Actual role and decision |
 |---|---|
-|2: `analysis_luts.npz` | NumPy archive,5,624 bytes. `read`:256 float32 entries, analysis-domain decoding; `write`:4,096 uint8 entries, quantized encoding after normalization. It is universal transfer data, not a photograph or saved detection result. Stored read values differ slightly from freshly evaluating a gamma power, so casually regenerating them changes numerical behavior. Keep, document, validate and make arrays immutable. |
-|5: `full_lcms_lut.json/.npz` | Universal RGB8 color transform. The236,561-byte archive stores a uint8 delta cube of shape256×256×256×3 plus three256-entry channel baselines; reconstructed data occupy about48MiB. JSON records encoding, transform parameters, versions and hashes. Runtime currently checks the reconstructed table hash; archive and adapter hashes are provenance, not enforced checks. Keep both data and metadata; document that distinction and validate loading. |
-|8: `SECONDARY_RAYS` |84 fixed direction/weight pairs, not an abstraction layer. Angles use tenths of a degree; weights use integer percent. The irregular pattern defines secondary-flare appearance. There is only one production table. Keep its values/order, make units and derived count explicit. Detection's eight-direction sampling stencil serves a different purpose. |
+|2: `analysis_luts.npz` | NumPy archive, 5,624 bytes. `read`: 256 float32 entries, analysis-domain decoding; `write`: 4,096 uint8 entries, quantized encoding after normalization. It is universal transfer data, not a photograph or saved detection result. Stored read values differ slightly from freshly evaluating a gamma power, so casually regenerating them changes numerical behavior. Keep, document, validate and make arrays immutable. |
+|5: `full_lcms_lut.json/.npz` | Universal RGB8 color transform. The 236,561-byte archive stores a uint8 delta cube of shape 256×256×256×3 plus three 256-entry channel baselines; reconstructed data occupy about 48 MiB. JSON records encoding, transform parameters, versions and hashes. Runtime currently checks the reconstructed table hash; archive and adapter hashes are provenance, not enforced checks. Keep both data and metadata; document that distinction and validate loading. |
+|8: `SECONDARY_RAYS` | 84 fixed direction/weight pairs, not an abstraction layer. Angles use tenths of a degree; weights use integer percent. The irregular pattern defines secondary-flare appearance. There is only one production table. Keep its values/order, make units and derived count explicit. Detection's eight-direction sampling stencil serves a different purpose. |
 |9: `shaders/` | Executable GLSL for the GPU preview. The vertex shader places source/ray quads; the fragment shader evaluates profiles, antialiasing and source corrections. GPU blending contributes Screen/MAX operations; final image composition is outside these shader functions. Python/GLSL mathematical duplication is unavoidable across execution backends and needs real GPU parity tests. |
 |12: `tools/` | Former local measurement, comparison and experiment scripts. They are excluded from the published tree and are not runtime dependencies. Rendering fixtures were made self-contained before that exclusion. Production diagnostics or tests must not import a local experiment directory. |
 
@@ -43,7 +45,7 @@ Reviewed baseline: `2780097`, 10 November 2026. Scope: all 44 production Python 
 - `test_sky_model.py:65` claims to verify encoded TIFF input, but the fake network never examines received tiles.
 - `test_effect_color_defaults.py:25` can pass if nonzero saturation is ignored or no effect is emitted.
 - Catalogue comparisons independently choose nearest references, allowing duplicate detections to reuse one expected source.
-- All42 rendering fixtures activate one effect group and contain no source-correction profiles. Keep them, and add small independent algebraic oracles for combined composition/correction pixels.
+- All 42 rendering fixtures activate one effect group and contain no source-correction profiles. Keep them, and add small independent algebraic oracles for combined composition/correction pixels.
 - Some UI tests use sleeps or tiny deadlines. Separate functional state tests from compilation/performance measurements and wait for events/conditions.
 
 ### P3: smaller state/lifecycle problems
