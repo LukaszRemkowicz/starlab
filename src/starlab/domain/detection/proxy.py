@@ -20,7 +20,7 @@ from ..array_types import BoolArray, ByteArray, FloatArray, IntArray
 from ..imaging import check_cancel, linear_to_srgb
 from ..jit import njit
 from ..sky_mask import SkyMask
-from .lookup_assets import load_analysis_tables, load_color_cube
+from .lookup_assets import ColorTransform, load_analysis_tables
 from .numeric import LUMA
 from .records import BitsArray, CodesArray
 
@@ -29,8 +29,7 @@ UIntT = TypeVar("UIntT", np.uint8, np.uint16)
 READ, WRITE = load_analysis_tables()
 
 COARSE_WORKERS = min(8, os.cpu_count() or 1)
-_LCMS_TABLE: ByteArray | None = None
-_LCMS_LOCK = threading.Lock()
+_COLOR_TRANSFORM = ColorTransform()
 
 
 @lru_cache(maxsize=16)
@@ -289,11 +288,7 @@ def coarse_codes(
 
 def _full_lcms() -> ByteArray:
     """Load the lossless universal CMM cube once, including concurrent first use."""
-    global _LCMS_TABLE
-    with _LCMS_LOCK:
-        if _LCMS_TABLE is None:
-            _LCMS_TABLE = load_color_cube()
-        return _LCMS_TABLE
+    return _COLOR_TRANSFORM.table()
 
 
 @njit(cache=True, nogil=True)

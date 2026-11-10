@@ -28,3 +28,19 @@ Numba compiles hot CPU loops, including source qualification, catalogue joining,
 ## Current maintenance boundary
 
 This publication preserves the existing numerical behavior and reorganizes its public identity and documentation. It does not claim that function complexity, duplication, comprehensive typing or class design has already been audited. Those are separate review tasks. Classes are used where objects own state or resources; numerical kernels are currently functions.
+
+## State ownership and numerical functions
+
+Classes own meaningful state: `Session` owns editing history, `ImageFrame` owns
+immutable working pixels, `SkyMaskService` owns a segmentation network, the Qt
+worker owns job lifecycle and the GPU renderer owns its context/resources.
+`ColorTransform` now owns the lazy universal color cube together with its
+initialization lock. It publishes one validated, immutable table; failed loads
+leave no partial state. This replaces independent mutable module globals, not
+an image-result cache.
+
+Typed immutable settings, source records and view snapshots describe values.
+Pure numerical sampling, fitting, ray generation and JIT kernels remain functions;
+putting them into stateless classes would add indirection without clarifying
+ownership. Independent Python/Numba and CPU/GLSL implementations remain useful
+numerical verification boundaries.

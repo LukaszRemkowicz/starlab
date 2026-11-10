@@ -4,6 +4,7 @@ import hashlib
 import io
 import json
 from pathlib import Path
+from threading import Lock
 
 import numpy as np
 from numpy.typing import NDArray
@@ -61,3 +62,23 @@ def load_color_cube(path: Path | None = None) -> NDArray[np.uint8]:
         raise ValueError("Universal color cube does not match its recorded identity.")
     cube.flags.writeable = False
     return cube
+
+
+class ColorTransform:
+    """Own one immutable universal cube and serialize its initial reconstruction.
+
+    This object contains fixed transform data, never photograph results. Failed
+    loads publish no state and can be retried; successful users share one cube.
+    """
+
+    def __init__(self) -> None:
+        """Prepare empty transform storage and its first-use synchronization lock."""
+        self._table: NDArray[np.uint8] | None = None
+        self._lock = Lock()
+
+    def table(self) -> NDArray[np.uint8]:
+        """Return the validated RGB8 cube, reconstructing it once under the lock."""
+        with self._lock:
+            if self._table is None:
+                self._table = load_color_cube()
+            return self._table
