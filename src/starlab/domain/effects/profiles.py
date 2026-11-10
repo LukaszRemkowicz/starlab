@@ -195,13 +195,15 @@ def source_colors(colors, hue, saturation):
 
 def directions(kind, p):
     angle = round(p.angle * 10)
-    if kind == "primary":
-        return tuple(
-            ((int(i * 3600 / p.points + 0.5) + angle) % 3600, 1.0) for i in range(p.points)
-        )
-    if kind == "secondary":
-        return tuple(((a + angle) % 3600, weight / 100) for a, weight in SECONDARY_RAYS)
-    return ((0, 1.0),)
+    match kind:
+        case "primary":
+            return tuple(
+                ((int(i * 3600 / p.points + 0.5) + angle) % 3600, 1.0) for i in range(p.points)
+            )
+        case "secondary":
+            return tuple(((a + angle) % 3600, weight / 100) for a, weight in SECONDARY_RAYS)
+        case _:
+            return ((0, 1.0),)
 
 
 def sine(angle):
@@ -213,14 +215,16 @@ def sine(angle):
 
 def radial_extent(kind, p, diagonal):
     d = max(diagonal, 1414)
-    if kind in ("primary", "secondary"):
-        return min((0.000015 ** (-(p.length + 25) / 190) - 1) * d / 800, diagonal + 2)
-    if kind == "soft":
-        radius = 1 + (d // 3) * (p.size / 100) ** 3
-        power = 0.6 + 0.124 * p.falloff
-        return radius * (1 - (0.00025 / 5.7) ** (1 / power))
-    peak = (1 + 0.01 * (p.size + 25) ** 2) * d / 3768
-    return peak * (1.03 + 0.02 * p.outer_width)
+    match kind:
+        case "primary" | "secondary":
+            return min((0.000015 ** (-(p.length + 25) / 190) - 1) * d / 800, diagonal + 2)
+        case "soft":
+            radius = 1 + (d // 3) * (p.size / 100) ** 3
+            power = 0.6 + 0.124 * p.falloff
+            return radius * (1 - (0.00025 / 5.7) ** (1 / power))
+        case _:
+            peak = (1 + 0.01 * (p.size + 25) ** 2) * d / 3768
+            return peak * (1.03 + 0.02 * p.outer_width)
 
 
 def _coordinates(extent, sampling, residue):
