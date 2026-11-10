@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "description": "Every RGB8 triplet transformed by the unchanged Pillow/LCMS RGBA adapter.",
+  "shape": [
+    256,
+    256,
+    256,
+    3
+  ],
+  "dtype": "uint8",
+  "table_sha256": "9cf814a133376c04853756c212d9524c701e0236ed6e79a8123dfe53a21b5a9e",
+  "storage": "Lossless uint8 modulo-256 residuals from three primary-axis baselines.",
+  "archive_sha256": "6384f6ae50403911b82cceb9781f1fa099880426a44b0b120798704ff9a3dfa0",
+  "archive_bytes": 236561,
+  "pillow_version": "12.3.0",
+  "littlecms_version": "2.19",
+  "numpy_version": "2.5.4",
+  "source_profile": "Pillow ImageCms.createProfile('sRGB')",
+  "destination_profile": "Same profile with RGB parametric TRCs replaced by gamma 2.4.",
+  "rendering_intent": 1,
+  "flags": "FORCE_CLUT | COPY_ALPHA",
+  "alpha": 255,
+  "adapter_sha256": "526500d85dd997468ede2d0464b5dacf0fa97c1aad5d3676afa29e4a3e91d07e",
+  "generator": "Offline exhaustive RGB8 color-transform generation",
+  "image_inputs_used": false
+}

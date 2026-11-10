@@ -1,0 +1,98 @@
+#version 330 core
+uniform vec2 outputSize, origin;
+uniform float sampling, scale, cutoff, coefficient, widening, rayLength;
+uniform float rainbow, frequency, phase, softSize, softPower;
+uniform float ringPeak, innerWidth, outerWidth, innerPower, outerPower;
+uniform int kind, gray;
+uniform float softFilter;
+uniform sampler2D originalImage;
+flat in vec2 center, integerOrigin, direction;
+flat in vec3 light;
+flat in float filterWeight, measuredWidth;
+flat in vec3 sourceBackground, sourceGradientX, sourceGradientY;
+flat in vec3 sourcePeak;
+out vec4 fragColor;
+float point(float x,float a) { return pow(max(1.0-abs(x)*a,0.0),3.0); }
+float fifteen(float x,float a) {
+    if (x>1.5) return point(x,a);
+    float sum=0.0;
+    for(int j=0;j<15;j++) sum+=point(x+float(j)/14.0-0.5,a);
+    return sum/15.0;
+}
+float primitive(float x,float a) {
+    return sign(x)*(1.0-pow(max(1.0-a*abs(x),0.0),4.0))/(4.0*a);
+}
+float transverse(float cross,float a,float footprint) {
+    if(sampling>1.0) return (primitive(cross+footprint/2.0,a)-primitive(cross-footprint/2.0,a))/footprint;
+    if(cross>=1.5) return fifteen(cross,a);
+    float sum=0.0;
+    for(int j=-3;j<=3;j++) sum+=fifteen(cross+float(j)/8.0,a);
+    return sum/7.0;
+}
+float radialFlare(float r) {
+    if(kind==2) return max(5.7*pow(max(1.0-r/softSize,0.0),softPower)-0.00025,0.0);
+    float inner=ringPeak*(1.0-(0.03+0.0097*innerWidth));
+    float outer=ringPeak*(1.03+0.02*outerWidth);
+    return r<ringPeak ? pow(clamp((r-inner)/(ringPeak-inner),0.0,1.0),innerPower)
+        : pow(clamp((outer-r)/(outer-ringPeak),0.0,1.0),outerPower);
+}
+void main() {
+    vec2 world=origin+vec2(gl_FragCoord.x-0.5,outputSize.y-gl_FragCoord.y-0.5)*sampling;
+    vec2 delta=world-center;
+    float radius=length(delta);
+    if(kind>=4) {
+        float sigma=measuredWidth/2.354820045;
+        float u=dot(delta,delta)/(sigma*sigma);
+        if(measuredWidth<=0.0 || u>=(kind==4 ? 9.0 : 36.0)) discard;
+        if(kind==5) {
+            float wings=(exp(-u/4.5)-exp(-u/2.0))*pow(1.0-u/36.0,2.0);
+            fragColor=vec4(softFilter*(2.0*filterWeight-1.0)*sourcePeak*wings,1.0);
+            return;
+        }
+        vec3 original=texelFetch(originalImage,ivec2(gl_FragCoord.x,outputSize.y-gl_FragCoord.y),0).rgb;
+        vec3 bg=sourceBackground+sourceGradientX*delta.x+sourceGradientY*delta.y;
+        float fraction=.55*softFilter*(1.0-2.0*filterWeight)*(1.0-exp(-u/2.0))*pow(1.0-u/9.0,2.0);
+        fragColor=vec4(fraction*max(original-max(bg,0.0),0.0),1.0);
+        return;
+    }
+    if(radius>cutoff+(sampling>1.0 ? sampling*0.71 : 0.0)) discard;
+    if(kind>=2 && sampling>1.0) {
+        // Integrate emitted, clamped light, not a single point that can miss
+        // the whole star. Full-resolution export/profile evaluation is unchanged.
+        vec3 sum=vec3(0);
+        for(int y=0;y<8;y++) for(int x=0;x<8;x++) {
+            vec2 offset=(vec2(x,y)+0.5)/8.0-0.5;
+            sum+=clamp(light*radialFlare(length(delta+offset*sampling)),0.0,1.0);
+        }
+        fragColor=vec4(sum/64.0,1.0);
+        return;
+    }
+    float value;
+    if(kind<2) {
+        bool horizontal=abs(direction.x)>=abs(direction.y);
+        float along=horizontal ? world.x-integerOrigin.x : world.y-integerOrigin.y;
+        bool positive=horizontal ? direction.x>0.0 : direction.y>0.0;
+        float coverage=1.0;
+        if(sampling==1.0) {
+            if(positive ? along<0.0 : along>=0.0) discard;
+        } else {
+            coverage=clamp((positive ? along+sampling*0.5 : -along+sampling*0.5)/sampling,0.0,1.0);
+        }
+        float dominant=horizontal ? abs(direction.x) : abs(direction.y);
+        float slope=horizontal ? direction.y/direction.x : direction.x/direction.y;
+        float cross=horizontal ? abs(delta.y-delta.x*slope) : abs(delta.x-delta.y*slope);
+        float a=coefficient*dominant/(1.0+radius*widening);
+        value=coverage*transverse(cross,a,sampling*(1.0+abs(slope)));
+        value*=max(29.0*(pow(1.0+radius*scale,-190.0/(rayLength+25.0))-0.000015),0.0);
+    } else {
+        value=radialFlare(radius);
+    }
+    vec3 result=light*value;
+    if(kind<2 && rainbow>0.0) {
+        float u=radius*scale*125000.0/pow(107.0-frequency,2.0);
+        float theta=radians((floor(u)+36.0*(50.0-phase))*0.1);
+        vec3 modulation=gray!=0 ? vec3(sin(theta)) : vec3(sin(theta),cos(theta),-sin(theta));
+        result*=max(vec3(1.0)+0.017*rainbow*min(u/3000.0,1.0)*modulation,0.0);
+    }
+    fragColor=vec4(clamp(result,0.0,1.0),1.0);
+}
