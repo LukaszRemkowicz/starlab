@@ -50,6 +50,7 @@ uv run pytest -q
 uv run ruff check src tests
 uv run ruff format --check src tests
 uv run mypy
+uv run pylint src/starlab
 ```
 
 The full tests use checked-in fixtures and do not depend on an external research folder. `tools/`, local environments, IDE settings and generated artifacts are excluded from publication.

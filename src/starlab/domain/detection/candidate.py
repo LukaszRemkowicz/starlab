@@ -13,20 +13,22 @@ from ..array_types import (
     RGBA,
     BoolArray,
     CandidateRecord,
-    CoordinateKey,
     DoubleArray,
     FloatArray,
     IntArray,
 )
 from ..jit import njit
+from .catalog import blend_record
 from .numeric import (
     LUMA,
     Stats,
     final_shape,
+    large_size_step,
     preliminary_shape,
     quarter_position,
     quarter_size,
     refine_position,
+    refinement_result,
     small_size,
 )
 from .rays import f, initial_candidate
@@ -234,19 +236,9 @@ def refine_size(image: Image, x: float, y: float, size: float) -> tuple[float, b
             a = image.stats(x, y, int(8 * size) + 4, "ring")
             b = image.stats(x, y, int(2.4 * size))
             c = image.stats(x, y, int(4 * size) - 2, "ring")
-            if a is None or b is None or c is None:
+            size, direction, stop = large_size_step(size, step, direction, a, b, c)
+            if stop:
                 break
-            denominator = 1 - a.minimum
-            center = (b.score - a.minimum) / denominator if denominator else math.nan
-            edge = (c.score - a.minimum) / denominator if denominator else math.nan
-            if center < 0.7 or edge < 0.4 * center:
-                size -= step
-                direction = -1
-            elif center > 0.97 and edge > 0.98 * center and size + step <= 128:
-                size += step
-                if direction == -1:
-                    break
-                direction = 1
         if size == old:
             break
     return size, size != original
@@ -280,9 +272,7 @@ def _refine_candidate(
             size, resized = refine_size(image, x, y, size)
         if size > maximum or covered(x, y, excluded):
             return None
-    if not converged and size > 2:
-        return None
-    return x, y, size
+    return refinement_result(x, y, size, converged)
 
 
 def _accept_shape(image: Image, x: float, y: float, size: float) -> bool:
@@ -362,15 +352,7 @@ def merge_candidate(
         dy = f(old["y"] - new["y"])
         if f(f(dx * dx) + f(dy * dy)) < max(f(old["size"] ** 2), f(new["size"] ** 2)):
             count = min(max(old["count"], 1) + 1, 255)
-            weight = f(1 / count)
-            remaining = f(1 - weight)
-            fields: tuple[CoordinateKey, ...] = ("x", "y", "size", "brightness")
-            for key in fields:
-                old[key] = f(f(old[key] * remaining) + f(new[key] * weight))
-            old["rgb"] = [
-                f(f(a * remaining) + f(b * weight)) for a, b in zip(old["rgb"], new["rgb"])
-            ]
-            old["count"] = count
+            blend_record(old, new, count, f(1 / count))
             return max(maximum_size, old["size"])
     index = len(rows)
     while index and new["y"] <= rows[index - 1]["y"]:

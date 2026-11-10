@@ -69,6 +69,18 @@ def _raster(
                     output[py, px, c] = max(output[py, px, c], fraction * residual)
 
 
+def _mask_filter_result(
+    result: Pixels, origin: tuple[int, int], sampling: int, sky_mask: SkyMask | None
+) -> None:
+    """Restrict a source-correction buffer to sky on its sampled source grid."""
+    if sky_mask is not None:
+        left, top = origin
+        result *= sky_mask.region(
+            (left, top, left + result.shape[1] * sampling, top + result.shape[0] * sampling),
+            sampling,
+        )[..., None]
+
+
 def star_reduction(
     pixels: Pixels,
     records: DoubleArray,
@@ -86,12 +98,7 @@ def star_reduction(
     for start in range(0, len(records), 256):
         check_cancel(cancel)
         _raster(pixels, records[start : start + 256], strength / 100, *origin, sampling, result)
-    if sky_mask is not None:
-        left, top = origin
-        result *= sky_mask.region(
-            (left, top, left + pixels.shape[1] * sampling, top + pixels.shape[0] * sampling),
-            sampling,
-        )[..., None]
+    _mask_filter_result(result, origin, sampling, sky_mask)
     check_cancel(cancel)
     return result
 
@@ -156,11 +163,6 @@ def star_enlargement(
     for start in range(0, len(records), 256):
         check_cancel(cancel)
         _expand(records[start : start + 256], strength / 100, *origin, sampling, result)
-    if sky_mask is not None:
-        left, top = origin
-        result *= sky_mask.region(
-            (left, top, left + pixels.shape[1] * sampling, top + pixels.shape[0] * sampling),
-            sampling,
-        )[..., None]
+    _mask_filter_result(result, origin, sampling, sky_mask)
     check_cancel(cancel)
     return result

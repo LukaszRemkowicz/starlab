@@ -14,5 +14,6 @@ jobs:
       - run: uv run ruff check src tests
       - run: uv run ruff format --check src tests
       - run: uv run mypy
+      - run: uv run pylint src/starlab
       - run: uv run pytest -q
       - run: uv build

@@ -23,7 +23,7 @@ from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView
 
 from ...domain.imaging import Pixels, display_pixels
 from ...domain.stars import Star
-from .drop_paths import local_tiff_path
+from .drop_paths import accept_tiff_drag, drop_tiff
 
 
 def _pixmap(data: Pixels, color_space: str) -> QPixmap:
@@ -273,17 +273,12 @@ class ImageView(QGraphicsView):
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         """Accept drags containing a local TIFF URL."""
-        if local_tiff_path(event.mimeData()) is not None:
-            event.acceptProposedAction()
+        accept_tiff_drag(event)
 
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:
         """Keep accepting only drags with an eligible local TIFF."""
-        if local_tiff_path(event.mimeData()) is not None:
-            event.acceptProposedAction()
+        accept_tiff_drag(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
         """Request the first eligible local TIFF from a drop."""
-        path = local_tiff_path(event.mimeData())
-        if path is not None:
-            self.file_dropped.emit(path)
-            event.acceptProposedAction()
+        drop_tiff(event, self.file_dropped.emit)

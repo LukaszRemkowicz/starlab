@@ -45,7 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...domain.effects.settings import EffectSettings
-from .drop_paths import local_tiff_path
+from .drop_paths import accept_tiff_drag, drop_tiff
 from .effect_panel import EffectPanel
 from .image_view import ImageView
 from .theme import STYLE, icon
@@ -67,20 +67,15 @@ class Canvas(QWidget):
 
     def dragEnterEvent(self, event: QDragEnterEvent) -> None:
         """Accept drags containing at least one local TIFF URL."""
-        if local_tiff_path(event.mimeData()) is not None:
-            event.acceptProposedAction()
+        accept_tiff_drag(event)
 
     def dragMoveEvent(self, event: QDragMoveEvent) -> None:
         """Continue accepting an eligible local TIFF drag."""
-        if local_tiff_path(event.mimeData()) is not None:
-            event.acceptProposedAction()
+        accept_tiff_drag(event)
 
     def dropEvent(self, event: QDropEvent) -> None:
         """Emit the first eligible local TIFF path from the dropped URLs."""
-        path = local_tiff_path(event.mimeData())
-        if path is not None:
-            self.file_dropped.emit(path)
-            event.acceptProposedAction()
+        drop_tiff(event, self.file_dropped.emit)
 
 
 class MainWindow(QMainWindow):

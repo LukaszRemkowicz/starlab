@@ -11,16 +11,20 @@ from ..array_types import CandidateRecord, CoordinateKey
 from .rays import f
 
 
-def combine_records(old: CandidateRecord, new: CandidateRecord) -> None:
-    """Blend all source fields into old using capped native observation counts."""
-    count = min(max(old["count"], 1) + max(new["count"], 1), 255)
-    weight = f(max(new["count"], 1) / count)
+def blend_record(old: CandidateRecord, new: CandidateRecord, count: int, weight: float) -> None:
+    """Apply a resolved observation count/weight with the exact field-rounding order."""
     remaining = f(1 - weight)
     fields: tuple[CoordinateKey, ...] = ("x", "y", "size", "brightness")
     for key in fields:
         old[key] = f(f(old[key] * remaining) + f(new[key] * weight))
     old["rgb"] = [f(f(a * remaining) + f(b * weight)) for a, b in zip(old["rgb"], new["rgb"])]
     old["count"] = count
+
+
+def combine_records(old: CandidateRecord, new: CandidateRecord) -> None:
+    """Blend a whole incoming record using its capped native observation count."""
+    count = min(max(old["count"], 1) + max(new["count"], 1), 255)
+    blend_record(old, new, count, f(max(new["count"], 1) / count))
 
 
 def join_catalogs(destination: list[CandidateRecord], incoming: list[CandidateRecord]) -> None:

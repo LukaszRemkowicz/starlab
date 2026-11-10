@@ -27,6 +27,7 @@ packages = ["src/starlab"]
 [dependency-groups]
 dev = [
     "mypy>=2.4,<3",
+    "pylint>=4.1,<5",
     "pytest>=8,<10",
     "pytest-qt>=4.4,<5",
     "ruff>=0.11",
@@ -57,3 +58,18 @@ files = ["src/starlab"]
 python_version = "3.12"
 strict = true
 ignore_missing_imports = true
+
+[tool.pylint.messages_control]
+disable = ["all"]
+enable = ["duplicate-code"]
+
+[tool.pylint.similarities]
+min-similarity-lines = 5
+ignore-comments = true
+ignore-docstrings = true
+ignore-imports = true
+ignore-signatures = true
+
+[tool.pylint.reports]
+reports = false
+score = false

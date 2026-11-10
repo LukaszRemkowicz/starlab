@@ -17,6 +17,7 @@ uv run pytest -q
 uv run ruff check src tests
 uv run ruff format --check src tests
 uv run mypy
+uv run pylint src/starlab
 ```
 
 Ordinary Qt tests explicitly request the CPU test backend and use the offscreen platform. They exercise application workflows without driving a user's desktop; they do not silently stand in for production GPU/model wiring. Numerical tests cover image validation, color transforms, detector regressions, CPU kernel agreement, masks, source corrections, rendering profiles, history and stale preview handling. Some UI tests have timeouts and require generic Numba specializations to be available; a first run after numerical-code edits can compile them.
@@ -24,6 +25,21 @@ Ordinary Qt tests explicitly request the CPU test backend and use the offscreen 
 Ruff checks selected syntax/import/error rules, import ordering, unused suppressions, McCabe complexity (maximum 10) and statement count (maximum 50). Two function-scoped exceptions document numerical state machines whose exact accumulator/rejection order is intentional: the two-axis rolling filter and conservative sparse peak screening. No module-wide complexity suppressions are used. Annotation and public-documentation rules are also enabled. Mypy checks all production modules in strict mode; array aliases distinguish dtype, and protocols describe service boundaries. The signature-preserving JIT adapter keeps static checking across Numba decorators without changing runtime compilation. Two overload-factory parameters remain intentionally unannotated because Numba requires their annotations to equal the implementation parameters. Untyped external-library stubs are isolated by boundary casts; strict checking does not prove array shape or numerical accuracy. Independent image and workflow checks remain necessary.
 
 The Windows quality workflow runs the locked environment, lint, formatting, strict type checking, ordinary tests and wheel build on pushes and pull requests. It follows the [official uv Actions integration](https://docs.astral.sh/uv/guides/integration/github/). A hosted headless test run does not establish hardware shader correctness.
+
+## Duplicate-code checks
+
+`uv run pylint src/starlab` enables only Pylint's
+[`duplicate-code` rule](https://pylint.pycqa.org/en/latest/user_guide/messages/refactor/duplicate-code.html).
+The similarity setting is 5 meaningful lines; comments, docstrings, imports and
+signatures are ignored. CI runs this separately from Ruff and mypy. No production
+module is excluded and no duplicate-code suppression is used. A controlled copied
+function was rejected to verify that the gate actually runs.
+
+Pylint compares similar text across modules; PyCharm can also identify renamed
+structural copies and same-file duplication. A passing clone scan is one check,
+not proof that every conceivable similar algorithm has been eliminated. Review
+must still distinguish shared business rules from backend-specific data access.
+See [the duplicate cleanup](duplicate-cleanup.md) for the measured scope.
 
 ## Native GPU checks
 

@@ -11,4 +11,6 @@
 
 - [LUT versus LittleCMS](lut-vs-lcms-comparison.md): exhaustive equivalence, detector timing and memory measurements.
 
+- [Duplicate-code cleanup](duplicate-cleanup.md): shared numerical rules, event handlers, IDE typing and the new CI check.
+
 These documents describe the current application. Historical investigation logs, local experiments and generated comparison artifacts are not part of the published project.

@@ -70,10 +70,19 @@ for _name in (
     "inside",
     "neighbor_mean",
     "_recenter",
+    "_repair_extents",
     "repair_recenter",
 ):
     register_jitable(getattr(rays, _name))
-for _name in ("quarter_position", "quarter_size", "small_size", "preliminary_shape", "final_shape"):
+for _name in (
+    "quarter_position",
+    "quarter_size",
+    "small_size",
+    "preliminary_shape",
+    "final_shape",
+    "large_size_step",
+    "refinement_result",
+):
     register_jitable(getattr(numeric, _name))
 f = rays.f
 
@@ -677,18 +686,9 @@ def refine_size(im: Buffer, x: float, y: float, size: float) -> tuple[float, boo
                 stats(im, x, y, int(2.4 * size)),
                 stats(im, x, y, int(4 * size) - 2, True),
             )
-            if a is None or b is None or c is None:
+            size, direction, stop = numeric.large_size_step(size, step, direction, a, b, c)
+            if stop:
                 break
-            denominator = 1 - a.minimum
-            center = (b.score - a.minimum) / denominator if denominator else math.nan
-            edge = (c.score - a.minimum) / denominator if denominator else math.nan
-            if center < 0.7 or edge < 0.4 * center:
-                size, direction = size - step, -1
-            elif center > 0.97 and edge > 0.98 * center and size + step <= 128:
-                size += step
-                if direction == -1:
-                    break
-                direction = 1
         if size == old:
             break
     return size, size != original
@@ -733,9 +733,7 @@ def _refine_candidate(
             size, resized = refine_size(im, x, y, size)
         if size > maximum or covered(x, y, excluded):
             return None
-    if not converged and size > 2:
-        return None
-    return x, y, size
+    return numeric.refinement_result(x, y, size, converged)
 
 
 @njit(cache=True)
@@ -816,69 +814,7 @@ def repair(position: Position, radii: DoubleArray) -> tuple[bool, Position, Doub
     original values. Native diagonal recenter factor really is sqrt(2).
     """
     radii = radii.copy()
-    marked = radii.copy()
     position = (f(position[0]), f(position[1]))
-    for i, value in enumerate(radii):
-        neighbor = rays.neighbor_mean(radii[(i - 1) % 8], radii[(i + 1) % 8])
-        if neighbor >= 0:
-            ratio = rays.div(
-                abs(rays.sub(value, neighbor)),
-                rays.add(rays.mul(value, f(0.333)), rays.mul(neighbor, f(0.67))),
-            )
-            if ratio > 1:
-                marked[i] = -1.0
-    success = True
-    for i, value in enumerate(marked):
-        if value < 0:
-            replacement = rays.neighbor_mean(marked[(i - 1) % 8], marked[(i + 1) % 8])
-            if replacement < 0:
-                success = False
-            else:
-                radii[i] = replacement
-    if not success:
+    if not rays._repair_extents(radii):
         return False, position, radii
-    return True, _recenter(position, radii), radii
-
-
-@njit(cache=True)
-def _recenter(position: tuple[float, float], radii: NDArray[np.float64]) -> tuple[float, float]:
-    """Accumulate valid radii in native direction order and shift the center."""
-    # Preserve native accumulation order, including skipped invalid radii.
-    x = y = nx = ny = 0.0
-    q = f(math.sqrt(2))
-    if radii[6] >= 0:
-        y = -radii[6]
-        ny = 1.0
-    if radii[7] >= 0:
-        x = rays.mul(radii[7], q)
-        y = rays.sub(y, x)
-        nx = 1.0
-        ny = rays.add(ny, 1)
-    if radii[0] >= 0:
-        x = rays.add(x, radii[0])
-        nx = rays.add(nx, 1)
-    if radii[1] >= 0:
-        v = rays.mul(radii[1], q)
-        x = rays.add(x, v)
-        y = rays.add(y, v)
-        nx = rays.add(nx, 1)
-        ny = rays.add(ny, 1)
-    if radii[2] >= 0:
-        y = rays.add(y, radii[2])
-        ny = rays.add(ny, 1)
-    if radii[3] >= 0:
-        v = rays.mul(radii[3], q)
-        x = rays.sub(x, v)
-        y = rays.add(y, v)
-        nx = rays.add(nx, 1)
-        ny = rays.add(ny, 1)
-    if radii[4] >= 0:
-        x = rays.sub(x, radii[4])
-        nx = rays.add(nx, 1)
-    if radii[5] >= 0:
-        v = rays.mul(radii[5], q)
-        x = rays.sub(x, v)
-        y = rays.sub(y, v)
-        nx = rays.add(nx, 1)
-        ny = rays.add(ny, 1)
-    return rays.add(position[0], rays.div(x, nx)), rays.add(position[1], rays.div(y, ny))
+    return True, rays._recenter(position, radii), radii

@@ -116,6 +116,38 @@ def final_shape(
     )
 
 
+def large_size_step(
+    size: float,
+    step: float,
+    direction: int,
+    outer: Stats | CompiledStats | None,
+    inner: Stats | CompiledStats | None,
+    edge_sample: Stats | CompiledStats | None,
+) -> tuple[float, int, bool]:
+    """Apply one sampled radius adjustment, including growth-reversal termination."""
+    if outer is None or inner is None or edge_sample is None:
+        return size, direction, True
+    denominator = 1 - outer.minimum
+    center = (inner.score - outer.minimum) / denominator if denominator else math.nan
+    edge = (edge_sample.score - outer.minimum) / denominator if denominator else math.nan
+    if center < 0.7 or edge < 0.4 * center:
+        return size - step, -1, False
+    if center > 0.97 and edge > 0.98 * center and size + step <= 128:
+        if direction == -1:
+            return size + step, direction, True
+        return size + step, 1, False
+    return size, direction, False
+
+
+def refinement_result(
+    x: float, y: float, size: float, converged: bool
+) -> tuple[float, float, float] | None:
+    """Accept a converged fit or a small source whose bounded refinement expired."""
+    if not converged and size > 2:
+        return None
+    return x, y, size
+
+
 def refine_position(
     position: Position, size: float, sample: Callable[[float, float, int], Stats | None]
 ) -> tuple[Position, bool]:

@@ -10,7 +10,7 @@ import struct
 from collections.abc import Callable, Iterable, Sequence
 from typing import cast
 
-from ..array_types import RGBA, Bounds, Position
+from ..array_types import RGBA, Bounds, DoubleArray, Position
 
 DIRECTIONS = ((1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1))
 LUMA = (0.2126390039920807, 0.7151686549186707, 0.07219231128692627)
@@ -157,8 +157,15 @@ def repair_recenter(
     original values. Native diagonal recenter factor really is sqrt(2).
     """
     radii = list(map(f, radii))
-    marked = radii.copy()
     position = cast(Position, tuple(map(f, position)))
+    if not _repair_extents(radii):
+        return False, position, radii
+    return True, _recenter(position, radii), radii
+
+
+def _repair_extents(radii: list[float] | DoubleArray) -> bool:
+    """Repair marked outlier radii in place using a frozen neighbor snapshot."""
+    marked = radii.copy()
     for i, value in enumerate(radii):
         neighbor = neighbor_mean(radii[(i - 1) % 8], radii[(i + 1) % 8])
         if neighbor >= 0:
@@ -175,12 +182,12 @@ def repair_recenter(
                 success = False
             else:
                 radii[i] = replacement
-    if not success:
-        return False, position, radii
-    return True, _recenter(position, radii), radii
+    return success
 
 
-def _recenter(position: tuple[float, float], radii: list[float]) -> tuple[float, float]:
+def _recenter(
+    position: tuple[float, float], radii: list[float] | DoubleArray
+) -> tuple[float, float]:
     """Accumulate valid radii in native direction order and shift the center."""
     # Preserve native accumulation order, including skipped invalid radii.
     x = y = nx = ny = 0.0
