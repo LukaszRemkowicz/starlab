@@ -7,46 +7,57 @@ All finite RGB inputs, finite bounds, and native float32 operation ordering.
 
 import math
 import struct
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
+from typing import cast
+
+from ..array_types import RGBA, Bounds, Position
 
 DIRECTIONS = ((1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1))
 LUMA = (0.2126390039920807, 0.7151686549186707, 0.07219231128692627)
 
 
-def f(x):
-    return struct.unpack("<f", struct.pack("<f", x))[0]
+def f(x: float) -> float:
+    """Round one intermediate through IEEE float32 and return its Python scalar."""
+    return cast(float, struct.unpack("<f", struct.pack("<f", x))[0])
 
 
-def add(a, b):
+def add(a: float, b: float) -> float:
+    """Add with one float32 rounding step."""
     return f(a + b)
 
 
-def sub(a, b):
+def sub(a: float, b: float) -> float:
+    """Subtract with one float32 rounding step."""
     return f(a - b)
 
 
-def mul(a, b):
+def mul(a: float, b: float) -> float:
+    """Multiply with one float32 rounding step."""
     return f(a * b)
 
 
-def div(a, b):
+def div(a: float, b: float) -> float:
+    """Divide with native zero/NaN handling and float32 rounding."""
     if b == 0:
         return math.nan if a == 0 else math.copysign(math.inf, a * b)
     return f(a / b)
 
 
-def total(values):
+def total(values: Iterable[float]) -> float:
+    """Accumulate in input order, rounding each addition to float32."""
     value = 0.0
     for item in values:
         value = add(value, item)
     return value
 
 
-def luma(rgb):
+def luma(rgb: Sequence[float]) -> float:
+    """Combine the first three channels in the recovered B/R/G operation order."""
     return add(add(mul(rgb[2], LUMA[2]), mul(rgb[0], LUMA[0])), mul(rgb[1], LUMA[1]))
 
 
-def inside(position, bounds):
+def inside(position: Position, bounds: Bounds) -> bool:
+    """Test global coordinates against half-open image bounds."""
     x, y = position
     left, top, right, bottom = bounds
     return x >= left and y >= top and x < right and y < bottom
@@ -54,7 +65,7 @@ def inside(position, bounds):
 
 def _extend_ray(
     position: tuple[float, float],
-    bounds: tuple[float, float, float, float],
+    bounds: Bounds,
     sample: Callable[[float, float], tuple[float, ...]],
     center: tuple[float, ...],
     dx: int,
@@ -76,7 +87,9 @@ def _extend_ray(
     return True
 
 
-def initial_extents(position, bounds, sample):
+def initial_extents(
+    position: Position, bounds: Bounds, sample: Callable[[float, float], RGBA]
+) -> tuple[bool, list[float]]:
     """98880: returns (success, 8 radii); unset radii retain caller's -1.
 
     The first ray reaching its limit rejects the entire candidate. Subsequent
@@ -125,7 +138,8 @@ def initial_extents(position, bounds, sample):
     return True, radii
 
 
-def neighbor_mean(a, b):
+def neighbor_mean(a: float, b: float) -> float:
+    """Average valid adjacent radii, retaining an available single neighbor."""
     if a < 0:
         return b
     if b < 0:
@@ -133,7 +147,9 @@ def neighbor_mean(a, b):
     return mul(add(a, b), 0.5)
 
 
-def repair_recenter(position, radii):
+def repair_recenter(
+    position: Position, radii: Sequence[float]
+) -> tuple[bool, Position, list[float]]:
     """3DA00. Repaired array is returned even on failure (native mutates it).
 
     Outlier marking uses the ORIGINAL adjacent values; repair uses the marked
@@ -142,7 +158,7 @@ def repair_recenter(position, radii):
     """
     radii = list(map(f, radii))
     marked = radii.copy()
-    position = tuple(map(f, position))
+    position = cast(Position, tuple(map(f, position)))
     for i, value in enumerate(radii):
         neighbor = neighbor_mean(radii[(i - 1) % 8], radii[(i + 1) % 8])
         if neighbor >= 0:
@@ -207,7 +223,9 @@ def _recenter(position: tuple[float, float], radii: list[float]) -> tuple[float,
     return add(position[0], div(x, nx)), add(position[1], div(y, ny))
 
 
-def initial_candidate(position, bounds, sample):
+def initial_candidate(
+    position: Position, bounds: Bounds, sample: Callable[[float, float], RGBA]
+) -> tuple[bool, Position, float]:
     """97190 wrapper: commits center/size only on complete success."""
     success, radii = initial_extents(position, bounds, sample)
     if not success:

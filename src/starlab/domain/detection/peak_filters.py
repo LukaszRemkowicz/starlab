@@ -1,11 +1,13 @@
 """Exact rolling 7x7 filter values at a sparse set of pixel centers."""
 
 import numpy as np
-from numba import njit
+
+from ..array_types import BoolArray, FloatArray, IntArray
+from ..jit import njit
 
 
 @njit(cache=True, nogil=True)
-def uniform7_at(lum, allowed, centers):  # noqa: C901, PLR0915
+def uniform7_at(lum: FloatArray, allowed: BoolArray | None, centers: IntArray) -> FloatArray:  # noqa: C901, PLR0915
     """Return mean, square mean and mask fraction in the input center order.
 
     Match SciPy NI_UniformFilter1D: accumulate doubles from the line origin,

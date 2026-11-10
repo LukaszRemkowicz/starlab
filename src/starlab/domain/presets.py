@@ -1,13 +1,53 @@
+"""Versioned preset serialization with strict control-key and range validation."""
+
 from dataclasses import asdict, fields
+from typing import TypedDict, cast
 
-from .effects.settings import KINDS, EffectParameters, EffectSettings
+from .effects.settings import KINDS, EffectKind, EffectParameters, EffectSettings
 
 
-def preset_data(settings: EffectSettings) -> dict:
-    return {"schema_version": 1, "settings": asdict(settings)}
+class ParameterData(TypedDict):
+    """JSON-compatible control fields accepted by the validated parameter record."""
+
+    enabled: bool
+    quantity: float
+    intensity: float
+    length: float
+    angle: float
+    points: int
+    sharpness: float
+    spread: float
+    saturation: float
+    hue: float
+    rainbow: float
+    frequency: float
+    phase: float
+    size: float
+    soft_filter: float
+    falloff: float
+    inner_width: float
+    inner_falloff: float
+    outer_width: float
+    outer_falloff: float
+
+
+class PresetData(TypedDict):
+    """Schema marker and complete independent values for every effect group."""
+
+    schema_version: int
+    settings: dict[EffectKind, ParameterData]
+
+
+def preset_data(settings: EffectSettings) -> PresetData:
+    """Serialize validated controls without modifying their slider values."""
+    return {
+        "schema_version": 1,
+        "settings": cast(dict[EffectKind, ParameterData], asdict(settings)),
+    }
 
 
 def parse_preset(data: object) -> EffectSettings:
+    """Read one supported schema, accepting legacy presets without soft_filter."""
     try:
         if not isinstance(data, dict) or set(data) != {"schema_version", "settings"}:
             raise ValueError("Invalid preset structure.")
@@ -22,6 +62,8 @@ def parse_preset(data: object) -> EffectSettings:
         keys = {f.name for f in fields(EffectParameters)}
         if any(not isinstance(v, dict) or set(v) != keys for v in groups.values()):
             raise ValueError("Preset contains missing or unknown parameters.")
-        return EffectSettings(**{k: EffectParameters(**v) for k, v in groups.items()})
+        return EffectSettings(
+            **{k: EffectParameters(**cast(ParameterData, v)) for k, v in groups.items()}
+        )
     except (TypeError, KeyError) as exc:
         raise ValueError("Invalid preset values.") from exc

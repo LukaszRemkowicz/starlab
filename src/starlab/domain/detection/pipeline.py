@@ -10,23 +10,33 @@ Normalization and the output catalog are global, never ranked within tiles.
 import logging
 import os
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable, Generator, Iterable, Iterator, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
 from contextlib import closing
 from functools import partial
 from threading import Event
+from typing import cast
 
 import numpy as np
-from numpy.typing import NDArray
 from scipy import ndimage
 
-from ..imaging import check_cancel
+from ..array_types import (
+    BoolArray,
+    Bounds,
+    ByteArray,
+    CandidateRecord,
+    CoordinateKey,
+    Diagnostics,
+    FloatArray,
+)
+from ..imaging import ImageFrame, check_cancel
 from ..sky_mask import SkyMask
 from .candidate import Image, candidate, covered, merge_candidate
 from .catalog import join_catalogs
 from .numeric import normalize_catalog
 from .peaks import peak_positions
 from .proxy import coarse_codes, decode, full_codes, full_proxy, maximum_luminance
+from .records import PreparedTile, ReferenceAttempt, TileKey, TileResult
 
 TILE = 1024
 HALO = 272  # Covers native 266-pixel rays and the largest disk/ring support.
@@ -35,13 +45,8 @@ COMPILED = True
 
 
 def _tile_region(
-    width: int,
-    height: int,
-    left: int,
-    top: int,
-    sky_mask: SkyMask | None,
-    source_scale: int,
-) -> tuple[tuple[int, int, int, int], tuple[int, int, int, int], NDArray[np.bool_] | None]:
+    width: int, height: int, left: int, top: int, sky_mask: SkyMask | None, source_scale: int
+) -> tuple[Bounds, Bounds, BoolArray | None]:
     """Return tile core, clipped halo bounds, and allowed pixels at source scale."""
     core = (left, top, min(width, left + TILE), min(height, top + TILE))
     bounds = (
@@ -53,12 +58,17 @@ def _tile_region(
     allowed = (
         None
         if sky_mask is None
-        else sky_mask.region(tuple(v * source_scale for v in bounds), sampling=source_scale)
+        else sky_mask.region(
+            cast(Bounds, tuple(v * source_scale for v in bounds)), sampling=source_scale
+        )
     )
     return core, bounds, allowed
 
 
-def peak_positions_reference(image, threshold, core, coarse=False):
+def peak_positions_reference(
+    image: Image, threshold: float, core: Bounds, coarse: bool = False
+) -> Iterator[tuple[int, int]]:
+    """Yield global pixel-index component centers using the full SciPy reference screens."""
     intensity = image.rgb.max(axis=2)
     allowed = image.allowed
     maxima = ndimage.maximum_filter(
@@ -130,9 +140,9 @@ def _reference_neighbors(
     threshold: float,
     neighbor_radius: int,
     coarse: bool,
-    excluded: tuple | list,
+    excluded: Sequence[CandidateRecord],
     visited: set[tuple[int, int]],
-) -> list[tuple[int, int, dict | None]]:
+) -> list[ReferenceAttempt]:
     """Evaluate unvisited neighborhood seeds in native row order."""
     attempts = []
     for y in range(max(0, py - neighbor_radius), min(height, py + neighbor_radius + 1)):
@@ -156,9 +166,9 @@ def _reference_attempts(
     threshold: float,
     neighbor_radius: int,
     coarse: bool,
-    excluded: tuple | list,
+    excluded: Sequence[CandidateRecord],
     visited: set[tuple[int, int]],
-) -> list[tuple[int, int, dict | None]]:
+) -> list[ReferenceAttempt]:
     """Try the preferred basin seeds, then expand only after an accepted candidate."""
     accepted = False
     # A maximum may itself fail the original shape predicate;
@@ -199,18 +209,18 @@ def _reference_attempts(
 
 def _scan_reference_tile(
     image: Image,
-    core: tuple[int, int, int, int],
+    core: Bounds,
     width: int,
     height: int,
     threshold: float,
     neighbor_radius: int,
     coarse: bool,
-    excluded: tuple | list,
+    excluded: Sequence[CandidateRecord],
     visited: set[tuple[int, int]],
     cancel: Event | None,
-) -> tuple[list[dict], int, int]:
+) -> tuple[list[CandidateRecord], int, int]:
     """Qualify a reference tile and merge accepted attempts in native seed order."""
-    local_rows = []
+    local_rows: list[CandidateRecord] = []
     maximum_size = 0.0
     peaks = seeds = 0
     for px, py in peak_positions_reference(image, threshold, core, coarse):
@@ -230,17 +240,18 @@ def _scan_reference_tile(
 
 
 def scan_tiled(
-    width,
-    height,
-    read_tile,
-    threshold,
-    neighbor_radius,
-    cancel,
-    coarse=False,
-    excluded=(),
-    sky_mask=None,
-    source_scale=1,
-):
+    width: int,
+    height: int,
+    read_tile: Callable[[Bounds], FloatArray],
+    threshold: float,
+    neighbor_radius: int,
+    cancel: Event | None,
+    coarse: bool = False,
+    excluded: Sequence[CandidateRecord] = (),
+    sky_mask: SkyMask | None = None,
+    source_scale: int = 1,
+) -> tuple[list[CandidateRecord], Diagnostics]:
+    """Scan all cores with halo sampling, native merges, and a shared global seed-visited map."""
     if COMPILED:
         return scan_compiled(
             width,
@@ -254,8 +265,8 @@ def scan_tiled(
             sky_mask,
             source_scale,
         )
-    rows = []
-    visited = set()
+    rows: list[CandidateRecord] = []
+    visited: set[tuple[int, int]] = set()
     peaks = seeds = 0
     for top in range(0, height, TILE):
         for left in range(0, width, TILE):
@@ -305,13 +316,13 @@ def _prepare_tile(
     *,
     width: int,
     height: int,
-    read_tile: Callable[[tuple[int, int, int, int]], NDArray[np.float32]],
+    read_tile: Callable[[Bounds], FloatArray],
     threshold: float,
     coarse: bool,
     token: Event,
     sky_mask: SkyMask | None,
     source_scale: int,
-) -> tuple[Image | None, list[tuple[int, int]], NDArray[np.float64]]:
+) -> PreparedTile:
     """Read one halo tile and locate peaks without writing shared visitation state."""
     started = time.monotonic()
     check_cancel(token)
@@ -330,15 +341,15 @@ def _prepare_tile(
 
 
 def _qualify_tile(
-    value: tuple[Image | None, list[tuple[int, int]], NDArray[np.float64]],
+    value: PreparedTile,
     *,
     threshold: float,
     neighbor_radius: int,
     coarse: bool,
-    excluded: tuple | list,
-    visited: NDArray[np.bool_],
+    excluded: Sequence[CandidateRecord],
+    visited: BoolArray,
     token: Event,
-) -> tuple[list[dict], int, int, NDArray[np.float64]]:
+) -> TileResult:
     """Qualify a prepared tile and release its caches even on cancellation."""
     from .compiled import scan_tile
 
@@ -360,12 +371,7 @@ def _qualify_tile(
         image.clear_cache()
 
 
-def _tile_ready(
-    row: int,
-    column: int,
-    columns: int,
-    completed: set[tuple[int, int]],
-) -> bool:
+def _tile_ready(row: int, column: int, columns: int, completed: set[TileKey]) -> bool:
     """Preserve adjacent visitation writes before a tile starts qualification."""
     return (column == 0 or (row, column - 1) in completed) and (
         row == 0 or (row - 1, min(column + 1, columns - 1)) in completed
@@ -373,34 +379,39 @@ def _tile_ready(
 
 
 def _wait_tiles(
-    preparing: dict[Future, tuple[int, int]],
-    qualifying: dict[Future, tuple[int, int]],
-    prepared: dict[tuple[int, int], tuple],
-    results: dict[tuple[int, int], tuple],
-    completed: set[tuple[int, int]],
+    preparing: dict[Future[PreparedTile], TileKey],
+    qualifying: dict[Future[TileResult], TileKey],
+    prepared: dict[TileKey, PreparedTile],
+    results: dict[TileKey, TileResult],
+    completed: set[TileKey],
 ) -> None:
     """Collect completed preparation/qualification work without changing join order."""
-    finished, _ = wait((*preparing, *qualifying), return_when=FIRST_COMPLETED)
+    # wait only observes futures; membership below identifies their concrete result layout.
+    pending = cast(Iterable[Future[PreparedTile | TileResult]], (*preparing, *qualifying))
+    finished, _ = wait(pending, return_when=FIRST_COMPLETED)
     for future in finished:
         if future in preparing:
-            prepared[preparing.pop(future)] = future.result()
+            prepared_future = cast(Future[PreparedTile], future)
+            prepared[preparing.pop(prepared_future)] = prepared_future.result()
         else:
-            key = qualifying.pop(future)
-            results[key] = future.result()
+            qualified_future = cast(Future[TileResult], future)
+            key = qualifying.pop(qualified_future)
+            results[key] = qualified_future.result()
             completed.add(key)
 
 
 def _cancel_tiles(
     token: Event,
-    preparing: dict[Future, tuple[int, int]],
-    qualifying: dict[Future, tuple[int, int]],
-    prepared: dict[tuple[int, int], tuple],
+    preparing: dict[Future[PreparedTile], TileKey],
+    qualifying: dict[Future[TileResult], TileKey],
+    prepared: dict[TileKey, PreparedTile],
     proxy_pool: ThreadPoolExecutor,
     candidate_pool: ThreadPoolExecutor,
 ) -> None:
     """Cancel queued work, join active workers, then dispose unused prepared images."""
     token.set()
-    for future in (*preparing, *qualifying):
+    pending: tuple[Future[PreparedTile] | Future[TileResult], ...] = (*preparing, *qualifying)
+    for future in pending:
         future.cancel()
     # Active tasks check cancellation between blocks of128 peaks.
     proxy_pool.shutdown(wait=True, cancel_futures=True)
@@ -408,9 +419,9 @@ def _cancel_tiles(
     for image, _, _ in prepared.values():
         if image is not None:
             image.clear_cache()
-    for future in preparing:
-        if not future.cancelled() and future.exception() is None:
-            image, _, _ = future.result()
+    for prepared_future in preparing:
+        if not prepared_future.cancelled() and prepared_future.exception() is None:
+            image, _, _ = prepared_future.result()
             if image is not None:
                 image.clear_cache()
 
@@ -418,20 +429,24 @@ def _cancel_tiles(
 def _compiled_tiles(
     width: int,
     height: int,
-    read_tile: Callable[[tuple[int, int, int, int]], NDArray[np.float32]],
+    read_tile: Callable[[Bounds], FloatArray],
     threshold: float,
     neighbor_radius: int,
     token: Event,
     coarse: bool,
-    excluded: tuple | list,
+    excluded: Sequence[CandidateRecord],
     sky_mask: SkyMask | None,
     source_scale: int,
-) -> Iterator[tuple[int, int, tuple[list[dict], int, int, NDArray[np.float64]]]]:
+) -> Generator[tuple[int, int, TileResult], None, None]:
     """Schedule bounded tile work and yield completed tiles in row-major join order."""
     visited = np.zeros((height, width), np.bool_)
     columns, row_count = (width + TILE - 1) // TILE, (height + TILE - 1) // TILE
     keys = [(r, c) for r in range(row_count) for c in range(columns)]
-    results, completed, preparing, prepared, qualifying = {}, set(), {}, {}, {}
+    results: dict[TileKey, TileResult] = {}
+    completed: set[TileKey] = set()
+    preparing: dict[Future[PreparedTile], TileKey] = {}
+    prepared: dict[TileKey, PreparedTile] = {}
+    qualifying: dict[Future[TileResult], TileKey] = {}
     next_join = next_prepare = 0
     prepare = partial(
         _prepare_tile,
@@ -482,21 +497,22 @@ def _compiled_tiles(
 
 
 def scan_compiled(
-    width,
-    height,
-    read_tile,
-    threshold,
-    neighbor_radius,
-    cancel,
-    coarse,
-    excluded,
-    sky_mask,
-    source_scale,
-):
+    width: int,
+    height: int,
+    read_tile: Callable[[Bounds], FloatArray],
+    threshold: float,
+    neighbor_radius: int,
+    cancel: Event | None,
+    coarse: bool,
+    excluded: Sequence[CandidateRecord],
+    sky_mask: SkyMask | None,
+    source_scale: int,
+) -> tuple[list[CandidateRecord], Diagnostics]:
+    """Join scheduled compiled tile catalogs deterministically while accumulating phase diagnostics."""
     from .join_fast import join_catalogs_fast
 
     token = cancel if cancel is not None else Event()
-    rows = []
+    rows: list[CandidateRecord] = []
     peaks = seeds = 0
     catalog_maximum = 0.0
     phases = np.zeros(3)
@@ -541,16 +557,17 @@ def scan_compiled(
 
 
 def _scan_coarse(
-    codes: NDArray[np.uint8],
+    codes: ByteArray,
     denominator: float,
     threshold: float,
     neighbor_radius: int,
     cancel: Event | None,
     sky_mask: SkyMask | None,
-) -> tuple[list[dict], dict]:
+) -> tuple[list[CandidateRecord], Diagnostics]:
     """Scan decoded coarse tiles and restore full-image source coordinates/sizes."""
 
-    def coarse_tile(bounds, source=codes):
+    def coarse_tile(bounds: Bounds, source: ByteArray = codes) -> FloatArray:
+        """Decode a coarse RGB8 tile using the image-wide normalization denominator."""
         left, top, right, bottom = bounds
         return decode(source[top:bottom, left:right], denominator)
 
@@ -566,12 +583,13 @@ def _scan_coarse(
         source_scale=4,
     )
     for row in coarse_rows:
-        for key in ("x", "y", "size"):
+        fields: tuple[CoordinateKey, ...] = ("x", "y", "size")
+        for key in fields:
             row[key] *= 4
     return coarse_rows, coarse_stats
 
 
-def _normalize_rows(rows: list[dict], sky_mask: SkyMask | None) -> list[dict]:
+def _normalize_rows(rows: list[CandidateRecord], sky_mask: SkyMask | None) -> list[CandidateRecord]:
     """Apply final mask filtering and one global normalization before catalog sorting."""
     if sky_mask is not None:
         keep = sky_mask.keep(np.array([(row["x"] - 0.5, row["y"] - 0.5) for row in rows]))
@@ -586,7 +604,14 @@ def _normalize_rows(rows: list[dict], sky_mask: SkyMask | None) -> list[dict]:
     return rows
 
 
-def analyze(frame, threshold=0.2, neighbor_radius=2, cancel=None, sky_mask=None):
+def analyze(
+    frame: ImageFrame,
+    threshold: float = 0.2,
+    neighbor_radius: int = 2,
+    cancel: Event | None = None,
+    sky_mask: SkyMask | None = None,
+) -> tuple[list[CandidateRecord], Diagnostics]:
+    """Build globally normalized coarse/full proxies and return source rows plus timing/count diagnostics."""
     start = time.monotonic()
     check_cancel(cancel)
     height, width = frame.pixels.shape[:2]
@@ -608,9 +633,9 @@ def analyze(frame, threshold=0.2, neighbor_radius=2, cancel=None, sky_mask=None)
         denominator,
         time.monotonic() - start,
     )
-    coarse_rows = []
+    coarse_rows: list[CandidateRecord] = []
     coarse_started = time.monotonic()
-    coarse_stats = dict(peaks=0, candidate_seeds=0)
+    coarse_stats: Diagnostics = dict(peaks=0, candidate_seeds=0)
     if use_coarse:
         coarse_rows, coarse_stats = _scan_coarse(
             codes, denominator, threshold, neighbor_radius, cancel, sky_mask
@@ -618,7 +643,8 @@ def analyze(frame, threshold=0.2, neighbor_radius=2, cancel=None, sky_mask=None)
     del codes
     coarse_seconds = time.monotonic() - coarse_started
 
-    def full_tile(bounds):
+    def full_tile(bounds: Bounds) -> FloatArray:
+        """Read a decoded full-resolution RGB tile through the exact selected proxy path."""
         left, top, right, bottom = bounds
         pixels = frame.pixels[top:bottom, left:right]
         return (

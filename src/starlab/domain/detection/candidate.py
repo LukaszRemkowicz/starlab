@@ -3,11 +3,22 @@
 See docs/architecture.md for the detection pipeline and its limitations."""
 
 import math
+from collections.abc import Sequence
 from functools import lru_cache
+from typing import Literal, cast
 
 import numpy as np
-from numba import njit
 
+from ..array_types import (
+    RGBA,
+    BoolArray,
+    CandidateRecord,
+    CoordinateKey,
+    DoubleArray,
+    FloatArray,
+    IntArray,
+)
+from ..jit import njit
 from .numeric import (
     LUMA,
     Stats,
@@ -20,9 +31,12 @@ from .numeric import (
 )
 from .rays import f, initial_candidate
 
+type KernelKind = Literal["disk", "ring"]
+
 
 @njit(cache=True, nogil=True)
-def _luminance(rgb):
+def _luminance(rgb: FloatArray) -> FloatArray:
+    """Return H×W float32 luminance from an H×W×3 decoded detector tile."""
     result = np.empty(rgb.shape[:2], np.float32)
     for y in range(rgb.shape[0]):
         for x in range(rgb.shape[1]):
@@ -33,8 +47,15 @@ def _luminance(rgb):
 
 
 class Image:
-    def __init__(self, rgb, origin=(0, 0), allowed=None):
+    """Decoded RGB tile with global origin, allowed mask, and native sampling caches."""
+
+    def __init__(
+        self, rgb: FloatArray, origin: tuple[int, int] = (0, 0), allowed: BoolArray | None = None
+    ) -> None:
+        """Own decoded RGB/luminance sampling state and bounded per-tile caches."""
         self.rgb = np.asarray(rgb, dtype=np.float32)
+        self.h: int
+        self.w: int
         self.h, self.w = self.rgb.shape[:2]
         self.ox, self.oy = origin
         self.allowed = allowed
@@ -43,21 +64,25 @@ class Image:
         self._color_cached = lru_cache(maxsize=4096)(self._color)
         self.lum = _luminance(self.rgb)
 
-    def inside(self, x, y):
+    def inside(self, x: float, y: float) -> bool:
+        """Test global coordinates against this tile’s half-open bounds."""
         return self.ox <= x < self.ox + self.w and self.oy <= y < self.oy + self.h
 
-    def sample(self, x, y):
-        # 2B320/2B1F0 converts float coordinates with CVTTSS2SI.
+    def sample(self, x: float, y: float) -> RGBA:
+        """Sample by native coordinate truncation; excluded/outside points have zero alpha."""
         ix, iy = int(x) - self.ox, int(y) - self.oy
         if not (0 <= ix < self.w and 0 <= iy < self.h):
             return (0, 0, 0, 0)
         if self.allowed is not None and not self.allowed[iy, ix]:
             return (0, 0, 0, 0)
-        return (*map(float, self.rgb[iy, ix]), 1)
+        return cast(RGBA, (*map(float, self.rgb[iy, ix]), 1))
 
     @staticmethod
     @lru_cache(maxsize=128)
-    def kernel(kind, index, qx, qy):
+    def kernel(
+        kind: KernelKind, index: int, qx: int, qy: int
+    ) -> tuple[IntArray, IntArray, FloatArray]:
+        """Return sparse X/Y offsets and float32 weights for quarter-phase support."""
         r = index * 0.25
         cx = qx * 0.25 - 0.5
         cy = qy * 0.25 - 0.5
@@ -85,7 +110,10 @@ class Image:
         keep = weights > 0
         return xx[keep], yy[keep], weights[keep].astype(np.float32)
 
-    def values(self, x, y, index, kind):
+    def values(
+        self, x: float, y: float, index: int, kind: KernelKind
+    ) -> tuple[IntArray, IntArray, FloatArray] | None:
+        """Clip sparse support to allowed tile pixels; invalid table indices return None."""
         if not 0 <= index < 1056:
             return None
         ix, iy = math.floor(x), math.floor(y)
@@ -97,10 +125,12 @@ class Image:
             valid[indices] &= self.allowed[yy[indices], xx[indices]]
         return xx[valid], yy[valid], weight[valid]
 
-    def stats(self, x, y, index, kind="disk"):
+    def stats(self, x: float, y: float, index: int, kind: KernelKind = "disk") -> Stats | None:
+        """Read cached weighted statistics at floor-quantized quarter coordinates."""
         return self._stats_cached(math.floor(x * 4) * 0.25, math.floor(y * 4) * 0.25, index, kind)
 
-    def _stats(self, x, y, index, kind="disk"):
+    def _stats(self, x: float, y: float, index: int, kind: KernelKind = "disk") -> Stats | None:
+        """Compute native weighted statistics, including the eight-lane variance reduction."""
         values = self.values(x, y, index, kind)
         if values is None:
             return None
@@ -113,7 +143,8 @@ class Image:
         delta = v - np.float32(mean)
         variance = delta * delta * weight
 
-        def native_sum(values):
+        def native_sum(values: FloatArray) -> float:
+            """Reduce eight float32 lanes in native combination order, then accumulate the tail."""
             count = len(values) // 8 * 8
             if count:
                 lanes = np.cumsum(values[:count].reshape(-1, 8), axis=0, dtype=np.float32)[-1]
@@ -131,22 +162,30 @@ class Image:
         std = f(math.sqrt(f(native_sum(variance) / native_sum(weight))))
         return Stats(min(1, float(v.min())), mean, max(0, float(v.max())), std, f(mean - std))
 
-    def color(self, x, y, index, kind="disk"):
+    def color(
+        self, x: float, y: float, index: int, kind: KernelKind = "disk"
+    ) -> FloatArray | DoubleArray:
+        """Read cached weighted RGB at floor-quantized quarter coordinates."""
         return self._color_cached(math.floor(x * 4) * 0.25, math.floor(y * 4) * 0.25, index, kind)
 
-    def _color(self, x, y, index, kind="disk"):
+    def _color(
+        self, x: float, y: float, index: int, kind: KernelKind = "disk"
+    ) -> FloatArray | DoubleArray:
+        """Compute sparse weighted RGB; empty or invalid supports return three zeroes."""
         values = self.values(x, y, index, kind)
         if values is None:
             return np.zeros(3)
         xx, yy, weight = values
         if weight.sum() <= 0:
             return np.zeros(3)
-        return (
+        result: FloatArray = (
             np.cumsum(self.rgb[yy, xx] * weight[:, None], axis=0, dtype=np.float32)[-1]
             / np.cumsum(weight, dtype=np.float32)[-1]
         )
+        return result
 
-    def clear_cache(self):
+    def clear_cache(self) -> None:
+        """Dispose cache wrappers and their bound-method ownership cycles after tile use."""
         self._stats_cached.cache_clear()
         self._color_cached.cache_clear()
         # Cached bound methods own this tile; break that cycle immediately so
@@ -155,7 +194,8 @@ class Image:
         del self._color_cached
 
 
-def shrink_initial(image, x, y, size):
+def shrink_initial(image: Image, x: float, y: float, size: float) -> float:
+    """Shrink the ray estimate using native annular/disk luminance comparisons."""
     index = int(size * 1.32)
     if index > 8:
         a = float(image.color(x, y, index, "ring") @ LUMA)
@@ -174,7 +214,8 @@ def shrink_initial(image, x, y, size):
     return 0.25 * (index + 2)
 
 
-def refine_size(image, x, y, size):
+def refine_size(image: Image, x: float, y: float, size: float) -> tuple[float, bool]:
+    """Refine radius in native step order and report whether it changed."""
     original = size
     direction = 0
     for iteration in range(2, 8):
@@ -182,7 +223,7 @@ def refine_size(image, x, y, size):
         step = max(size * 0.05 / iteration, 0.25)
         if size < 1.25:
             peak = float(image.color(x, y, 5).max())
-            background = image.stats(x, y, 10, "ring").minimum
+            background = cast(Stats, image.stats(x, y, 10, "ring")).minimum
             if peak > background:
                 size = small_size((peak - background) / (1 - background))
                 direction = 1 if size > old else -1 if size < old else direction
@@ -193,7 +234,7 @@ def refine_size(image, x, y, size):
             a = image.stats(x, y, int(8 * size) + 4, "ring")
             b = image.stats(x, y, int(2.4 * size))
             c = image.stats(x, y, int(4 * size) - 2, "ring")
-            if any(v is None for v in (a, b, c)):
+            if a is None or b is None or c is None:
                 break
             denominator = 1 - a.minimum
             center = (b.score - a.minimum) / denominator if denominator else math.nan
@@ -212,7 +253,7 @@ def refine_size(image, x, y, size):
 
 
 def _refine_candidate(
-    image: Image, x: float, y: float, size: float, coarse: bool, excluded: tuple | list
+    image: Image, x: float, y: float, size: float, coarse: bool, excluded: Sequence[CandidateRecord]
 ) -> tuple[float, float, float] | None:
     """Alternate position and size refinement, preserving native rollback and limits."""
     previous = (x, y)
@@ -247,6 +288,7 @@ def _refine_candidate(
 def _accept_shape(image: Image, x: float, y: float, size: float) -> bool:
     """Sample the final disk/ring supports and apply the recovered shape predicate."""
     n = max(1, int(4 * size))
+    args: tuple[Stats | None, ...]
     if n < 12:
         a = image.stats(x, y, max(1, n - 2))
         b = image.stats(x, y, 2 * n + 4, "ring")
@@ -259,10 +301,13 @@ def _accept_shape(image: Image, x: float, y: float, size: float) -> bool:
             image.stats(x, y, (6 * n) // 5 + 4, "ring"),
             image.stats(x, y, 2 * n + 4, "ring"),
         )
-    return not any(v is None for v in args) and final_shape(size, *args)
+    return not any(v is None for v in args) and final_shape(size, *cast(tuple[Stats, ...], args))
 
 
-def candidate(image, x, y, coarse=False, excluded=()):
+def candidate(
+    image: Image, x: float, y: float, coarse: bool = False, excluded: Sequence[CandidateRecord] = ()
+) -> CandidateRecord | None:
+    """Qualify one global half-pixel seed and return raw source measurements on success."""
     ok, (x, y), size = initial_candidate((x, y), image.bounds, image.sample)
     if not ok:
         return None
@@ -296,11 +341,14 @@ def candidate(image, x, y, coarse=False, excluded=()):
     return dict(x=x, y=y, size=size, rgb=color.tolist(), brightness=brightness, count=1)
 
 
-def covered(x, y, records):
+def covered(x: float, y: float, records: Sequence[CandidateRecord]) -> bool:
+    """Test a global point against existing source exclusion disks."""
     return any((x - r["x"]) ** 2 + (y - r["y"]) ** 2 < r["size"] ** 2 for r in records)
 
 
-def merge_candidate(rows, new, maximum_size):
+def merge_candidate(
+    rows: list[CandidateRecord], new: CandidateRecord, maximum_size: float
+) -> float:
     """3E5E0 fresh automatic records: y insertion, bounded backward search."""
     threshold = f(new["y"] - f(max(new["size"], maximum_size) + 1))
     for old in reversed(rows):
@@ -312,7 +360,8 @@ def merge_candidate(rows, new, maximum_size):
             count = min(max(old["count"], 1) + 1, 255)
             weight = f(1 / count)
             remaining = f(1 - weight)
-            for key in ("x", "y", "size", "brightness"):
+            fields: tuple[CoordinateKey, ...] = ("x", "y", "size", "brightness")
+            for key in fields:
                 old[key] = f(f(old[key] * remaining) + f(new[key] * weight))
             old["rgb"] = [
                 f(f(a * remaining) + f(b * weight)) for a, b in zip(old["rgb"], new["rgb"])

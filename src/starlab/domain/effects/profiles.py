@@ -3,12 +3,26 @@
 import math
 from collections import OrderedDict
 from threading import RLock
+from typing import cast
 
 import numpy as np
+from numpy.typing import ArrayLike, NDArray
 
-from .settings import EffectParameters
+from ..array_types import Bounds, DoubleArray, FloatArray, IntArray, Position
+from .settings import EffectKind, EffectParameters
 
-SECONDARY_RAYS = (
+type IndexArray = NDArray[np.int32]
+type IntegerArray = IndexArray | IntArray
+type CachedArray = NDArray[np.generic]
+type CacheKey = tuple[object, ...]
+type CacheValue = CachedArray | tuple[CachedArray, ...]
+# Profile: integer x/y offsets, float32 opacity and radius in native pixels.
+type ProfileArrays = tuple[IndexArray, IndexArray, FloatArray, FloatArray]
+# Scene: flattened sampled pixel index, opacity, radius and source-record index.
+type SceneArrays = tuple[IndexArray, FloatArray, FloatArray, IndexArray]
+type RawProfile = tuple[IntegerArray, IntegerArray, DoubleArray, DoubleArray]
+
+SECONDARY_RAYS: tuple[tuple[int, int], ...] = (
     (40, 27),
     (75, 9),
     (110, 7),
@@ -96,17 +110,19 @@ SECONDARY_RAYS = (
 )
 
 
-class ArrayCache:
+class ArrayCache[T: CacheValue]:
     """LRU bounded by array bytes, shared safely by cancelling preview workers."""
 
-    def __init__(self, megabytes):
+    def __init__(self, megabytes: int) -> None:
+        """Set the byte budget; each retained value is made read-only on insertion."""
         self.limit = megabytes * 1024 * 1024
         self.max_entries = 4096
-        self.entries = OrderedDict()
+        self.entries: OrderedDict[CacheKey, tuple[T, int]] = OrderedDict()
         self.bytes = 0
         self.lock = RLock()
 
-    def get(self, key):
+    def get(self, key: CacheKey) -> T | None:
+        """Return and promote a retained value without copying its immutable arrays."""
         with self.lock:
             item = self.entries.get(key)
             if item is not None:
@@ -114,7 +130,8 @@ class ArrayCache:
                 return item[0]
         return None
 
-    def put(self, key, value):
+    def put(self, key: CacheKey, value: T) -> T:
+        """Freeze cacheable arrays and evict least-recently-used values within the budget."""
         arrays = value if isinstance(value, tuple) else (value,)
         size = sum(a.nbytes for a in arrays)
         if size > self.limit:
@@ -135,10 +152,11 @@ class ArrayCache:
         return value
 
 
-PROFILE_CACHE = ArrayCache(64)
+PROFILE_CACHE = ArrayCache[ProfileArrays](64)
 
 
-def image_diagonal(width, height):
+def image_diagonal(width: int, height: int) -> int:
+    """Return the native float32-rounded diagonal used to scale all effect geometry."""
     return int(np.float32(math.hypot(width, height)) + np.float32(1))
 
 
@@ -159,7 +177,8 @@ def ray_coefficients(p: EffectParameters, scale: float) -> tuple[float, float]:
     return coefficient, widening
 
 
-def geometry_key(kind, p):
+def geometry_key(kind: EffectKind, p: EffectParameters) -> CacheKey:
+    """Select only controls affecting reusable sparse-profile support and geometry."""
     if kind in ("primary", "secondary"):
         # Length changes reuse transverse AA. Bounded support envelopes
         # avoid allocating a whole-image maximum-length kernel for short rays.
@@ -177,13 +196,15 @@ def geometry_key(kind, p):
     return kind, p.size, p.inner_width, p.outer_width, p.inner_falloff, p.outer_falloff
 
 
-def gain(kind, p):
+def gain(kind: EffectKind, p: EffectParameters) -> float:
+    """Map the original intensity slider to the group-specific emitted-light gain."""
     exponent = {"primary": 2, "secondary": 1.2, "soft": 3, "ring": 1.8}[kind]
     factor = {"primary": 128, "secondary": 128 * 0.6, "soft": 1, "ring": 1.14}[kind]
-    return factor * (p.intensity / 100) ** exponent
+    return cast(float, factor * (p.intensity / 100) ** exponent)
 
 
-def source_colors(colors, hue, saturation):
+def source_colors(colors: ArrayLike, hue: float, saturation: float) -> FloatArray:
+    """Copy source RGB and apply the native hue/saturation mapping without normalization."""
     colors = np.asarray(colors, dtype=np.float32).copy()
     green = colors[:, 1].copy()
     colors += green[:, None] * np.array([-hue / 1500, hue / 3000, -hue / 1000])
@@ -193,7 +214,8 @@ def source_colors(colors, hue, saturation):
     return np.maximum(colors, 0)
 
 
-def directions(kind, p):
+def directions(kind: EffectKind, p: EffectParameters) -> tuple[tuple[int, float], ...]:
+    """Return rotated ray angles in tenths of degrees with their relative amplitudes."""
     angle = round(p.angle * 10)
     match kind:
         case "primary":
@@ -206,33 +228,38 @@ def directions(kind, p):
             return ((0, 1.0),)
 
 
-def sine(angle):
+def sine(angle: int) -> float:
+    """Evaluate a tenths-degree direction with the native float32 sine rounding."""
     angle %= 3600
     return float(np.float32(math.sin(math.radians((angle % 1800) / 10)))) * (
         1 if angle < 1800 else -1
     )
 
 
-def radial_extent(kind, p, diagonal):
+def radial_extent(kind: EffectKind, p: EffectParameters, diagonal: int) -> float:
+    """Return the current profile cutoff in full-image pixels, without CPU envelopes."""
     d = max(diagonal, 1414)
     match kind:
         case "primary" | "secondary":
-            return min((0.000015 ** (-(p.length + 25) / 190) - 1) * d / 800, diagonal + 2)
+            return cast(
+                float, min((0.000015 ** (-(p.length + 25) / 190) - 1) * d / 800, diagonal + 2)
+            )
         case "soft":
             radius = 1 + (d // 3) * (p.size / 100) ** 3
             power = 0.6 + 0.124 * p.falloff
-            return radius * (1 - (0.00025 / 5.7) ** (1 / power))
+            return cast(float, radius * (1 - (0.00025 / 5.7) ** (1 / power)))
         case _:
             peak = (1 + 0.01 * (p.size + 25) ** 2) * d / 3768
             return peak * (1.03 + 0.02 * p.outer_width)
 
 
-def _coordinates(extent, sampling, residue):
+def _coordinates(extent: int, sampling: int, residue: int) -> IndexArray:
+    """Build native integer offsets in one sampling residue class."""
     start = math.ceil((-extent - residue) / sampling) * sampling + residue
     return np.arange(start, extent + 1, sampling, dtype=np.int32)
 
 
-def scene_batch_size(kind, p, diagonal, sampling):
+def scene_batch_size(kind: EffectKind, p: EffectParameters, diagonal: int, sampling: int) -> int:
     """Bound estimated sparse contributions, including long full-size exports."""
     if kind in ("primary", "secondary"):
         scale = 800 / max(diagonal, 1414)
@@ -251,7 +278,9 @@ def scene_batch_size(kind, p, diagonal, sampling):
     return max(1, int(1048576 / max(per_source, 1)))
 
 
-def transverse_profile(cross, coefficient, denominator):
+def transverse_profile(
+    cross: DoubleArray, coefficient: float, denominator: DoubleArray
+) -> DoubleArray:
     """The native 15 × 7 quadrature, vectorized in bounded blocks."""
     result = np.maximum(1 - np.abs(cross) * coefficient / denominator, 0) ** 3
     near = np.flatnonzero(cross <= 1.5)
@@ -276,15 +305,15 @@ def transverse_profile(cross, coefficient, denominator):
 def _sampled_cross_offsets(
     width: int,
     height: int,
-    origins: np.ndarray,
-    residues: np.ndarray,
-    source: np.ndarray,
-    along: np.ndarray,
-    middle: np.ndarray,
+    origins: IndexArray,
+    residues: IndexArray,
+    source: IntArray,
+    along: IntegerArray,
+    middle: DoubleArray,
     band: float,
     axis: int,
     sampling: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+) -> tuple[IntegerArray, IntArray, IntArray]:
     """Expand clipped transverse spans, retaining each sample's source and major offset."""
     low = np.ceil((middle - band - residues[source, 1 - axis]) / sampling).astype(np.int64)
     high = np.floor((middle + band - residues[source, 1 - axis]) / sampling).astype(np.int64)
@@ -311,11 +340,19 @@ def _sampled_cross_offsets(
     across = (np.repeat(low, counts) + np.arange(int(counts.sum())) - offsets) * sampling
     source = np.repeat(source, counts)
     across += residues[source, 1 - axis]
-    along = np.repeat(along, counts)
+    along = cast(IntegerArray, np.repeat(along, counts))
     return along, across, source
 
 
-def sampled_ray_scene(width, height, positions, p, diagonal, sampling, angle):
+def sampled_ray_scene(
+    width: int,
+    height: int,
+    positions: tuple[Position, ...],
+    p: EffectParameters,
+    diagonal: int,
+    sampling: int,
+    angle: int,
+) -> SceneArrays:
     """Batch many sampled sources through one exact ray rasterizer.
 
     Sampling creates many residue classes. Evaluating them together avoids
@@ -336,7 +373,7 @@ def sampled_ray_scene(width, height, positions, p, diagonal, sampling, angle):
     centers = np.floor(4 * (raw - origins)) / 4 - 0.5
     residues = (-origins) % sampling
     grid = np.arange(-extent // sampling * sampling, extent + sampling, sampling)
-    along = grid[None, :] + residues[:, axis, None]
+    along: IntegerArray = grid[None, :] + residues[:, axis, None]
     positive = sin > 0 if horizontal else cos < 0
     valid = (along >= 0) if positive else (along < 0)
     valid &= np.abs(along) <= extent
@@ -364,14 +401,17 @@ def sampled_ray_scene(width, height, positions, p, diagonal, sampling, angle):
     values = transverse_profile(cross, cross_coefficient, denominator)
     index = (world_y // sampling) * ((width + sampling - 1) // sampling) + world_x // sampling
     valid = values > 0
-    return tuple(
-        np.ascontiguousarray(v[valid], dtype=dtype)
-        for v, dtype in (
-            (index, np.int32),
-            (values, np.float32),
-            (radius, np.float32),
-            (source, np.int32),
-        )
+    return cast(
+        SceneArrays,
+        tuple(
+            np.ascontiguousarray(v[valid], dtype=dtype)
+            for v, dtype in (
+                (index, np.int32),
+                (values, np.float32),
+                (radius, np.float32),
+                (source, np.int32),
+            )
+        ),
     )
 
 
@@ -384,7 +424,7 @@ def _sparse_ray_profile(
     sampling: int,
     residue: tuple[int, int],
     angle: int,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> RawProfile:
     """Rasterize one ray into integer offsets, transverse opacity and radius."""
     center_x, center_y = center
     scale = 800 / max(diagonal, 1414)
@@ -422,7 +462,7 @@ def _sparse_ray_profile(
 
 
 def _sparse_radial_profile(
-    kind: str,
+    kind: EffectKind,
     p: EffectParameters,
     diagonal: int,
     extent: int,
@@ -430,7 +470,7 @@ def _sparse_radial_profile(
     sampling: int,
     residue: tuple[int, int],
     bounds: tuple[int, int, int, int] | None,
-) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> RawProfile:
     """Evaluate soft or ring opacity on the bounded sampled radial grid."""
     center_x, center_y = center
     x, y = (
@@ -440,6 +480,8 @@ def _sparse_radial_profile(
     if bounds is not None:
         x = x[(x >= bounds[0]) & (x < bounds[2])]
         y = y[(y >= bounds[1]) & (y < bounds[3])]
+    xx: IndexArray
+    yy: IndexArray
     xx, yy = np.meshgrid(x, y)
     xx, yy = xx.ravel(), yy.ravel()
     radius = np.hypot(xx - center_x, yy - center_y)
@@ -460,7 +502,16 @@ def _sparse_radial_profile(
     return xx, yy, values, radius
 
 
-def sparse_profile(kind, p, diagonal, phase, sampling, residue, angle=0, bounds=None):
+def sparse_profile(
+    kind: EffectKind,
+    p: EffectParameters,
+    diagonal: int,
+    phase: tuple[int, int],
+    sampling: int,
+    residue: tuple[int, int],
+    angle: int = 0,
+    bounds: Bounds | None = None,
+) -> ProfileArrays:
     """One ray's integer offsets, opacity, radius; AA always uses full pixels."""
     key = geometry_key(kind, p), diagonal, phase, sampling, residue, angle, bounds
     cached = PROFILE_CACHE.get(key)
@@ -483,8 +534,16 @@ def sparse_profile(kind, p, diagonal, phase, sampling, residue, angle=0, bounds=
             kind, p, diagonal, extent, center, sampling, residue, bounds
         )
     valid = values > 0
-    arrays = tuple(
-        np.ascontiguousarray(v[valid], dtype=dtype)
-        for v, dtype in ((xx, np.int32), (yy, np.int32), (values, np.float32), (radius, np.float32))
+    arrays = cast(
+        ProfileArrays,
+        tuple(
+            np.ascontiguousarray(v[valid], dtype=dtype)
+            for v, dtype in (
+                (xx, np.int32),
+                (yy, np.int32),
+                (values, np.float32),
+                (radius, np.float32),
+            )
+        ),
     )
     return PROFILE_CACHE.put(key, arrays)

@@ -1,3 +1,5 @@
+"""Cooperative latest-only jobs with GUI-thread delivery and thread-owned cleanup."""
+
 from collections.abc import Callable
 from threading import Event
 
@@ -7,18 +9,25 @@ from ...domain.imaging import Cancelled
 
 
 class JobSignals(QObject):
+    """Deliver an operation's opaque result or exception to the runner's GUI thread."""
+
     finished = Signal(int, str, object, object)
 
 
 class Job(QRunnable):
-    def __init__(self, number: int, kind: str, operation: Callable):
+    """Run one immutable operation snapshot with a cooperative cancellation event."""
+
+    def __init__(self, number: int, kind: str, operation: Callable[[Event], object]) -> None:
+        """Retain the operation and create signals on the submitting GUI thread."""
         super().__init__()
         self.number, self.kind, self.operation = number, kind, operation
         self.cancel = Event()
         self.signals = JobSignals()
 
     def run(self) -> None:
-        result, error = None, None
+        """Execute on the pool thread and always report completion to the runner."""
+        result: object = None
+        error: Exception | None = None
         try:
             result = self.operation(self.cancel)
         except Exception as exc:
@@ -35,12 +44,13 @@ class JobRunner(QObject):
     idle = Signal()
     shutdown_finished = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QObject | None = None) -> None:
+        """Own one persistent worker thread so GPU resources never migrate threads."""
         super().__init__(parent)
         self.pool = QThreadPool(self)
         self.pool.setMaxThreadCount(1)
         self.pool.setExpiryTimeout(-1)  # GPU context remains on its creating job thread.
-        self.cleanup = None
+        self.cleanup: Callable[[], None] | None = None
         self.active: Job | None = None
         self.pending: Job | None = None
         self.serial = 0
@@ -51,9 +61,11 @@ class JobRunner(QObject):
 
     @property
     def busy(self) -> bool:
+        """Whether a worker or replaceable pending operation remains outstanding."""
         return self.active is not None or self.pending is not None
 
-    def submit(self, kind: str, operation: Callable) -> None:
+    def submit(self, kind: str, operation: Callable[[Event], object]) -> None:
+        """Replace pending work and cancel older results without blocking the GUI."""
         if self.closing:
             return
         self.serial += 1
@@ -65,13 +77,15 @@ class JobRunner(QObject):
             self._start(job)
 
     def _start(self, job: Job) -> None:
+        """Connect GUI-owned completion delivery before scheduling the runnable."""
         self.active = job
         job.signals.finished.connect(self._finished)
         self.activity.emit(job.kind)
         self.pool.start(job)
 
     @Slot(int, str, object, object)
-    def _finished(self, number: int, kind: str, result, error) -> None:
+    def _finished(self, number: int, kind: str, result: object, error: Exception | None) -> None:
+        """Suppress obsolete results, start pending work and handle reentrant submissions."""
         self.active = None
         if number == self.serial and not self.closing:
             if error is None:
@@ -86,6 +100,7 @@ class JobRunner(QObject):
             self.idle.emit()
 
     def cancel(self) -> None:
+        """Invalidate active results and discard pending work immediately."""
         self.serial += 1
         self.pending = None
         if self.active:

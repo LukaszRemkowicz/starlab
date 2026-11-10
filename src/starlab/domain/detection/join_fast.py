@@ -1,21 +1,27 @@
 """Native snapshot join without per-record NumPy temporary arrays."""
 
 from bisect import bisect_left, bisect_right
+from collections.abc import Sequence
 from operator import itemgetter
+from typing import overload
 
 import numpy as np
-from numba import njit
+
+from ..array_types import BoolArray, CandidateRecord, CoordinateKey, DoubleArray
+from ..jit import njit
 
 Y_KEY = itemgetter("y")
 
 
 @njit(cache=True, inline="always")
-def rounded(value):
+def rounded(value: float) -> np.float64:
+    """Round through float32 while retaining double-width tuple storage."""
     return np.float64(np.float32(value))
 
 
 @njit(cache=True, nogil=True)
-def merge_snapshot(snapshot, incoming):
+def merge_snapshot(snapshot: DoubleArray, incoming: DoubleArray) -> tuple[BoolArray, BoolArray]:
+    """Merge N×8 raw rows in place; return incoming-append and old-update masks."""
     append = np.ones(len(incoming), np.bool_)
     updated = np.zeros(len(snapshot), np.bool_)
     xy = snapshot[:, :2].astype(np.float32)
@@ -50,14 +56,31 @@ def merge_snapshot(snapshot, incoming):
     return append, updated
 
 
-def packed(rows):
+def packed(rows: Sequence[CandidateRecord]) -> DoubleArray:
+    """Pack records into N×8 float64 [x,y,size,brightness,r,g,b,count] rows."""
     return np.array(
         [(r["x"], r["y"], r["size"], r["brightness"], *r["rgb"], r["count"]) for r in rows],
         np.float64,
     ).reshape(-1, 8)
 
 
-def join_catalogs_fast(destination, incoming, maximum=None):
+@overload
+def join_catalogs_fast(
+    destination: list[CandidateRecord], incoming: list[CandidateRecord], maximum: float
+) -> float: ...
+
+
+@overload
+def join_catalogs_fast(
+    destination: list[CandidateRecord], incoming: list[CandidateRecord], maximum: None = None
+) -> float | None: ...
+
+
+def join_catalogs_fast(
+    destination: list[CandidateRecord],
+    incoming: list[CandidateRecord],
+    maximum: float | None = None,
+) -> float | None:
     """Optional running maximum enables the already-sorted streaming path."""
     incoming.sort(key=Y_KEY)
     if not destination:
@@ -66,7 +89,7 @@ def join_catalogs_fast(destination, incoming, maximum=None):
     if not incoming:
         return maximum
     sorted_input = maximum is not None
-    previous = maximum if sorted_input else max(r["size"] for r in destination)
+    previous = maximum if maximum is not None else max(r["size"] for r in destination)
     maximum = max(previous, max(r["size"] for r in incoming))
     lower = min(r["y"] for r in incoming) - maximum - 1
     upper = max(r["y"] for r in incoming) + maximum + 1
@@ -82,9 +105,15 @@ def join_catalogs_fast(destination, incoming, maximum=None):
     snapshot = [r for r in candidates if lower <= r["y"] <= upper and left <= r["x"] <= right]
     data = packed(snapshot)
     append, updated = merge_snapshot(data, packed(incoming))
-    for index in np.flatnonzero(updated):
-        record, values = snapshot[index], data[index]
-        for key, index in (("x", 0), ("y", 1), ("size", 2), ("brightness", 3)):
+    for snapshot_index in np.flatnonzero(updated):
+        record, values = snapshot[snapshot_index], data[snapshot_index]
+        fields: tuple[tuple[CoordinateKey, int], ...] = (
+            ("x", 0),
+            ("y", 1),
+            ("size", 2),
+            ("brightness", 3),
+        )
+        for key, index in fields:
             record[key] = float(values[index])
         record["rgb"] = values[4:7].tolist()
         record["count"] = int(values[7])

@@ -9,24 +9,33 @@ import struct
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
+from threading import Event
+from typing import TypeVar
 
 import numpy as np
-from numba import njit
+from numpy.typing import NDArray
 from PIL import Image, ImageCms
 
+from ..array_types import BoolArray, ByteArray, FloatArray, IntArray
 from ..imaging import check_cancel, linear_to_srgb
+from ..jit import njit
+from ..sky_mask import SkyMask
 from .lookup_assets import load_analysis_tables, load_color_cube
 from .numeric import LUMA
+from .records import BitsArray, CodesArray
+
+UIntT = TypeVar("UIntT", np.uint8, np.uint16)
 
 READ, WRITE = load_analysis_tables()
 
 COARSE_WORKERS = min(8, os.cpu_count() or 1)
-_LCMS_TABLE = None
+_LCMS_TABLE: ByteArray | None = None
 _LCMS_LOCK = threading.Lock()
 
 
 @lru_cache(maxsize=16)
-def transform(thread_id=None):
+def transform(thread_id: int | None = None) -> ImageCms.ImageCmsTransform:
+    """Build a thread-specific sRGB-to-gamma-2.4 RGBA transform with unchanged alpha."""
     source = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
     profile = bytearray(source.tobytes())
     count = struct.unpack_from(">I", profile, 128)[0]
@@ -45,13 +54,13 @@ def transform(thread_id=None):
         target,
         "RGBA",
         "RGBA",
-        renderingIntent=1,
+        renderingIntent=ImageCms.Intent.RELATIVE_COLORIMETRIC,
         flags=ImageCms.Flags.FORCE_CLUT | ImageCms.Flags.COPY_ALPHA,
     )
 
 
 @lru_cache(maxsize=1)
-def _encode_transfer():
+def _encode_transfer() -> tuple[BitsArray, CodesArray]:
     """First float32 input bit pattern for each uint16 output transition.
 
     Build from the original NumPy arithmetic, including ties-to-even. Float
@@ -73,7 +82,14 @@ def _encode_transfer():
 
 
 @njit(cache=True, nogil=True, inline="always")
-def _encoded_value(value, boundaries, buckets, shift=8, maximum=65535):
+def _encoded_value(
+    value: int | np.uint32,
+    boundaries: BitsArray,
+    buckets: ByteArray | CodesArray,
+    shift: int = 8,
+    maximum: int = 65535,
+) -> int | np.int64:
+    """Find the quantized code for one original float32 bit pattern using bucketed bounds."""
     if value & 0x80000000 or value > 0x7F800000:
         return 0
     if value >= 0x3F800000:
@@ -90,7 +106,15 @@ def _encoded_value(value, boundaries, buckets, shift=8, maximum=65535):
 
 
 @njit(cache=True, nogil=True)
-def _encode_bits(bits, boundaries, buckets, result, shift=8, maximum=65535):
+def _encode_bits(
+    bits: BitsArray,
+    boundaries: BitsArray,
+    buckets: NDArray[UIntT],
+    result: NDArray[UIntT],
+    shift: int = 8,
+    maximum: int = 65535,
+) -> NDArray[UIntT]:
+    """Encode H×W×1/3 float32 bits into a supplied RGB integer array, expanding gray."""
     height, width, channels = bits.shape
     for row in range(height):
         for column in range(width):
@@ -104,14 +128,16 @@ def _encode_bits(bits, boundaries, buckets, result, shift=8, maximum=65535):
     return result
 
 
-def encode16(linear):
+def encode16(linear: FloatArray) -> CodesArray:
+    """Encode H×W×1/3 linear samples into exact ties-to-even RGB uint16 codes."""
     boundaries, buckets = _encode_transfer()
     values = np.asarray(linear, dtype=np.float32)
     result = np.empty((*values.shape[:2], 3), np.uint16)
     return _encode_bits(values.view(np.uint32), boundaries, buckets, result)
 
 
-def convert_codes(encoded):
+def convert_codes(encoded: ByteArray) -> ByteArray:
+    """Transform H×W×3 RGB8 samples through the complete coupled RGB color transform."""
     rgba = np.empty((*encoded.shape[:2], 4), np.uint8)
     rgba[:, :, :3] = encoded
     rgba[:, :, 3] = 255
@@ -121,9 +147,8 @@ def convert_codes(encoded):
 
 
 @lru_cache(maxsize=1)
-def _full_transfer():
-    # rint16(x)>>8 changes only at uint16 codes 256,512,...,65280.
-    # This deliberately differs from rounding the gamma result to 8 bits.
+def _full_transfer() -> tuple[BitsArray, ByteArray]:
+    """Return bit transitions/buckets for high bytes of the rounded uint16 encoding."""
     boundaries = _encode_transfer()[0][255::256].copy()
     starts = np.arange((0x3F800000 >> 12) + 2, dtype=np.uint32) << 12
     buckets = np.searchsorted(boundaries, starts, side="right").astype(np.uint8)
@@ -131,7 +156,8 @@ def _full_transfer():
     return boundaries, buckets
 
 
-def full_codes(linear):
+def full_codes(linear: FloatArray) -> ByteArray:
+    """Encode linear gray/RGB through uint16 rounding, high-byte selection, and color conversion."""
     boundaries, buckets = _full_transfer()
     values = np.asarray(linear, dtype=np.float32)
     result = np.empty((*values.shape[:2], 3), np.uint8)
@@ -139,7 +165,8 @@ def full_codes(linear):
     return convert_codes(encoded)
 
 
-def decode(codes, denominator):
+def decode(codes: ByteArray, denominator: float) -> FloatArray:
+    """Read analysis levels, optionally applying the image-wide normalization/12-bit requantization."""
     values = READ[codes]
     if 0 < denominator < 0.98:
         indices = np.rint(np.minimum(values / denominator, 1) * 4095).astype(np.int32)
@@ -147,7 +174,10 @@ def decode(codes, denominator):
     return values
 
 
-def maximum_luminance(codes, cancel=None, allowed=None):
+def maximum_luminance(
+    codes: ByteArray, cancel: Event | None = None, allowed: BoolArray | None = None
+) -> float:
+    """Find the global allowed luminance maximum in cancellable RGB8 image strips."""
     peak = 0.0
     for y in range(0, len(codes), 128):
         check_cancel(cancel)
@@ -161,14 +191,25 @@ def maximum_luminance(codes, cancel=None, allowed=None):
     return peak
 
 
-def axis_mapping(source_size, destination_size):
+def axis_mapping(source_size: int, destination_size: int) -> tuple[int, IntArray]:
+    """Return native encoded-box width and source starts for one downsampled axis."""
     width = round(float(np.float32(source_size) / np.float32(destination_size)))
     step = (source_size - width) / (destination_size - 1) if destination_size > 1 else source_size
     return width, (0.5 + np.arange(destination_size) * step).astype(np.int64)
 
 
 @njit(cache=True, nogil=True)
-def _coarse_bits(bits, ys, xs, bh, bw, allowed, boundaries, buckets):
+def _coarse_bits(
+    bits: BitsArray,
+    ys: IntArray,
+    xs: IntArray,
+    bh: int,
+    bw: int,
+    allowed: BoolArray,
+    boundaries: BitsArray,
+    buckets: CodesArray,
+) -> ByteArray:
+    """Average encoded uint16 box samples before high-byte extraction; an empty mask means all allowed."""
     result = np.empty((len(ys), len(xs), 3), np.uint8)
     channels = bits.shape[2]
     reciprocal = np.float32(1 / (bh * bw))
@@ -196,7 +237,9 @@ def _coarse_bits(bits, ys, xs, bh, bw, allowed, boundaries, buckets):
     return result
 
 
-def coarse_codes(pixels, cancel=None, sky_mask=None):
+def coarse_codes(
+    pixels: FloatArray, cancel: Event | None = None, sky_mask: SkyMask | None = None
+) -> ByteArray:
     """Encoded box mean, integer ties-to-even, then >>8, BEFORE color conversion."""
     height, width = pixels.shape[:2]
     dh, dw = max(1, height // 4), max(1, width // 4)
@@ -207,7 +250,8 @@ def coarse_codes(pixels, cancel=None, sky_mask=None):
     bits = np.asarray(pixels, dtype=np.float32).view(np.uint32)
     token = cancel if cancel is not None else threading.Event()
 
-    def process(y):
+    def process(y: int) -> None:
+        """Convert one coarse-row chunk using a thread-local color transform and shared output."""
         check_cancel(token)
         chunk_ys = ys[y : y + 128]
         top, bottom = int(chunk_ys[0]), int(chunk_ys[-1]) + bh
@@ -243,7 +287,7 @@ def coarse_codes(pixels, cancel=None, sky_mask=None):
     return output
 
 
-def _full_lcms():
+def _full_lcms() -> ByteArray:
     """Load the lossless universal CMM cube once, including concurrent first use."""
     global _LCMS_TABLE
     with _LCMS_LOCK:
@@ -253,7 +297,10 @@ def _full_lcms():
 
 
 @njit(cache=True, nogil=True)
-def _full_proxy_bits(bits, boundaries, buckets, cube, levels):
+def _full_proxy_bits(
+    bits: BitsArray, boundaries: BitsArray, buckets: ByteArray, cube: ByteArray, levels: FloatArray
+) -> FloatArray:
+    """Fuse RGB encoding, universal CMM lookup, and normalized analysis levels for one tile."""
     height, width, channels = bits.shape
     result = np.empty((height, width, 3), np.float32)
     for row in range(height):
@@ -269,7 +316,7 @@ def _full_proxy_bits(bits, boundaries, buckets, cube, levels):
     return result
 
 
-def full_proxy(linear, denominator):
+def full_proxy(linear: FloatArray, denominator: float) -> FloatArray:
     """Exact encode16>>8, full RGB CMM, READ and global normalization in one pass."""
     boundaries, buckets = _full_transfer()
     # Evaluating all 256 possible CMM outputs with the original NumPy arithmetic

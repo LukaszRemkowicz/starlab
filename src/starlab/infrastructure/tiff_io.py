@@ -1,3 +1,7 @@
+"""Validated TIFF/ICC boundaries and atomic, original-protecting image writes."""
+
+from __future__ import annotations
+
 import io
 import os
 import struct
@@ -5,13 +9,18 @@ import tempfile
 from functools import lru_cache
 from pathlib import Path
 from threading import Event
+from typing import cast
 
 import numpy as np
 import tifffile
-from numba import njit
+from numpy.typing import NDArray
 from PIL import ImageCms
 
 from ..domain.imaging import ImageFrame, Pixels, check_cancel, linear_to_srgb, srgb_to_linear
+from ..domain.jit import njit
+
+type EncodedPixels = NDArray[np.uint8] | NDArray[np.uint16]
+type ProfileCharacteristics = tuple[bytes, dict[bytes, bytes]]
 
 ROWS_PER_BLOCK = 128
 
@@ -106,7 +115,9 @@ def _matches_white_point(
     return header[0] == 2 and b"chad" not in tags and _matches_fixed_tag(tags[b"wtpt"], d65)
 
 
-def _matches_srgb(characteristics, reference) -> bool:
+def _matches_srgb(
+    characteristics: ProfileCharacteristics, reference: ProfileCharacteristics
+) -> bool:
     """Check matrix/shaper compatibility without trusting descriptive profile names."""
     header, tags = characteristics
     reference_header, reference_tags = reference
@@ -152,10 +163,11 @@ def _check_profile(profile: bytes | None, rgb: bool) -> str:
     return f"Embedded sRGB profile: {name}{suffix}"
 
 
-def _validated_page(tif):
+def _validated_page(tif: tifffile.TiffFile) -> tuple[tifffile.TiffPage, str]:
+    """Accept one supported page and describe its validated color interpretation."""
     if len(tif.pages) != 1:
         raise ValueError("Use a single-page, flattened TIFF (no image stacks).")
-    page = tif.pages[0]
+    page = cast(tifffile.TiffPage, tif.pages[0])
     orientation = page.tags.get(274)
     if orientation and orientation.value != 1:
         raise ValueError(
@@ -171,7 +183,8 @@ def _validated_page(tif):
     return page, _check_profile(tag.value if tag else None, page.photometric == 2)
 
 
-def _mapped_pixels(page):
+def _mapped_pixels(page: tifffile.TiffPage) -> EncodedPixels:
+    """Expose validated unsigned samples as H×W×C, mapping/decoding only as needed."""
     # Direct mapping for compatible uncompressed TIFFs; other layouts and
     # compressed files decode into tifffile's temporary map before sampling.
     data = page.asarray(out="memmap")
@@ -179,26 +192,32 @@ def _mapped_pixels(page):
         data = np.moveaxis(data, 0, -1)
     if data.ndim == 2:
         data = data[..., None]
-    return data
+    return cast(EncodedPixels, data)
 
 
 @lru_cache(maxsize=4)
-def _integer_transfer(maximum, rgb):
+def _integer_transfer(maximum: int, rgb: bool) -> Pixels:
+    """Build an immutable scalar conversion table for uint8/uint16 input codes."""
     codes = np.arange(maximum + 1, dtype=np.float32) / maximum
     values = srgb_to_linear(codes) if rgb else codes
     values.flags.writeable = False
-    return values
+    # Weak-scalar division preserves float32; NumPy stubs conservatively include float64.
+    return cast(Pixels, values)
 
 
 @njit(cache=True, nogil=True)
-def _transfer_integer_block(source, table, destination):
+def _transfer_integer_block(source: EncodedPixels, table: Pixels, destination: Pixels) -> None:
+    """Convert one H×W×C integer strip into its owned linear-float destination."""
     for y in range(source.shape[0]):
         for x in range(source.shape[1]):
             for channel in range(source.shape[2]):
                 destination[y, x, channel] = table[source[y, x, channel]]
 
 
-def _convert_integer_image(data, path, note, cancel):
+def _convert_integer_image(
+    data: EncodedPixels, path: Path, note: str, cancel: Event | None
+) -> ImageFrame:
+    """Convert validated samples in cancellable strips, then transfer buffer ownership."""
     rgb = data.shape[2] == 3
     normalized = np.empty(data.shape, np.float32)
     table = _integer_transfer(np.iinfo(data.dtype).max, rgb)
@@ -216,6 +235,7 @@ def _convert_integer_image(data, path, note, cancel):
 
 
 def read_tiff(path: Path | str, cancel: Event | None = None) -> ImageFrame:
+    """Read one TIFF into immutable working pixels, validating format and ICC first."""
     check_cancel(cancel)
     path = Path(path)
     with tifffile.TiffFile(path) as tif:
@@ -244,7 +264,7 @@ def read_tiff_preview(
         data = _mapped_pixels(page)[::stride, ::stride]
         # Keep ImageFrame's 2×2 minimum for exceptionally thin panoramas.
         if min(data.shape[:2]) < 2:
-            data = np.repeat(data, 2, axis=0 if data.shape[0] == 1 else 1)
+            data = cast(EncodedPixels, np.repeat(data, 2, axis=0 if data.shape[0] == 1 else 1))
         return _convert_integer_image(data, path, note, cancel), 1 / stride, width, height
 
 

@@ -1,14 +1,29 @@
 """Source-pixel prefilter: small-star reduction and large-star wing expansion."""
 
 import math
+from threading import Event
+from typing import TypedDict
 
 import numpy as np
-from numba import njit
 
-from ..imaging import check_cancel
+from ..array_types import DoubleArray
+from ..imaging import Pixels, check_cancel
+from ..jit import njit
+from ..sky_mask import SkyMask
+from ..stars import Star
 
 
-def reduction_records(stars):
+class FilterOptions(TypedDict):
+    """Coordinate mapping and cancellation shared by source-correction passes."""
+
+    origin: tuple[int, int]
+    sampling: int
+    sky_mask: SkyMask | None
+    cancel: Event | None
+
+
+def reduction_records(stars: tuple[Star, ...]) -> DoubleArray:
+    """Pack 13 columns: x/y, weight, FWHM, RGB background and x/y gradients."""
     return np.asarray(
         [
             (s.x, s.y, s.soft_weight, *s.source_profile)
@@ -20,7 +35,16 @@ def reduction_records(stars):
 
 
 @njit(cache=True, nogil=True)
-def _raster(pixels, records, amount, origin_x, origin_y, sampling, output):
+def _raster(
+    pixels: Pixels,
+    records: DoubleArray,
+    amount: float,
+    origin_x: int,
+    origin_y: int,
+    sampling: int,
+    output: Pixels,
+) -> None:
+    """Write maximum bounded wing subtraction into the caller-owned output buffer."""
     for row in records:
         x, y, weight, width = row[:4]
         sigma = width / 2.354820045
@@ -46,8 +70,16 @@ def _raster(pixels, records, amount, origin_x, origin_y, sampling, output):
 
 
 def star_reduction(
-    pixels, records, strength, *, origin=(0, 0), sampling=1, sky_mask=None, cancel=None
-):
+    pixels: Pixels,
+    records: DoubleArray,
+    strength: float,
+    *,
+    origin: tuple[int, int] = (0, 0),
+    sampling: int = 1,
+    sky_mask: SkyMask | None = None,
+    cancel: Event | None = None,
+) -> Pixels:
+    """Return a new bounded wing-subtraction buffer; overlapping corrections use maximum."""
     result = np.zeros_like(pixels)
     if not strength:
         return result
@@ -64,7 +96,8 @@ def star_reduction(
     return result
 
 
-def enlargement_records(stars):
+def enlargement_records(stars: tuple[Star, ...]) -> DoubleArray:
+    """Pack seven columns: source x/y, weight, measured FWHM and RGB peak."""
     return np.asarray(
         [
             (s.x, s.y, s.soft_weight, s.source_profile[0], *s.source_peak)
@@ -76,7 +109,15 @@ def enlargement_records(stars):
 
 
 @njit(cache=True, nogil=True)
-def _expand(records, amount, origin_x, origin_y, sampling, output):
+def _expand(
+    records: DoubleArray,
+    amount: float,
+    origin_x: int,
+    origin_y: int,
+    sampling: int,
+    output: Pixels,
+) -> None:
+    """Write maximum measured-color wing expansion into the caller-owned output buffer."""
     for row in records:
         x, y, weight, width = row[:4]
         sigma = width / 2.354820045
@@ -99,8 +140,16 @@ def _expand(records, amount, origin_x, origin_y, sampling, output):
 
 
 def star_enlargement(
-    pixels, records, strength, *, origin=(0, 0), sampling=1, sky_mask=None, cancel=None
-):
+    pixels: Pixels,
+    records: DoubleArray,
+    strength: float,
+    *,
+    origin: tuple[int, int] = (0, 0),
+    sampling: int = 1,
+    sky_mask: SkyMask | None = None,
+    cancel: Event | None = None,
+) -> Pixels:
+    """Return new measured-color wing light; preserve centers and mask foreground pixels."""
     result = np.zeros_like(pixels)
     if not strength:
         return result

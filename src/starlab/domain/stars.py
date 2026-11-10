@@ -1,15 +1,24 @@
+"""Validated source records and detector selection in full-image pixel coordinates."""
+
+from collections.abc import Sequence
 from dataclasses import dataclass
 from math import isfinite
 from threading import Event
+from typing import cast
 
 import numpy as np
 
+from .array_types import RGB, CandidateRecord, Diagnostics
 from .detection.pipeline import analyze
+from .detection.records import MultiscaleRecord
 from .imaging import ImageFrame, check_cancel
+from .sky_mask import SkyMask
 
 
 @dataclass(frozen=True)
 class Star:
+    """Immutable source; profile stores FWHM and RGB background/gradient planes."""
+
     id: int
     x: float
     y: float
@@ -22,6 +31,7 @@ class Star:
     source_peak: tuple[float, float, float] = (0.0, 0.0, 0.0)
 
     def __post_init__(self) -> None:
+        """Validate finite source geometry, RGB measurements and filter weights."""
         if not all(
             isfinite(v) for v in (self.x, self.y, self.brightness, self.radius, *self.color)
         ):
@@ -42,6 +52,8 @@ class Star:
 
 @dataclass(frozen=True)
 class DetectionSettings:
+    """Detector choice and limits; native threshold_sigma scales a proxy cutoff."""
+
     threshold_sigma: float = 5.0
     min_distance: int = 5
     max_stars: int | None = None
@@ -49,6 +61,7 @@ class DetectionSettings:
     method: str = "native"
 
     def __post_init__(self) -> None:
+        """Reject unsupported methods and malformed threshold or catalogue limits."""
         if type(self.sky_only) is not bool or self.method not in ("native", "multiscale"):
             raise ValueError("Invalid sky mask or detection method.")
         if (
@@ -68,7 +81,8 @@ class DetectionSettings:
             raise ValueError("Invalid detector limits.")
 
 
-def filter_stars(stars, sky_mask):
+def filter_stars(stars: tuple[Star, ...], sky_mask: SkyMask | None) -> tuple[Star, ...]:
+    """Keep only sources allowed by the full-image mask, retaining catalogue order."""
     if sky_mask is None or not stars:
         return stars
     keep = sky_mask.keep(np.array([(star.x, star.y) for star in stars]))
@@ -80,8 +94,8 @@ def detect_stars(
     settings: DetectionSettings = DetectionSettings(),
     cancel: Event | None = None,
     *,
-    diagnostics: dict | None = None,
-    sky_mask=None,
+    diagnostics: Diagnostics | None = None,
+    sky_mask: SkyMask | None = None,
 ) -> tuple[Star, ...]:
     """Recovered analysis with fast seeds; not a bit-exact original full scan.
 
@@ -93,6 +107,7 @@ def detect_stars(
     check_cancel(cancel)
     if settings.sky_only and sky_mask is None:
         raise ValueError("Sky-only detection requires a sky mask.")
+    rows: Sequence[CandidateRecord | MultiscaleRecord]
     if settings.method == "multiscale":
         from .detection.multiscale import analyze as analyze_multiscale
 
@@ -114,16 +129,20 @@ def detect_stars(
     if diagnostics is not None:
         diagnostics.update(report)
     if settings.max_stars is not None:
-        rows = sorted(rows, key=lambda row: row["normalized_brightness"], reverse=True)[
-            : settings.max_stars
-        ]
+        # Sorting retains each detector's full record; TypedDict inference joins their fields.
+        rows = cast(
+            Sequence[CandidateRecord | MultiscaleRecord],
+            sorted(rows, key=lambda row: row["normalized_brightness"], reverse=True)[
+                : settings.max_stars
+            ],
+        )
     return tuple(
         Star(
             i + 1,
             row["x"] - 0.5,
             row["y"] - 0.5,
             row["normalized_brightness"],
-            tuple(row["normalized_rgb"]),
+            cast(RGB, tuple(row["normalized_rgb"])),
             max(row["size"], 0.25),
         )
         for i, row in enumerate(rows)

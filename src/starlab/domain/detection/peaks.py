@@ -1,10 +1,11 @@
 """Sparse peak screens with the same connected components as the SciPy path."""
 
 import numpy as np
-from numba import njit
 from numpy.typing import NDArray
 from scipy import ndimage
 
+from ..array_types import BoolArray, Bounds, FloatArray, IntArray
+from ..jit import njit
 from .candidate import Image
 from .peak_filters import uniform7_at
 
@@ -12,7 +13,9 @@ SPARSE_FLOOR_LIMIT = 256
 
 
 @njit(cache=True, nogil=True)
-def _local_mean(lum, allowed, y, x, radius):
+def _local_mean(
+    lum: FloatArray, allowed: BoolArray | None, y: int, x: int, radius: int
+) -> tuple[np.float32, np.float32, np.float32]:
     """Match uniform_filter's axis order and intermediate float32 arrays."""
     size = radius * 2 + 1
     mean = square = count = 0.0
@@ -33,7 +36,15 @@ def _local_mean(lum, allowed, y, x, radius):
 
 
 @njit(cache=True, nogil=True)
-def _select(rgb, lum, allowed, threshold, support_threshold, coarse, global_floor):  # noqa: C901
+def _select(  # noqa: C901
+    rgb: FloatArray,
+    lum: FloatArray,
+    allowed: BoolArray | None,
+    threshold: np.float32,
+    support_threshold: np.float32,
+    coarse: bool,
+    global_floor: np.float32,
+) -> tuple[BoolArray, IntArray, int, bool]:
     """Keep the ordered early-rejection/proof cascade together to bound sparse work."""
     height, width = lum.shape
     selected = np.zeros((height, width), np.bool_)
@@ -95,7 +106,9 @@ def _select(rgb, lum, allowed, threshold, support_threshold, coarse, global_floo
 
 
 @njit(cache=True, nogil=True)
-def _resolve_floor(selected, lum, allowed, unresolved):
+def _resolve_floor(
+    selected: BoolArray, lum: FloatArray, allowed: BoolArray | None, unresolved: IntArray
+) -> None:
     """Evaluate the full minimum predicate only at unproven candidates."""
     height, width = lum.shape
     for index in range(len(unresolved)):
@@ -114,7 +127,10 @@ def _resolve_floor(selected, lum, allowed, unresolved):
 
 
 @njit(cache=True, nogil=True)
-def _contrast(lum, allowed, centers):
+def _contrast(
+    lum: FloatArray, allowed: BoolArray | None, centers: IntArray
+) -> tuple[BoolArray, BoolArray]:
+    """Screen compact-source contrast and mark decisions needing exact rolling filters."""
     keep = np.ones(len(centers), np.bool_)
     uncertain = np.zeros(len(centers), np.bool_)
     for index in range(len(centers)):
@@ -155,7 +171,9 @@ def _component_centers(
     return centers
 
 
-def peak_positions(image, threshold, core, coarse=False):
+def peak_positions(
+    image: Image, threshold: float, core: Bounds, coarse: bool = False
+) -> list[tuple[int, int]]:
     """Return global component bounding-box centers, retaining halo topology."""
     lum, allowed = image.lum, image.allowed
     selected, unresolved, unresolved_count, need_coarse = _select(
@@ -180,10 +198,10 @@ def peak_positions(image, threshold, core, coarse=False):
         selected &= lum - floor >= np.float32(0.13)
     if need_coarse:
         selected &= ndimage.uniform_filter(lum, size=3, mode="nearest") >= np.float32(0.6)
-    centers = _component_centers(selected, image, core)
-    if not centers:
+    center_list = _component_centers(selected, image, core)
+    if not center_list:
         return []
-    centers = np.asarray(centers, dtype=np.int64)
+    centers = np.asarray(center_list, dtype=np.int64)
     keep = np.ones(len(centers), np.bool_)
     if not coarse:
         keep, uncertain = _contrast(lum, allowed, centers)

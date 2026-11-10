@@ -1,9 +1,25 @@
+"""GUI-thread image layers, full-image coordinates, and direct Qt navigation events."""
+
 from dataclasses import dataclass
 
 import numpy as np
-from PySide6.QtCore import QPointF, QRectF, Qt, QTimer, Signal
-from PySide6.QtGui import QColor, QImage, QPainter, QPen, QPixmap, QTransform
-from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView
+from PySide6.QtCore import QPointF, QRect, QRectF, Qt, QTimer, Signal
+from PySide6.QtGui import (
+    QColor,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QImage,
+    QKeyEvent,
+    QMouseEvent,
+    QPainter,
+    QPen,
+    QPixmap,
+    QResizeEvent,
+    QTransform,
+    QWheelEvent,
+)
+from PySide6.QtWidgets import QGraphicsPixmapItem, QGraphicsScene, QGraphicsView, QWidget
 
 from ...domain.imaging import Pixels, display_pixels
 from ...domain.stars import Star
@@ -37,11 +53,14 @@ class ViewState:
 
 
 class ImageView(QGraphicsView):
+    """Display an overview and native ROI with source-pixel centers aligned at +0.5."""
+
     image_clicked = Signal(float, float)
     file_dropped = Signal(str)
     detail_requested = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        """Create GUI-owned graphics items and debounce detail requests during navigation."""
         super().__init__(parent)
         self.setScene(QGraphicsScene(self))
         self.item = QGraphicsPixmapItem()
@@ -111,8 +130,9 @@ class ImageView(QGraphicsView):
         width: int,
         height: int,
         *,
-        preserve_detail=False,
+        preserve_detail: bool = False,
     ) -> None:
+        """Update the overview without copying full-resolution source arrays."""
         self.item.setPixmap(_pixmap(data, color_space))
         if not preserve_detail:
             self.detail_item.setPixmap(QPixmap())
@@ -127,6 +147,7 @@ class ImageView(QGraphicsView):
         self.viewport().update()
 
     def fit_image(self) -> None:
+        """Fit the full-image rectangle and discard any obsolete detail layer."""
         was_fitted = self.fitted
         self.fitted = True
         self.detail_timer.stop()
@@ -137,24 +158,31 @@ class ImageView(QGraphicsView):
                 self.detail_requested.emit()
 
     def actual_size(self) -> None:
+        """Show one display pixel per source pixel and request native detail."""
         self.fitted = False
         self.resetTransform()
         self.detail_requested.emit()
 
-    def _queue_detail(self, *_):
+    def _queue_detail(self, *_: object) -> None:
+        """Debounce scrollbar changes into one detail request when the image is zoomed."""
         if self.has_image and not self.fitted:
             self.detail_timer.start()
 
-    def visible_region(self):
+    def visible_region(self) -> QRectF:
+        """Return visible bounds clipped to the full-image coordinate rectangle."""
         return self.mapToScene(self.viewport().rect()).boundingRect().intersected(self.sceneRect())
 
-    def set_region_pixels(self, data, color_space, scale, origin):
+    def set_region_pixels(
+        self, data: Pixels, color_space: str, scale: int, origin: tuple[int, int]
+    ) -> None:
+        """Place sampled ROI pixels using a full-image origin and integer sampling step."""
         self.detail_item.setPixmap(_pixmap(data, color_space))
         self.detail_item.setScale(scale)
         self.detail_item.setPos(origin[0] + (1 - scale) / 2, origin[1] + (1 - scale) / 2)
         self.viewport().update()
 
     def set_tool(self, tool: str) -> None:
+        """Select hand panning or crosshair-based catalog editing."""
         self.tool = tool
         self.setDragMode(
             QGraphicsView.DragMode.ScrollHandDrag
@@ -165,26 +193,30 @@ class ImageView(QGraphicsView):
             Qt.CursorShape.OpenHandCursor if tool == "pan" else Qt.CursorShape.CrossCursor
         )
 
-    def wheelEvent(self, event) -> None:
+    def wheelEvent(self, event: QWheelEvent) -> None:
+        """Zoom around the pointer when an image is loaded."""
         if self.has_image:
             factor = 1.2 if event.angleDelta().y() > 0 else 1 / 1.2
             self.zoom_by(factor)
             event.accept()
 
     def zoom_by(self, factor: float) -> None:
+        """Apply bounded zoom and request detail after navigation settles."""
         if self.has_image and 0.01 <= self.transform().m11() * factor <= 32:
             self.fitted = False
             self.scale(factor, factor)
             self._queue_detail()
 
-    def resizeEvent(self, event) -> None:
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        """Maintain fitted scale or request detail for the resized viewport."""
         super().resizeEvent(event)
         if self.fitted:
             self.fit_image()
         else:
             self._queue_detail()
 
-    def mousePressEvent(self, event) -> None:
+    def mousePressEvent(self, event: QMouseEvent) -> None:
+        """Emit source coordinates for editing tools or delegate pan gestures."""
         if (
             self.has_image
             and self.tool != "pan"
@@ -198,21 +230,25 @@ class ImageView(QGraphicsView):
         else:
             super().mousePressEvent(event)
 
-    def keyPressEvent(self, event) -> None:
+    def keyPressEvent(self, event: QKeyEvent) -> None:
+        """Temporarily enable hand panning while Space is held."""
         if event.key() == Qt.Key.Key_Space and not event.isAutoRepeat():
             self._space_pan = True
             self.setDragMode(QGraphicsView.DragMode.ScrollHandDrag)
         else:
             super().keyPressEvent(event)
 
-    def keyReleaseEvent(self, event) -> None:
+    def keyReleaseEvent(self, event: QKeyEvent) -> None:
+        """Restore the selected edit tool when Space is released."""
         if event.key() == Qt.Key.Key_Space:
             self._space_pan = False
             self.set_tool(self.tool)
         else:
             super().keyReleaseEvent(event)
 
-    def drawForeground(self, painter: QPainter, rect: QRectF) -> None:
+    def drawForeground(self, painter: QPainter, rect: QRectF | QRect) -> None:
+        """Draw visible and hidden catalog markers at their full-image pixel centers."""
+        rect = QRectF(rect)
         if not self.show_centers:
             return
         pen = QPen(QColor("#87b8ff"), 1)
@@ -235,15 +271,18 @@ class ImageView(QGraphicsView):
                     QPointF(star_x + radius, star_y - radius),
                 )
 
-    def dragEnterEvent(self, event) -> None:
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        """Accept drags containing a local TIFF URL."""
         if local_tiff_path(event.mimeData()) is not None:
             event.acceptProposedAction()
 
-    def dragMoveEvent(self, event) -> None:
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        """Keep accepting only drags with an eligible local TIFF."""
         if local_tiff_path(event.mimeData()) is not None:
             event.acceptProposedAction()
 
-    def dropEvent(self, event) -> None:
+    def dropEvent(self, event: QDropEvent) -> None:
+        """Request the first eligible local TIFF from a drop."""
         path = local_tiff_path(event.mimeData())
         if path is not None:
             self.file_dropped.emit(path)

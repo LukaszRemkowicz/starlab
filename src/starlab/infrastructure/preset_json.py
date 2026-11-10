@@ -1,3 +1,5 @@
+"""Bounded UTF-8 preset reading and atomic JSON settings persistence."""
+
 import json
 import os
 import tempfile
@@ -8,16 +10,19 @@ from ..domain.presets import parse_preset, preset_data
 
 
 def load_preset(path: Path | str) -> EffectSettings:
+    """Load a size-bounded settings file through the domain schema validator."""
     path = Path(path)
     if path.stat().st_size > 100_000:
         raise ValueError("Preset is too large.")
     try:
-        return parse_preset(json.loads(path.read_text(encoding="utf-8")))
+        data: object = json.loads(path.read_text(encoding="utf-8"))
+        return parse_preset(data)
     except (UnicodeError, json.JSONDecodeError) as exc:
         raise ValueError("Preset must be a valid UTF-8 JSON file.") from exc
 
 
 def save_preset(path: Path | str, settings: EffectSettings) -> None:
+    """Serialize validated settings, replacing the destination atomically."""
     path = Path(path)
     text = json.dumps(preset_data(settings), indent=2, allow_nan=False)
     fd, temp = tempfile.mkstemp(prefix=".preset-", suffix=".json", dir=path.parent)

@@ -1,13 +1,18 @@
+"""Coordinate immutable previews, original-pixel analysis and protected image export."""
+
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
 from threading import Event
+from typing import TypedDict
 
+from ..domain.array_types import Bounds
 from ..domain.effects.profiles import image_diagonal, radial_extent
 from ..domain.effects.render import composite, render_effects
-from ..domain.effects.settings import EffectSettings
+from ..domain.effects.settings import KINDS, EffectKind, EffectSettings
 from ..domain.effects.soft_filter import (
+    FilterOptions,
     enlargement_records,
     reduction_records,
     star_enlargement,
@@ -17,29 +22,52 @@ from ..domain.imaging import ImageFrame, Pixels, check_cancel
 from ..domain.photometry import calibrate_sources
 from ..domain.sky_mask import SkyMask
 from ..domain.stars import DetectionSettings, Star, detect_stars, filter_stars
-from .ports import ImageReader, ImageWriter
+from .ports import (
+    ImageReader,
+    ImageWriter,
+    MaskReader,
+    PreviewReader,
+    PreviewRenderer,
+    SkyMaskProvider,
+)
 
 
 @dataclass(frozen=True)
 class Preview:
+    """Immutable layer snapshot with full-source pixel scale and optional ROI origin."""
+
     frame: ImageFrame
     effects: Pixels
     scale: int
     draft_count: tuple[int, int] | None = None
     origin: tuple[int, int] = (0, 0)
     is_region: bool = False
-    groups: dict[str, Pixels] | None = None
+    groups: dict[EffectKind, Pixels] | None = None
     reduction: Pixels | None = None
     enlargement: Pixels | None = None
 
 
+class _MaskOption(TypedDict, total=False):
+    """Pass a mask only when supplied, preserving adapter call compatibility."""
+
+    sky_mask: SkyMask
+
+
 def preview_source_filter(
-    pixels, stars, settings, cancel=None, *, origin=(0, 0), sampling=1, sky_mask=None
-):
+    pixels: Pixels,
+    stars: tuple[Star, ...],
+    settings: EffectSettings,
+    cancel: Event | None = None,
+    *,
+    origin: tuple[int, int] = (0, 0),
+    sampling: int = 1,
+    sky_mask: SkyMask | None = None,
+) -> tuple[Pixels, Pixels] | tuple[None, None]:
+    """Build independent reduction/enlargement layers on the preview's source grid."""
     if not settings.soft.enabled or not settings.soft.soft_filter:
         return None, None
     sources = filter_stars(stars, sky_mask)
-    options = dict(origin=origin, sampling=sampling, sky_mask=sky_mask, cancel=cancel)
+    options = FilterOptions(origin=origin, sampling=sampling, sky_mask=sky_mask, cancel=cancel)
     reduction = star_reduction(
         pixels,
         reduction_records(sources),
@@ -59,12 +87,14 @@ class _RegionView:
     pixels: Pixels
 
     @property
-    def width(self):
-        return self.pixels.shape[1]
+    def width(self) -> int:
+        """Return the unsampled ROI width without copying its source pixels."""
+        return int(self.pixels.shape[1])
 
     @property
-    def height(self):
-        return self.pixels.shape[0]
+    def height(self) -> int:
+        """Return the unsampled ROI height without copying its source pixels."""
+        return int(self.pixels.shape[0])
 
 
 def _preview_region_bounds(
@@ -92,7 +122,7 @@ def _region_sources(
 ) -> tuple[Star, ...]:
     """Translate contributing sources while retaining the global brightness maximum."""
     left, top, right, bottom = region
-    groups = ((kind, getattr(settings, kind)) for kind in ("primary", "secondary", "soft", "ring"))
+    groups = ((kind, getattr(settings, kind)) for kind in KINDS)
     active = [(kind, p) for kind, p in groups if p.enabled and p.intensity and p.quantity]
     cutoff = max((radial_extent(kind, p, diagonal) for kind, p in active), default=0) + 1
     maximum = max(stars, key=lambda star: star.brightness, default=None)
@@ -118,7 +148,16 @@ def _region_sources(
     return translated
 
 
-def _render_region(frame, stars, settings, region, sampling, cancel, sky_mask=None):
+def _render_region(
+    frame: ImageFrame,
+    stars: tuple[Star, ...],
+    settings: EffectSettings,
+    region: Bounds,
+    sampling: int,
+    cancel: Event | None,
+    sky_mask: SkyMask | None = None,
+) -> Preview:
+    """Render a source-aligned crop while retaining full-image effect scaling."""
     check_cancel(cancel)
     left, top, right, bottom = _preview_region_bounds(frame, region, sampling)
     diagonal = image_diagonal(frame.width, frame.height)
@@ -162,8 +201,9 @@ def render_preview(
     interactive: bool = False,
     region: tuple[int, int, int, int] | None = None,
     region_sampling: int = 1,
-    sky_mask=None,
+    sky_mask: SkyMask | None = None,
 ) -> Preview:
+    """Render an overview or source-aligned ROI without changing catalogue membership."""
     if region is not None:
         return _render_region(
             frame,
@@ -183,7 +223,7 @@ def render_preview(
         if scale == 1
         else ImageFrame(frame.pixels[::scale, ::scale], frame.name, frame.color_space, frame.note)
     )
-    mask_option = {} if sky_mask is None else {"sky_mask": sky_mask}
+    mask_option: _MaskOption = {} if sky_mask is None else {"sky_mask": sky_mask}
     effects = render_effects(frame, stars, settings, cancel, sampling=scale, **mask_option)
     reduction, enlargement = preview_source_filter(
         preview_frame.pixels, stars, settings, cancel, sampling=scale, sky_mask=sky_mask
@@ -226,16 +266,21 @@ def _apply_export_source_filter(
 
 @dataclass
 class ImageServices:
+    """Inject external adapters while keeping analysis and composition in the application."""
+
     read: ImageReader
     write: ImageWriter
     load_catalog: Callable[[Path, DetectionSettings], tuple[Star, ...] | None] | None = None
     save_catalog: Callable[[Path, DetectionSettings, tuple[Star, ...]], None] | None = None
-    read_preview: Callable | None = None
-    preview: Callable | None = None
-    sky_mask: Callable | None = None
-    read_mask: Callable | None = None
+    read_preview: PreviewReader | None = None
+    preview: PreviewRenderer | None = None
+    sky_mask: SkyMaskProvider | None = None
+    read_mask: MaskReader | None = None
 
-    def open_image(self, source, cancel=None):
+    def open_image(
+        self, source: Path, cancel: Event | None = None
+    ) -> tuple[ImageFrame, SkyMask | None]:
+        """Read the image and optional encoded-source mask concurrently under one token."""
         if self.read_mask is None:
             return self.read(source, cancel), None
         token = cancel if cancel is not None else Event()
@@ -250,14 +295,15 @@ class ImageServices:
 
     def analyze(
         self,
-        frame,
-        source,
-        settings=DetectionSettings(),
-        cancel=None,
+        frame: ImageFrame,
+        source: Path | None,
+        settings: DetectionSettings = DetectionSettings(),
+        cancel: Event | None = None,
         *,
-        force=False,
-        sky_mask=None,
-    ):
+        force: bool = False,
+        sky_mask: SkyMask | None = None,
+    ) -> tuple[Star, ...]:
+        """Reuse an authorized catalogue cache or detect and measure original source pixels."""
         check_cancel(cancel)
         if sky_mask is None and settings.sky_only and self.sky_mask is not None:
             sky_mask = self.sky_mask(frame, source, cancel)
@@ -288,8 +334,9 @@ class ImageServices:
         effects_only: bool,
         source: Path | None,
         cancel: Event | None = None,
-        sky_mask=None,
+        sky_mask: SkyMask | None = None,
     ) -> None:
+        """Render full-resolution layers and pass the final pixels to the protected writer."""
         effects = render_effects(frame, stars, settings, cancel, sky_mask=sky_mask)
         output = effects if effects_only else composite(frame, effects)
         if not effects_only and settings.soft.enabled and settings.soft.soft_filter:

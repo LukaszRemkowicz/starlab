@@ -1,7 +1,12 @@
+"""Validated effect controls in the original slider units and permitted ranges."""
+
 from dataclasses import dataclass, field, fields, replace
 from math import isfinite
+from typing import Literal
 
-KINDS = ("primary", "secondary", "soft", "ring")
+type EffectKind = Literal["primary", "secondary", "soft", "ring"]
+
+KINDS: tuple[EffectKind, ...] = ("primary", "secondary", "soft", "ring")
 
 # CPU mappings are recovered; the UI retains the prototype's permitted ranges.
 RANGES = {
@@ -70,6 +75,8 @@ PARAMETERS = {
 
 @dataclass(frozen=True)
 class EffectParameters:
+    """Immutable slider values; inactive groups retain their complete control state."""
+
     enabled: bool = True
     quantity: float = 80
     intensity: float = 45
@@ -92,6 +99,7 @@ class EffectParameters:
     outer_falloff: float = 50
 
     def __post_init__(self) -> None:
+        """Reject nonfinite, out-of-range, or nonintegral point-count inputs."""
         if type(self.enabled) is not bool:
             raise ValueError("enabled must be boolean.")
         for key, (low, high) in RANGES.items():
@@ -104,6 +112,8 @@ class EffectParameters:
 
 @dataclass(frozen=True)
 class EffectSettings:
+    """Keep independent parameter values for all four emission groups."""
+
     primary: EffectParameters = field(default_factory=EffectParameters)
     secondary: EffectParameters = field(
         default_factory=lambda: EffectParameters(enabled=False, intensity=12, length=15, spread=75)
@@ -114,10 +124,12 @@ class EffectSettings:
     )
 
     def __post_init__(self) -> None:
+        """Require validated parameter records for every effect group."""
         if any(not isinstance(getattr(self, f.name), EffectParameters) for f in fields(self)):
             raise ValueError("All effect groups must contain EffectParameters.")
 
     @classmethod
     def disabled(cls) -> "EffectSettings":
+        """Return the default control values with every group switched off."""
         base = cls()
         return cls(**{k: replace(getattr(base, k), enabled=False) for k in KINDS})

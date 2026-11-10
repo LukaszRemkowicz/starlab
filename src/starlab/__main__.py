@@ -1,3 +1,5 @@
+"""Parse the optional input path and run the standalone Qt application."""
+
 import argparse
 import sys
 
@@ -7,6 +9,7 @@ from .bootstrap import create_window
 
 
 def main() -> int:
+    """Create the GUI, optionally open an image, and return the Qt event-loop exit code."""
     parser = argparse.ArgumentParser(
         description="Star Effects Lab — standalone TIFF diffraction effects"
     )
@@ -17,7 +20,7 @@ def main() -> int:
     app.setOrganizationName("Star Effects Lab")
     window = create_window()
     window.show()
-    if args.image:
+    if args.image and window.controller is not None:
         window.controller.open_path(args.image)
     return app.exec()
 

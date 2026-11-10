@@ -24,8 +24,8 @@ def load_analysis_tables(path: Path | None = None) -> tuple[NDArray[np.float32],
     if hashlib.sha256(archive).hexdigest() != ANALYSIS_ARCHIVE_SHA256:
         raise ValueError("Analysis lookup archive does not match its recorded identity.")
     with np.load(io.BytesIO(archive), allow_pickle=False) as tables:
-        read = tables["read"].copy()
-        write = tables["write"].copy()
+        read: NDArray[np.float32] = tables["read"].copy()
+        write: NDArray[np.uint8] = tables["write"].copy()
     read.flags.writeable = write.flags.writeable = False
     return read, write
 
@@ -46,7 +46,7 @@ def load_color_cube(path: Path | None = None) -> NDArray[np.uint8]:
     if hashlib.sha256(archive).hexdigest() != metadata["archive_sha256"]:
         raise ValueError("Color-transform archive does not match its recorded identity.")
     with np.load(io.BytesIO(archive), allow_pickle=False) as stored:
-        cube = stored["delta"]
+        cube: NDArray[np.uint8] = stored["delta"]
         baselines = tuple(stored[channel] for channel in ("red", "green", "blue"))
     if (
         cube.shape != (256, 256, 256, 3)

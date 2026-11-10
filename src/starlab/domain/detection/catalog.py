@@ -7,20 +7,24 @@ Vectorized distance tests avoid scanning a panorama-wide Python list per seed.
 
 import numpy as np
 
+from ..array_types import CandidateRecord, CoordinateKey
 from .rays import f
 
 
-def combine_records(old, new):
+def combine_records(old: CandidateRecord, new: CandidateRecord) -> None:
+    """Blend all source fields into old using capped native observation counts."""
     count = min(max(old["count"], 1) + max(new["count"], 1), 255)
     weight = f(max(new["count"], 1) / count)
     remaining = f(1 - weight)
-    for key in ("x", "y", "size", "brightness"):
+    fields: tuple[CoordinateKey, ...] = ("x", "y", "size", "brightness")
+    for key in fields:
         old[key] = f(f(old[key] * remaining) + f(new[key] * weight))
     old["rgb"] = [f(f(a * remaining) + f(b * weight)) for a, b in zip(old["rgb"], new["rgb"])]
     old["count"] = count
 
 
-def join_catalogs(destination, incoming):
+def join_catalogs(destination: list[CandidateRecord], incoming: list[CandidateRecord]) -> None:
+    """Join against the preceding destination snapshot, updating every overlapping old row."""
     incoming.sort(key=lambda row: row["y"])
     if not destination:
         destination.extend(incoming)

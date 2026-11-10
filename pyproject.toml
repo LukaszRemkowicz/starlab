@@ -25,7 +25,12 @@ build-backend = "hatchling.build"
 packages = ["src/starlab"]
 
 [dependency-groups]
-dev = ["pytest>=8,<10", "pytest-qt>=4.4,<5", "ruff>=0.11"]
+dev = [
+    "mypy>=2.4,<3",
+    "pytest>=8,<10",
+    "pytest-qt>=4.4,<5",
+    "ruff>=0.11",
+]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
@@ -36,10 +41,19 @@ line-length = 100
 target-version = "py312"
 
 [tool.ruff.lint]
-select = ["E4", "E7", "E9", "F", "I", "C90", "PLR0915", "RUF100"]
+select = ["E4", "E7", "E9", "F", "I", "C90", "PLR0915", "RUF100", "ANN", "D100", "D101", "D102", "D103", "D104", "D105", "D107"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "D"]
 
 [tool.ruff.lint.mccabe]
 max-complexity = 10
 
 [tool.ruff.lint.pylint]
 max-statements = 50
+
+[tool.mypy]
+files = ["src/starlab"]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true

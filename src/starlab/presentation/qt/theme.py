@@ -87,6 +87,7 @@ STYLE += f'QComboBox::down-arrow {{ image: url("{_chevron}"); width: 12px; heigh
 
 
 def icon(name: str, color: str = "#a9bad1", size: int = 18) -> QIcon:
+    """Rasterize a bundled vector path on the GUI thread at a fixed high-DPI ratio."""
     svg = f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="{color}" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">{PATHS[name]}</svg>'
     pixmap = QPixmap(size * 2, size * 2)
     pixmap.fill(Qt.GlobalColor.transparent)

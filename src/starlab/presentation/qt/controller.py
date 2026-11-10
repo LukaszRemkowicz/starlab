@@ -1,8 +1,11 @@
+"""GUI-thread session orchestration with immutable worker snapshots and revision checks."""
+
 from collections.abc import Callable
 from dataclasses import replace
 from math import ceil, floor
 from pathlib import Path
 from threading import Event
+from typing import TYPE_CHECKING, TypedDict, cast
 
 import numpy as np
 from PySide6.QtCore import QObject, QSignalBlocker, QTimer
@@ -10,17 +13,43 @@ from PySide6.QtWidgets import QDialog, QDialogButtonBox, QDoubleSpinBox, QFormLa
 
 from ...application.session import Session
 from ...application.use_cases import ImageServices, Preview, render_preview
+from ...domain.array_types import BoolArray, Bounds, DoubleArray
 from ...domain.effects.render import composite
-from ...domain.effects.settings import KINDS
+from ...domain.effects.settings import KINDS, EffectSettings
 from ...domain.imaging import ImageFrame, Pixels
 from ...domain.sky_mask import SkyMask
 from ...domain.stars import DetectionSettings, Star
 from .image_view import ViewState
+from .job_results import AnalysisResult, MaskResult, OpenPreviewResult, OpenResult, PreviewResult
+
+if TYPE_CHECKING:
+    from .main_window import MainWindow
 from .worker import JobRunner
 
 
+class _RegionOptions(TypedDict, total=False):
+    """Optional ROI arguments shared by the CPU and GPU preview call contracts."""
+
+    sky_mask: SkyMask
+    region: Bounds
+    region_sampling: int
+
+
 class Controller(QObject):
-    def __init__(self, window, services: ImageServices, load_preset, save_preset):
+    """Keep session mutation on the GUI thread and reject obsolete asynchronous results."""
+
+    count_brightness: DoubleArray
+    count_eligible: BoolArray
+    count_visible: BoolArray
+
+    def __init__(
+        self,
+        window: "MainWindow",
+        services: ImageServices,
+        load_preset: Callable[[str], EffectSettings],
+        save_preset: Callable[[str, EffectSettings], None],
+    ) -> None:
+        """Wire the window to a GUI-owned session and a persistent single-thread runner."""
         super().__init__(window)
         self.window, self.services = window, services
         self.load_preset, self.save_preset = load_preset, save_preset
@@ -28,13 +57,13 @@ class Controller(QObject):
         self.source: Path | None = None
         self.preview: Preview | None = None
         self.overview: Preview | None = None
-        self.detail_region = None
+        self.detail_region: tuple[Bounds, int] | None = None
         self.progressive_open = False
         self._open_view_state: ViewState | None = None
         self._open_labels: tuple[tuple[str, str], ...] = ()
-        self.count_catalog = None
-        self.count_mask = None
-        self.mask_preview = None
+        self.count_catalog: tuple[Star, ...] | None = None
+        self.count_mask: SkyMask | None = None
+        self.mask_preview: SkyMask | None = None
         self.runner = JobRunner(self)
         self.dragging = False
         self.exclusive = False
@@ -70,6 +99,7 @@ class Controller(QObject):
         self.runner.shutdown_finished.connect(window.close)
 
     def activity(self, kind: str) -> None:
+        """Reflect worker activity and lock editing during document-changing operations."""
         self.saved_message = ""
         self.exclusive = kind != "preview"
         w = self.window
@@ -88,6 +118,7 @@ class Controller(QObject):
         w.load_preset_button.setEnabled(not self.exclusive)
 
     def idle(self) -> None:
+        """Restore controls after all active and pending work has finished."""
         self.exclusive = False
         w = self.window
         w.finish_activity()
@@ -106,6 +137,7 @@ class Controller(QObject):
         )
 
     def open_path(self, path: str | Path) -> None:
+        """Read an image asynchronously while retaining the current document until commit."""
         if self.exclusive:
             return
         self.debounce.stop()
@@ -114,21 +146,26 @@ class Controller(QObject):
         path = Path(path)
         settings = self.session.settings
 
-        def read(cancel):
+        def read(cancel: Event) -> OpenResult:
+            """Decode a full image and construct its initial effect-free overview."""
             frame, mask = self.services.open_image(path, cancel)
             preview = render_preview(frame, (), settings, cancel)
-            return path, frame, preview, mask
+            return OpenResult(path, frame, preview, mask)
 
         self.activity("open")
-        if self.services.read_preview is None:
+        read_preview = self.services.read_preview
+        if read_preview is None:
             self.runner.submit("open", read)
         else:
-            self.runner.submit(
-                "open_preview",
-                lambda cancel: (path, self.services.read_preview(path, cancel), read),
-            )
 
-    def analyze(self, *, force=True, detect=True) -> None:
+            def read_thumbnail(cancel: Event) -> OpenPreviewResult:
+                """Return a temporary thumbnail with the typed full-read continuation."""
+                return OpenPreviewResult(path, read_preview(path, cancel), read)
+
+            self.runner.submit("open_preview", read_thumbnail)
+
+    def analyze(self, *, force: bool = True, detect: bool = True) -> None:
+        """Confirm replacement of manual edits and prepare masking and star detection."""
         frame = self.session.frame
         if frame is None or self.exclusive:
             return
@@ -160,12 +197,14 @@ class Controller(QObject):
                     self.refresh()
                 return
             source = self.source
+            mask_service = self.services.sky_mask
+            assert mask_service is not None
             self.activity("mask")
             self.runner.submit(
                 "mask",
-                lambda cancel: (
+                lambda cancel: MaskResult(
                     revision,
-                    self.services.sky_mask(frame, source, cancel),
+                    mask_service(frame, source, cancel),
                     settings,
                     force,
                     detect,
@@ -175,12 +214,16 @@ class Controller(QObject):
         self.mask_preview = None
         self._submit_detection(revision, settings, None, force)
 
-    def _submit_detection(self, revision, settings, sky_mask, force):
+    def _submit_detection(
+        self, revision: int, settings: DetectionSettings, sky_mask: SkyMask | None, force: bool
+    ) -> None:
+        """Submit catalog detection from the captured frame, mask and detector settings."""
         frame, source = self.session.frame, self.source
+        assert frame is not None
         self.activity("analyze")
         self.runner.submit(
             "analyze",
-            lambda cancel: (
+            lambda cancel: AnalysisResult(
                 revision,
                 self.services.analyze(
                     frame, source, settings, cancel, force=force, sky_mask=sky_mask
@@ -190,19 +233,20 @@ class Controller(QObject):
             ),
         )
 
-    def completed(self, kind: str, result) -> None:
+    def completed(self, kind: str, result: object) -> None:
+        """Decode tuple-compatible payloads at the Qt object-signal boundary."""
         self.exclusive = False
         match kind:
             case "open_preview":
-                self._complete_open_preview(*result)
+                self._complete_open_preview(*cast(OpenPreviewResult, result))
             case "open":
-                self._complete_open(*result)
+                self._complete_open(*cast(OpenResult, result))
             case "mask":
-                self._complete_mask(*result)
+                self._complete_mask(*cast(MaskResult, result))
             case "analyze":
-                self._complete_analyze(*result)
+                self._complete_analyze(*cast(AnalysisResult, result))
             case "preview":
-                self._complete_preview(*result)
+                self._complete_preview(*cast(PreviewResult, result))
             case "export":
                 self.saved_message = f"Saved: {result}"
                 self.window.status_text.setText(self.saved_message)
@@ -211,7 +255,7 @@ class Controller(QObject):
         self,
         path: Path,
         thumbnail_info: tuple[ImageFrame, float, int, int],
-        read: Callable[[Event], tuple[Path, ImageFrame, Preview, SkyMask | None]],
+        read: Callable[[Event], OpenResult],
     ) -> None:
         """Show a temporary thumbnail while preserving the committed document and view."""
         thumbnail, scale, width, height = thumbnail_info
@@ -352,6 +396,7 @@ class Controller(QObject):
             self.debounce.start(0)
 
     def request_detail(self) -> None:
+        """Request a sampled ROI in full-image coordinates for the current viewport."""
         if self.session.frame is None or self.progressive_open:
             return
         view = self.window.image_view
@@ -376,7 +421,8 @@ class Controller(QObject):
         if not self.exclusive and self.window.mode not in ("original", "mask"):
             self.refresh()
 
-    def _show_original_detail(self):
+    def _show_original_detail(self) -> None:
+        """Present native source pixels immediately without waiting for effect rendering."""
         if self.detail_region is None or self.session.frame is None:
             return
         (left, top, right, bottom), sampling = self.detail_region
@@ -392,6 +438,7 @@ class Controller(QObject):
         )
 
     def refresh(self) -> None:
+        """Submit a preview from the current immutable session snapshot."""
         self.debounce.stop()
         if self.exclusive:
             return
@@ -414,24 +461,25 @@ class Controller(QObject):
         self.window.image_view.stars = stars
         interactive = self.dragging
         full_resolution = self.full_resolution and not interactive
-        region_options = {}
+        region_options: _RegionOptions = {}
         if self.session.sky_mask is not None:
             region_options["sky_mask"] = self.session.sky_mask
-        if self.services.preview is not None:
+        renderer = self.services.preview
+        max_edge = 1600
+        if renderer is not None:
             viewport = self.window.image_view.viewport()
-            region_options["max_edge"] = min(
+            max_edge = min(
                 1600,
                 max(640, viewport.width() if frame.width >= frame.height else viewport.height()),
             )
         if self.detail_region is not None and not self.window.image_view.fitted:
-            region_options.update(
-                region=self.detail_region[0], region_sampling=self.detail_region[1]
-            )
-        self.runner.submit(
-            "preview",
-            lambda cancel: (
-                revision,
-                (self.services.preview or render_preview)(
+            region_options["region"] = self.detail_region[0]
+            region_options["region_sampling"] = self.detail_region[1]
+
+        def render(cancel: Event) -> PreviewResult:
+            """Render a captured snapshot with arguments supported by its selected backend."""
+            if renderer is None:
+                preview = render_preview(
                     frame,
                     stars,
                     settings,
@@ -439,11 +487,24 @@ class Controller(QObject):
                     full_resolution=full_resolution,
                     interactive=interactive,
                     **region_options,
-                ),
-            ),
-        )
+                )
+            else:
+                preview = renderer(
+                    frame,
+                    stars,
+                    settings,
+                    cancel,
+                    full_resolution=full_resolution,
+                    interactive=interactive,
+                    max_edge=max_edge,
+                    **region_options,
+                )
+            return PreviewResult(revision, preview)
 
-    def display(self, *_args) -> None:
+        self.runner.submit("preview", render)
+
+    def display(self, *_args: object) -> None:
+        """Present both image layers in the selected mode without accepting stale regions."""
         if self.preview is None or self.session.frame is None or self.progressive_open:
             return
         view = self.window.image_view
@@ -475,6 +536,7 @@ class Controller(QObject):
     def _show_overview(self, preview: Preview) -> None:
         """Keep the exposed base layer in the same display mode as zoomed detail."""
         frame = self.session.frame
+        assert frame is not None
         self.window.image_view.set_pixels(
             self._mode_pixels(preview),
             frame.color_space,
@@ -512,7 +574,9 @@ class Controller(QObject):
         )
         if self.window.mode == "compare":
             result = result.copy()
-            middle = self.session.frame.width // 2
+            frame = self.session.frame
+            assert frame is not None
+            middle = frame.width // 2
             columns = preview.origin[0] + np.arange(result.shape[1]) * preview.scale
             result[:, columns < middle] = original[:, columns < middle]
             divider = (middle - preview.origin[0]) // preview.scale
@@ -520,7 +584,8 @@ class Controller(QObject):
                 result[:, divider : divider + 1] = 0.5
         return result
 
-    def _mask_pixels(self, pixels, bounds, sampling):
+    def _mask_pixels(self, pixels: Pixels, bounds: Bounds, sampling: int) -> Pixels:
+        """Blend sampled mask classes into source pixels using full-image bounds."""
         mask = self.mask_preview if self.mask_preview is not None else self.session.sky_mask
         if mask is None:
             return pixels
@@ -528,12 +593,13 @@ class Controller(QObject):
         colors = palette[mask.labels_region(bounds, sampling)]
         return pixels * 0.65 + colors * 0.35
 
-    def update_star_count(self, stars, settings):
+    def update_star_count(self, stars: tuple[Star, ...], settings: EffectSettings) -> None:
+        """Report enabled effect source counts using the committed catalog and mask."""
         mask = self.session.sky_mask
         if self.count_catalog is not stars or self.count_mask is not mask:
             self.count_catalog = stars
             self.count_mask = mask
-            self.count_brightness = np.array([s.brightness for s in stars])
+            self.count_brightness = np.array([s.brightness for s in stars], dtype=np.float64)
             self.count_eligible = (
                 np.ones(len(stars), dtype=bool)
                 if mask is None
@@ -544,8 +610,8 @@ class Controller(QObject):
             )
         values = self.count_brightness
         maximum = float(values[self.count_eligible].max(initial=0))
-        active = np.zeros(len(stars), dtype=bool)
-        counts = []
+        active: BoolArray = np.zeros(len(stars), dtype=bool)
+        counts: list[str] = []
         for kind in KINDS:
             params = getattr(settings, kind)
             selected = self.count_visible & (values > (1 - params.quantity / 100) ** 2 * maximum)
@@ -562,7 +628,8 @@ class Controller(QObject):
             "\n".join(counts) + "\nQuantity selects how many detected sources receive each effect."
         )
 
-    def change_settings(self, settings) -> None:
+    def change_settings(self, settings: EffectSettings) -> None:
+        """Record settings edits and debounce rendering while retaining slider history."""
         if self.exclusive:
             return
         self.session.set_settings(settings, remember=not self.dragging)
@@ -571,7 +638,7 @@ class Controller(QObject):
         if not self.debounce.isActive():
             self.debounce.start(0 if self.dragging else 16)
 
-    def _remove_disabled_effects(self):
+    def _remove_disabled_effects(self) -> None:
         """Invalidate both zoom and overview layers before an old effect can reappear."""
         changed = False
         for name in ("preview", "overview"):
@@ -586,7 +653,8 @@ class Controller(QObject):
         if changed:
             self.display()
 
-    def _enabled_preview(self, preview):
+    def _enabled_preview(self, preview: Preview) -> Preview:
+        """Remove newly disabled groups and source corrections from a retained preview."""
         if (preview.reduction is not None or preview.enlargement is not None) and (
             not self.session.settings.soft.enabled or not self.session.settings.soft.soft_filter
         ):
@@ -606,6 +674,7 @@ class Controller(QObject):
         return replace(preview, effects=effects, groups=groups)
 
     def begin_edit(self) -> None:
+        """Group slider changes into one undo state and allow interactive preview frames."""
         if not self.exclusive:
             self.dragging = True
             self.session.begin_edit()
@@ -614,13 +683,16 @@ class Controller(QObject):
             self.debounce.start(0)
 
     def end_edit(self) -> None:
+        """Finish a slider edit and request the final noninteractive preview."""
         self.dragging = False
         self.debounce.start(0)
 
     def undo(self) -> None:
+        """Restore the preceding edit state and invalidate catalog-dependent layers."""
         self._restore_history(self.session.undo)
 
     def redo(self) -> None:
+        """Restore the next edit state and invalidate catalog-dependent layers."""
         self._restore_history(self.session.redo)
 
     def _restore_history(self, restore: Callable[[], bool]) -> None:
@@ -637,10 +709,12 @@ class Controller(QObject):
             self.refresh()
 
     def _centers(self, checked: bool) -> None:
+        """Toggle foreground catalog markers without recalculating any effect pixels."""
         self.window.image_view.show_centers = checked
         self.window.image_view.viewport().update()
 
     def click_star(self, x: float, y: float) -> None:
+        """Apply the selected catalog tool at full-image pixel coordinates."""
         if self.exclusive or self.session.frame is None:
             return
         tool = self.window.image_view.tool
@@ -661,12 +735,14 @@ class Controller(QObject):
                 return
         self.refresh()
 
-    def edit_dialog(self, star) -> None:
+    def edit_dialog(self, star: Star) -> None:
+        """Edit one source through a modal dialog and release its widgets afterwards."""
         dialog = QDialog(self.window)
         dialog.setWindowTitle(f"Edit star {star.id}")
         form = QFormLayout(dialog)
-        fields = {}
+        fields: dict[str, QDoubleSpinBox] = {}
         frame = self.session.frame
+        assert frame is not None
         for key, maximum, value in (
             ("x", frame.width - 0.001, star.x),
             ("y", frame.height - 0.001, star.y),
@@ -694,12 +770,13 @@ class Controller(QObject):
                     x=fields["x"].value(),
                     y=fields["y"].value(),
                     brightness=fields["brightness"].value(),
-                    color=tuple(fields[c].value() for c in ("red", "green", "blue")),
+                    color=(fields["red"].value(), fields["green"].value(), fields["blue"].value()),
                 )
         finally:
             dialog.deleteLater()
 
     def export_path(self, path: str | Path, effects_only: bool) -> None:
+        """Export a frozen document snapshot as result pixels or effects only."""
         if self.session.frame is None or self.exclusive:
             return
         if self.services.sky_mask is not None and self.session.sky_mask is None:
@@ -718,7 +795,8 @@ class Controller(QObject):
         )
         self.window.show_error("")
 
-        def export(cancel):
+        def export(cancel: Event) -> Path:
+            """Export the captured session snapshot without accessing mutable GUI state."""
             self.services.export(
                 path, frame, stars, settings, effects_only, source, cancel, sky_mask=sky_mask
             )
@@ -728,6 +806,7 @@ class Controller(QObject):
         self.runner.submit("export", export)
 
     def read_preset(self, path: str) -> None:
+        """Load and apply validated effect settings from a preset file."""
         if self.exclusive:
             return
         try:
@@ -740,6 +819,7 @@ class Controller(QObject):
             self.window.show_error(str(exc))
 
     def write_preset(self, path: str) -> None:
+        """Persist the current effect settings and report expected file errors."""
         try:
             self.save_preset(path, self.session.settings)
             self.window.show_error("")
@@ -747,18 +827,21 @@ class Controller(QObject):
             self.window.show_error(str(exc))
 
     def cancel(self) -> None:
+        """Invalidate pending results and restore committed presentation and controls."""
         self.debounce.stop()
         self.runner.cancel()
         self._restore_open_presentation()
         self._restore_detection_controls()
         self.window.set_activity("cancel")
 
-    def _failed(self, message):
+    def _failed(self, message: str) -> None:
+        """Restore committed state before showing an asynchronous operation error."""
         self._restore_open_presentation()
         self._restore_detection_controls()
         self.window.show_error(message)
 
-    def _restore_detection_controls(self):
+    def _restore_detection_controls(self) -> None:
+        """Restore detector settings and counts from the committed catalog after interruption."""
         self.mask_preview = None
         if self.session.frame is None:
             self.window.star_count.setText("No image loaded")
@@ -780,7 +863,8 @@ class Controller(QObject):
         if w.mode == "mask":
             self.display()
 
-    def _clear_effect_history(self):
+    def _clear_effect_history(self) -> None:
+        """Remove effects tied to an obsolete catalog while retaining its source overview."""
         if self.overview is None:
             return
         self.overview = replace(
@@ -792,6 +876,7 @@ class Controller(QObject):
         )
         self.preview = self.overview
         frame = self.session.frame
+        assert frame is not None
         self.window.image_view.set_pixels(
             self.overview.frame.pixels,
             frame.color_space,
@@ -801,5 +886,6 @@ class Controller(QObject):
         )
 
     def shutdown(self, timeout_ms: int = 5000) -> bool:
+        """Stop preview scheduling and drain worker-owned resources on their owning thread."""
         self.debounce.stop()
         return self.runner.shutdown(timeout_ms)

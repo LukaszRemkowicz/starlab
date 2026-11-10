@@ -6,23 +6,34 @@ Float image allocations stay tile-sized; seeds and catalogues are global."""
 import logging
 import math
 import time
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from threading import Event
+from typing import cast
 
 import numpy as np
-from numpy.typing import NDArray
 from scipy import ndimage
 
+from ..array_types import BoolArray, Bounds, Diagnostics, DoubleArray, FloatArray
 from ..imaging import ImageFrame, check_cancel
-from ..sky_mask import SkyMask
 from .numeric import LUMA
+from .records import (
+    IndexArray,
+    MeasurementMask,
+    MultiscaleRecord,
+    PointRecord,
+    Seed,
+    TileKey,
+    TileThreshold,
+)
 
 logger = logging.getLogger(__name__)
 SCALES = (0.8, 1.6, 3.2, 6.4, 12.8)
 FLOOR = 4 / 65535
 
 
-def _plane(patch, xx, yy, annulus):
+def _plane(
+    patch: FloatArray | DoubleArray, xx: DoubleArray, yy: DoubleArray, annulus: BoolArray
+) -> tuple[DoubleArray, float]:
     """Fit a clipped annular plane without using excluded foreground pixels."""
     values = patch[annulus]
     design = np.column_stack((np.ones(values.size), xx[annulus], yy[annulus]))
@@ -44,7 +55,15 @@ def _plane(patch, xx, yy, annulus):
     return coefficients[0] + coefficients[1] * xx + coefficients[2] * yy, noise
 
 
-def _measure(frame, x, y, scale, sky_mask, threshold_sigma):
+def _measure(
+    frame: ImageFrame,
+    x: float,
+    y: float,
+    scale: float,
+    sky_mask: MeasurementMask | None,
+    threshold_sigma: float,
+) -> MultiscaleRecord | None:
+    """Measure local-background source moments, color, and morphology around a pixel-index seed."""
     sigma = math.sqrt(2) * scale
     radius = max(3.0, 3 * sigma)
     outer = math.ceil(max(8.0, 5 * sigma))
@@ -126,7 +145,13 @@ def _measure(frame, x, y, scale, sky_mask, threshold_sigma):
     )
 
 
-def _nearby(row, grid, cell_size, min_distance):
+def _nearby(
+    row: PointRecord,
+    grid: dict[TileKey, list[MultiscaleRecord]],
+    cell_size: float,
+    min_distance: float,
+) -> bool:
+    """Search adjacent grid cells for a previous source within the suppression radius."""
     cell = (math.floor(row["x"] / cell_size), math.floor(row["y"] / cell_size))
     for dy in (-1, 0, 1):
         for dx in (-1, 0, 1):
@@ -137,7 +162,7 @@ def _nearby(row, grid, cell_size, min_distance):
     return False
 
 
-def _compact_peak(response, x, y):
+def _compact_peak(response: FloatArray, x: float, y: float) -> bool:
     """Require curvature in both directions; a noisy ridge is only a 1D peak."""
     x, y = round(x), round(y)
     left, right = max(0, x - 1), min(response.shape[1] - 1, x + 1)
@@ -156,10 +181,10 @@ def _compact_peak(response, x, y):
         ]
     )
     minor, major = np.linalg.eigvalsh(curvature)
-    return minor > 0.1 * major and major > 0
+    return cast(bool, minor > 0.1 * major and major > 0)
 
 
-def _component_centers(labels: NDArray[np.int32]) -> Iterator[tuple[float, float]]:
+def _component_centers(labels: IndexArray) -> Iterator[tuple[float, float]]:
     """Yield connected-component centroids in label order, retaining subpixel means."""
     for number, region in enumerate(ndimage.find_objects(labels), start=1):
         if region is None:
@@ -171,16 +196,17 @@ def _component_centers(labels: NDArray[np.int32]) -> Iterator[tuple[float, float
 
 def _tile_seeds(
     frame: ImageFrame,
-    bounds: tuple[int, int, int, int],
-    core_bounds: tuple[int, int, int, int],
+    bounds: Bounds,
+    core_bounds: Bounds,
     scales: tuple[float, ...],
     threshold_sigma: float,
-    sky_mask: SkyMask | None,
+    sky_mask: MeasurementMask | None,
     cancel: Event | None,
-) -> tuple[list[tuple[float, float, float, float]], list[tuple[int, int, float, float]]] | None:
+) -> tuple[list[Seed], list[TileThreshold]] | None:
     """Find scale-space and saturated-plateau seeds for one halo/core tile."""
     left, top, right, bottom = core_bounds
-    seeds, thresholds = [], []
+    seeds: list[Seed] = []
+    thresholds: list[TileThreshold] = []
     bx, by, ex, ey = bounds
     channels = frame.pixels[by:ey, bx:ex]
     luminance = (
@@ -247,22 +273,23 @@ def _tile_seeds(
 
 def _measure_seeds(
     frame: ImageFrame,
-    seeds: list[tuple[float, float, float, float]],
+    seeds: list[Seed],
     scales: tuple[float, ...],
     min_distance: float,
     threshold_sigma: float,
-    sky_mask: SkyMask | None,
+    sky_mask: MeasurementMask | None,
     cancel: Event | None,
-) -> list[dict]:
+) -> list[MultiscaleRecord]:
     """Measure strongest seeds first, suppress overlaps globally, then normalize colors."""
     # Strongest DoG contrast chooses a source width, rather than the highest
     # signal/noise (which can favor a very broad kernel on nearly noiseless sky).
     seeds.sort(key=lambda s: (-s[0], s[2], s[1], s[3]))
-    rows, grid = [], {}
+    rows: list[MultiscaleRecord] = []
+    grid: dict[TileKey, list[MultiscaleRecord]] = {}
     cell_size = max(min_distance, 4 * max(scales))
     for score, x, y, scale in seeds:
         check_cancel(cancel)
-        point = dict(x=x + 0.5, y=y + 0.5, size=0)
+        point: PointRecord = dict(x=x + 0.5, y=y + 0.5, size=0)
         if _nearby(point, grid, cell_size, min_distance):
             continue
         row = _measure(frame, x, y, scale, sky_mask, threshold_sigma)
@@ -281,15 +308,15 @@ def _measure_seeds(
 
 
 def analyze(
-    frame,
-    threshold_sigma=5.0,
-    min_distance=2.0,
-    cancel=None,
+    frame: ImageFrame,
+    threshold_sigma: float = 5.0,
+    min_distance: float = 2.0,
+    cancel: Event | None = None,
     *,
-    sky_mask=None,
-    tile_size=768,
-    scales=SCALES,
-):
+    sky_mask: MeasurementMask | None = None,
+    tile_size: int = 768,
+    scales: Sequence[float] = SCALES,
+) -> tuple[list[MultiscaleRecord], Diagnostics]:
     """Find compact sources at multiple widths over every image tile.
 
     ``sky_mask`` may supply ``region(bounds)`` (True means allowed) and
@@ -314,7 +341,8 @@ def analyze(
         raise ValueError("Use tile_size >=32 and finite positive scales, sigma and distance.")
     started = time.monotonic()
     halo = math.ceil(max(8 * max(scales), 5 * math.sqrt(2) * max(scales))) + 2
-    seeds, thresholds = [], []
+    seeds: list[Seed] = []
+    thresholds: list[TileThreshold] = []
     for top in range(0, frame.height, tile_size):
         for left in range(0, frame.width, tile_size):
             check_cancel(cancel)

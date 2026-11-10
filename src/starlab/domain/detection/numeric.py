@@ -3,15 +3,20 @@
 Float32 compatibility rounding is used where quantized results require it."""
 
 import math
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass
 
+from ..array_types import Position
 from .rays import f
+from .records import CompiledStats
 
 LUMA = (0.2126390039920807, 0.7151686549186707, 0.07219231128692627)
 
 
 @dataclass(frozen=True)
 class Stats:
+    """Weighted source statistics; score is the native mean-minus-standard-deviation value."""
+
     minimum: float
     mean: float
     maximum: float
@@ -19,7 +24,7 @@ class Stats:
     score: float
 
 
-def statistics(samples):
+def statistics(samples: Iterable[tuple[float, float]]) -> Stats:
     """F1E10: (luminance, kernel weight), valid in-bounds samples only."""
     samples = list(samples)
     total = sum(w for v, w in samples)
@@ -34,26 +39,27 @@ def statistics(samples):
     )
 
 
-def disk_weight(radius, distance):
+def disk_weight(radius: float, distance: float) -> float:
     """C92C0. Radius is table index/4; disk has a one-pixel edge ramp."""
     return min(1.0, max(0.0, radius + 0.6 - distance))
 
 
-def annulus_weight(radius, distance):
+def annulus_weight(radius: float, distance: float) -> float:
     """EBC30. A triangular radial profile with half-width 1.15 pixels."""
     return max(0.0, (1.15 - abs(radius - distance)) / 1.15)
 
 
-def quarter_position(value):
+def quarter_position(value: float) -> float:
     """96C78: deliberately NOT standard nearest-quarter rounding."""
     return math.floor(4 * value + 0.25) * 0.25
 
 
-def quarter_size(value):
+def quarter_size(value: float) -> float:
+    """Quantize native size using truncation after the half-quarter bias."""
     return math.trunc(4 * value + 0.5) * 0.25
 
 
-def small_size(contrast):
+def small_size(contrast: float) -> float:
     """97D9D: proposed size when current size <1.25, contrast=(peak-bg)/(1-bg)."""
     for limit, size in [(0.12, 0.25), (0.26, 0.5), (0.38, 0.75), (0.57, 1.0)]:
         if contrast < limit:
@@ -61,7 +67,9 @@ def small_size(contrast):
     return 1.25
 
 
-def preliminary_shape(inner, outer, index):
+def preliminary_shape(
+    inner: Stats | CompiledStats, outer: Stats | CompiledStats, index: int
+) -> bool:
     """98230, after successful samples and image/mask checks; index=trunc(4*s)."""
     if index < math.trunc(index / 8) + 4:
         return True
@@ -74,7 +82,14 @@ def preliminary_shape(inner, outer, index):
     )
 
 
-def final_shape(size, a, b, c=None, d=None, e=None):
+def final_shape(
+    size: float,
+    a: Stats | CompiledStats,
+    b: Stats | CompiledStats,
+    c: Stats | CompiledStats | None = None,
+    d: Stats | CompiledStats | None = None,
+    e: Stats | CompiledStats | None = None,
+) -> bool:
     """98440, successful stats only. A/B are disks for large candidates.
 
     n=max(1,trunc(4*size)). n<12: A=disk(max(1,n-2)),B=ring(2*n+4).
@@ -83,15 +98,16 @@ def final_shape(size, a, b, c=None, d=None, e=None):
     """
     if int(4 * size) < 12:
         return a.score >= b.score and a.score - b.score >= 0.13
-    background = min(d.minimum, e.minimum)
+    # Large candidates require all five successful supports; both callers enforce this.
+    background = min(d.minimum, e.minimum)  # type: ignore[union-attr]
     if background >= 1:
         return False
     scale = 1 / (1 - background)
-    aa, bb, cc, dd = [(s.score - background) * scale for s in (a, b, c, d)]
+    aa, bb, cc, dd = [(s.score - background) * scale for s in (a, b, c, d)]  # type: ignore[union-attr]
     return (
         a.maximum >= 0.75
         and aa >= 0.67
-        and a.mean >= 0.95 * max(b.maximum, d.maximum, e.maximum)
+        and a.mean >= 0.95 * max(b.maximum, d.maximum, e.maximum)  # type: ignore[union-attr]
         and bb >= 0.62
         and cc - dd >= 0.7 * (aa - cc)
         and aa >= 0.985 * bb
@@ -100,7 +116,9 @@ def final_shape(size, a, b, c=None, d=None, e=None):
     )
 
 
-def refine_position(position, size, sample):
+def refine_position(
+    position: Position, size: float, sample: Callable[[float, float, int], Stats | None]
+) -> tuple[Position, bool]:
     """97680 hill climb. sample(x,y,index) returns Stats or None.
 
     Direction order is the native jump table97B3C: E,SE,S,SW,W,NW,N,NE.
@@ -133,7 +151,9 @@ def refine_position(position, size, sample):
     return (x, y), changed
 
 
-def normalize_catalog(records):
+def normalize_catalog(
+    records: Iterable[tuple[Sequence[float], float, float]],
+) -> tuple[list[tuple[float, ...]], list[float], float]:
     """3E210 for unprocessed automatic records, all active.
 
     Inputs: (rgb, size_field_30, brightness_field_38).

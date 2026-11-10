@@ -8,21 +8,27 @@ import math
 import os
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
+from threading import Event
 from time import perf_counter
+from typing import cast
 
 import numpy as np
-from numba import njit
 from scipy.spatial import cKDTree
 
+from .array_types import RGB, ByteArray, DoubleArray, FloatArray, IntArray
 from .detection.numeric import LUMA
-from .imaging import check_cancel
+from .imaging import ImageFrame, check_cancel
+from .jit import njit
+from .sky_mask import SkyMask
+from .stars import Star
 
 logger = logging.getLogger(__name__)
 DIRECTIONS = np.array([(math.cos(a), math.sin(a)) for a in np.arange(16) * (2 * math.pi / 16)])
 
 
 @njit(cache=True)
-def _sample(pixels, classes, cell, x, y):
+def _sample(pixels: FloatArray, classes: ByteArray, cell: int, x: float, y: float) -> float:
+    """Sample rounded native pixels as luminance, returning NaN outside supported sky."""
     px, py = int(round(x)), int(round(y))
     if not (0 <= px < pixels.shape[1] and 0 <= py < pixels.shape[0]):
         return math.nan
@@ -39,14 +45,14 @@ def _sample(pixels, classes, cell, x, y):
 
 @njit(cache=True)
 def _background_samples(
-    pixels: np.ndarray,
-    classes: np.ndarray,
+    pixels: FloatArray,
+    classes: ByteArray,
     cell: int,
     x: float,
     y: float,
     inner: float,
     outer: float,
-) -> np.ndarray:
+) -> DoubleArray:
     """Collect finite luminance samples in the original annulus scan order."""
     step = max(1, math.ceil(outer / 12))
     extent = math.ceil(outer)
@@ -66,7 +72,16 @@ def _background_samples(
 
 
 @njit(cache=True)
-def _background(pixels, classes, cell, x, y, inner, outer):
+def _background(
+    pixels: FloatArray,
+    classes: ByteArray,
+    cell: int,
+    x: float,
+    y: float,
+    inner: float,
+    outer: float,
+) -> tuple[float, float, float]:
+    """Fit a local luminance plane with three median-residual clipping iterations."""
     samples = _background_samples(pixels, classes, cell, x, y, inner, outer)
     n = len(samples)
     if n < 8:
@@ -106,7 +121,17 @@ def _background(pixels, classes, cell, x, y, inner, outer):
 
 
 @njit(cache=True)
-def _aperture(pixels, classes, cell, x, y, background, gx, gy):
+def _aperture(
+    pixels: FloatArray,
+    classes: ByteArray,
+    cell: int,
+    x: float,
+    y: float,
+    background: float,
+    gx: float,
+    gy: float,
+) -> tuple[int, float]:
+    """Estimate half-height width and bounded signed-flux aperture from radial samples."""
     peak = 0.0
     for dy in range(-1, 2):
         for dx in range(-1, 2):
@@ -140,8 +165,8 @@ def _aperture(pixels, classes, cell, x, y, background, gx, gy):
 
 @njit(cache=True)
 def _background_color_samples(
-    pixels: np.ndarray,
-    classes: np.ndarray,
+    pixels: FloatArray,
+    classes: ByteArray,
     cell: int,
     x: float,
     y: float,
@@ -150,7 +175,7 @@ def _background_color_samples(
     background: float,
     gx: float,
     gy: float,
-) -> tuple[np.ndarray, np.ndarray]:
+) -> tuple[DoubleArray, DoubleArray]:
     """Collect RGB planes and their luminance residuals without changing sample order."""
     step, extent = max(1, math.ceil(outer / 12)), math.ceil(outer)
     samples = np.empty(((2 * extent // step + 2) ** 2, 5))
@@ -174,7 +199,18 @@ def _background_color_samples(
 
 
 @njit(cache=True)
-def _background_colors(pixels, classes, cell, x, y, inner, outer, background, gx, gy):
+def _background_colors(
+    pixels: FloatArray,
+    classes: ByteArray,
+    cell: int,
+    x: float,
+    y: float,
+    inner: float,
+    outer: float,
+    background: float,
+    gx: float,
+    gy: float,
+) -> DoubleArray:
     """Fit RGB background planes using the luminance fit to reject bright sources."""
     samples, residuals = _background_color_samples(
         pixels, classes, cell, x, y, inner, outer, background, gx, gy
@@ -220,7 +256,7 @@ def _background_colors(pixels, classes, cell, x, y, inner, outer, background, gx
 
 @njit(cache=True)
 def _source_aperture(
-    pixels: np.ndarray, classes: np.ndarray, cell: int, x: float, y: float
+    pixels: FloatArray, classes: ByteArray, cell: int, x: float, y: float
 ) -> tuple[int, float, float, float, float, float, float] | None:
     """Refine a source aperture and background, rejecting unsupported measurements."""
     if not math.isfinite(_sample(pixels, classes, cell, x, y)):
@@ -245,18 +281,18 @@ def _source_aperture(
 
 @njit(cache=True)
 def _integrate_owned_aperture(
-    pixels: np.ndarray,
-    classes: np.ndarray,
+    pixels: FloatArray,
+    classes: ByteArray,
     cell: int,
     x: float,
     y: float,
     radius: int,
     background: tuple[float, float, float],
-    planes: np.ndarray,
-    positions: np.ndarray,
-    neighbours: np.ndarray,
+    planes: DoubleArray,
+    positions: DoubleArray,
+    neighbours: IntArray,
     index: int,
-) -> tuple[float, np.ndarray]:
+) -> tuple[float, DoubleArray]:
     """Sum signed source flux only over finite pixels owned by this aperture."""
     bg, gx, gy = background
     flux = 0.0
@@ -293,7 +329,16 @@ def _integrate_owned_aperture(
 
 
 @njit(cache=True, nogil=True)
-def _measure_batch(pixels, classes, cell, positions, neighbours, start, stop):
+def _measure_batch(
+    pixels: FloatArray,
+    classes: ByteArray,
+    cell: int,
+    positions: DoubleArray,
+    neighbours: IntArray,
+    start: int,
+    stop: int,
+) -> DoubleArray:
+    """Return 17-column flux, RGB, width, background-plane and peak measurements."""
     result = np.zeros((stop - start, 17))
     for index in range(start, stop):
         x, y = positions[index]
@@ -321,7 +366,14 @@ def _measure_batch(pixels, classes, cell, positions, neighbours, start, stop):
     return result
 
 
-def _measure_sources(frame, stars, *, sky_mask=None, cancel=None):
+def _measure_sources(
+    frame: ImageFrame,
+    stars: tuple[Star, ...],
+    *,
+    sky_mask: SkyMask | None = None,
+    cancel: Event | None = None,
+) -> DoubleArray:
+    """Partition immutable sources across bounded, cancellation-aware measurement batches."""
     check_cancel(cancel)
     if not stars:
         return np.empty((0, 17))
@@ -332,7 +384,8 @@ def _measure_sources(frame, stars, *, sky_mask=None, cancel=None):
     cell = 1 if sky_mask is None else sky_mask.cell_px
     signals = np.empty((len(stars), 17))
 
-    def measure(start):
+    def measure(start: int) -> tuple[int, DoubleArray]:
+        """Measure at most 256 sources after checking the shared cancellation token."""
         check_cancel(cancel)
         stop = min(len(stars), start + 256)
         return start, _measure_batch(
@@ -353,11 +406,25 @@ def _measure_sources(frame, stars, *, sky_mask=None, cancel=None):
     return signals
 
 
-def measure_source_signals(frame, stars, *, sky_mask=None, cancel=None):
+def measure_source_signals(
+    frame: ImageFrame,
+    stars: tuple[Star, ...],
+    *,
+    sky_mask: SkyMask | None = None,
+    cancel: Event | None = None,
+) -> DoubleArray:
+    """Return signed-aperture stellar signals, clamped nonnegative after integration."""
     return _measure_sources(frame, stars, sky_mask=sky_mask, cancel=cancel)[:, 0]
 
 
-def calibrate_sources(frame, stars, *, sky_mask=None, cancel=None):
+def calibrate_sources(
+    frame: ImageFrame,
+    stars: tuple[Star, ...],
+    *,
+    sky_mask: SkyMask | None = None,
+    cancel: Event | None = None,
+) -> tuple[Star, ...]:
+    """Measure original pixels and normalize catalogue colors, strengths and filter profiles."""
     started = perf_counter()
     measured = _measure_sources(frame, stars, sky_mask=sky_mask, cancel=cancel)
     if not stars:
@@ -385,9 +452,9 @@ def calibrate_sources(frame, stars, *, sky_mask=None, cancel=None):
         replace(
             s,
             brightness=float(b),
-            color=tuple(c),
+            color=cast(RGB, tuple(c)),
             source_profile=tuple(row[4:14]) if measured_valid else (),
-            source_peak=tuple(row[14:17]) if measured_valid else (0.0, 0.0, 0.0),
+            source_peak=cast(RGB, tuple(row[14:17])) if measured_valid else (0.0, 0.0, 0.0),
             soft_weight=float(w),
         )
         for s, b, c, row, w, measured_valid in zip(

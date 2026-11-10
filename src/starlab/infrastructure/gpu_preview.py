@@ -1,9 +1,12 @@
 """Fixed-catalog OpenGL preview stages; CPU export remains the numerical reference."""
 
+from __future__ import annotations
+
 import weakref
 from dataclasses import replace
 from pathlib import Path
 from threading import Event
+from typing import cast
 
 import numpy as np
 from numpy.typing import NDArray
@@ -29,12 +32,14 @@ from ..domain.effects.profiles import (
     ray_coefficients,
     sine,
 )
-from ..domain.effects.settings import KINDS, EffectParameters, EffectSettings
+from ..domain.effects.settings import KINDS, EffectKind, EffectParameters, EffectSettings
 from ..domain.imaging import ImageFrame, Pixels, check_cancel
 from ..domain.sky_mask import SkyMask
 from ..domain.stars import Star
 
-Bounds = tuple[int, int, int, int]
+type Bounds = tuple[int, int, int, int]
+type CropKey = tuple[object, Bounds, int]
+type UniformComparable = float | int | tuple[float, float]
 
 
 def _view_region(
@@ -54,28 +59,56 @@ def _view_region(
 class GpuPreviewRenderer:
     """Create the surface on the GUI thread; render/close on one persistent worker."""
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Prepare GUI-owned surface; worker-owned GL objects are created lazily."""
         fmt = QSurfaceFormat()
         fmt.setVersion(3, 3)
         fmt.setProfile(QSurfaceFormat.OpenGLContextProfile.CoreProfile)
         self.surface = QOffscreenSurface()
         self.surface.setFormat(fmt)
         self.surface.create()
-        self.context = None
-        self.program = self.vao = self.gl = None
-        self.catalog = self.catalog_mask = None
-        self.crop_key = None
-        self.buffers = {}
-        self.buffer_keys = {}
-        self.buffer_counts = {}
-        self.target = None
-        self.group_cache = {}
+        self.context: QOpenGLContext | None = None
+        self.program: QOpenGLShaderProgram | None = None
+        self.vao: QOpenGLVertexArrayObject | None = None
+        self.gl: QOpenGLFunctions_3_3_Core | None = None
+        self.catalog: tuple[Star, ...] | None = None
+        self.catalog_mask: SkyMask | None = None
+        self.crop_key: CropKey | None = None
+        self.crop: ImageFrame
+        self.records: NDArray[np.float32]
+        self.maximum: float = 0.0
+        self.buffers: dict[str, QOpenGLBuffer] = {}
+        self.buffer_keys: dict[str, object] = {}
+        self.buffer_counts: dict[str, int] = {}
+        self.target: QOpenGLFramebufferObject | None = None
+        self.group_cache: dict[EffectKind, tuple[tuple[object, ...], Pixels]] = {}
         self.renderer_name = ""
-        self.uniform_locations = {}
-        self.uniform_values = {}
-        self.source_texture = None
-        self.texture_key = None
-        self.reduction_cache = None
+        self.uniform_locations: dict[str, int] = {}
+        self.uniform_values: dict[str, UniformComparable] = {}
+        self.source_texture: QOpenGLTexture | None = None
+        self.texture_key: CropKey | None = None
+        self.reduction_cache: tuple[tuple[object, ...], Pixels, Pixels] | None = None
+
+    @property
+    def _gpu(self) -> QOpenGLFunctions_3_3_Core:
+        """Return GL functions only while their context has been initialized."""
+        if self.gl is None:
+            raise RuntimeError("Preview GPU functions are not initialized.")
+        return self.gl
+
+    @property
+    def _shader(self) -> QOpenGLShaderProgram:
+        """Return the initialized program, making its lifetime explicit to callers."""
+        if self.program is None:
+            raise RuntimeError("Preview shader program is not initialized.")
+        return self.program
+
+    @property
+    def _vertex_array(self) -> QOpenGLVertexArrayObject:
+        """Return the initialized per-context vertex-array binding."""
+        if self.vao is None:
+            raise RuntimeError("Preview vertex array is not initialized.")
+        return self.vao
 
     def _attributes(self, buffer: QOpenGLBuffer, rays: int) -> None:
         """Bind the 21-float source layout and per-ray instance divisors."""
@@ -91,9 +124,9 @@ class GpuPreviewRenderer:
             (7, 60, 3),
             (8, 72, 3),
         ):
-            self.program.enableAttributeArray(location)
-            self.program.setAttributeBuffer(location, 0x1406, offset, size, 84)
-            self.gl.glVertexAttribDivisor(location, rays)
+            self._shader.enableAttributeArray(location)
+            self._shader.setAttributeBuffer(location, 0x1406, offset, size, 84)
+            self._gpu.glVertexAttribDivisor(location, rays)
 
     def _initialize(self) -> None:
         """Activate the worker-owned context and build its shader program once."""
@@ -115,29 +148,30 @@ class GpuPreviewRenderer:
     def _build_program(self) -> None:
         """Compile packaged GLSL and create the context's vertex-array binding."""
         self.gl = QOpenGLFunctions_3_3_Core()
-        if not self.gl.initializeOpenGLFunctions():
+        if not self._gpu.initializeOpenGLFunctions():
             raise RuntimeError("Cannot initialize the preview GPU functions.")
-        self.renderer_name = self.gl.glGetString(0x1F01)
+        self.renderer_name = self._gpu.glGetString(0x1F01)
         self.program = QOpenGLShaderProgram()
         folder = Path(__file__).with_name("shaders")
         for kind, name in (
-            (QOpenGLShader.Vertex, "preview.vert"),
-            (QOpenGLShader.Fragment, "preview.frag"),
+            (QOpenGLShader.ShaderTypeBit.Vertex, "preview.vert"),
+            (QOpenGLShader.ShaderTypeBit.Fragment, "preview.frag"),
         ):
-            if not self.program.addShaderFromSourceCode(
+            if not self._shader.addShaderFromSourceCode(
                 kind, (folder / name).read_text(encoding="utf-8")
             ):
-                raise RuntimeError(self.program.log())
-        if not self.program.link():
-            raise RuntimeError(self.program.log())
+                raise RuntimeError(self._shader.log())
+        if not self._shader.link():
+            raise RuntimeError(self._shader.log())
         self.uniform_locations.clear()
         self.uniform_values.clear()
         self.vao = QOpenGLVertexArrayObject()
-        self.vao.create()
-        self.vao.bind()
+        self._vertex_array.create()
+        self._vertex_array.bind()
 
     def _set_crop(self, frame: ImageFrame, region: Bounds, sampling: int) -> None:
         """Copy only a changed sampled region, retaining source identity in its key."""
+        source_key: weakref.ReferenceType[ImageFrame] | ImageFrame
         try:
             source_key = weakref.ref(frame)
         except TypeError:
@@ -185,7 +219,7 @@ class GpuPreviewRenderer:
     def _bind_target(self) -> None:
         """Allocate a size-matched float framebuffer and reset Screen blending."""
         height, width, _ = self.crop.pixels.shape
-        self.vao.bind()
+        self._vertex_array.bind()
         if self.target is None or (self.target.width(), self.target.height()) != (width, height):
             self.target = None
             fmt = QOpenGLFramebufferObjectFormat()
@@ -194,13 +228,13 @@ class GpuPreviewRenderer:
             if not self.target.isValid():
                 raise RuntimeError("Cannot allocate the preview framebuffer.")
         self.target.bind()
-        self.gl.glViewport(0, 0, width, height)
-        self.gl.glDisable(0x0B71)
-        self.gl.glEnable(0x0BE2)
-        self.gl.glBlendEquation(0x8006)
-        self.gl.glBlendFunc(1, 0x0301)  # ONE, ONE_MINUS_SRC_COLOR
-        self.gl.glClearColor(0, 0, 0, 0)
-        self.program.bind()
+        self._gpu.glViewport(0, 0, width, height)
+        self._gpu.glDisable(0x0B71)
+        self._gpu.glEnable(0x0BE2)
+        self._gpu.glBlendEquation(0x8006)
+        self._gpu.glBlendFunc(1, 0x0301)  # ONE, ONE_MINUS_SRC_COLOR
+        self._gpu.glClearColor(0, 0, 0, 0)
+        self._shader.bind()
 
     def _uniform(self, name: str, value: QVector2D | float | int) -> None:
         """Upload a changed uniform, caching its location and normalized value."""
@@ -208,14 +242,14 @@ class GpuPreviewRenderer:
         if self.uniform_values.get(name) == comparable:
             return
         if name not in self.uniform_locations:
-            self.uniform_locations[name] = self.program.uniformLocation(name.encode())
+            self.uniform_locations[name] = self._shader.uniformLocation(name.encode())
         location = self.uniform_locations[name]
         if isinstance(value, QVector2D):
-            self.gl.glUniform2f(location, value.x(), value.y())
+            self._gpu.glUniform2f(location, value.x(), value.y())
         elif type(value) is int:
-            self.gl.glUniform1i(location, value)
+            self._gpu.glUniform1i(location, value)
         else:
-            self.gl.glUniform1f(location, value)
+            self._gpu.glUniform1f(location, value)
         self.uniform_values[name] = comparable
 
     def _view_uniforms(self, region: Bounds, sampling: int, diagonal: int) -> None:
@@ -236,7 +270,7 @@ class GpuPreviewRenderer:
         buffer.allocate(records.tobytes(), records.nbytes)
         self.buffer_keys[name], self.buffer_counts[name] = key, len(records)
 
-    def _effect_buffer(self, kind: str, quantity: float, threshold: float) -> int:
+    def _effect_buffer(self, kind: EffectKind, quantity: float, threshold: float) -> int:
         """Select visible sources once per quantity/catalog change."""
         key = id(self.catalog), quantity
         if self.buffer_keys.get(kind) != key:
@@ -245,7 +279,7 @@ class GpuPreviewRenderer:
         return self.buffer_counts[kind]
 
     def _effect_uniforms(
-        self, kind: str, p: EffectParameters, diagonal: int, threshold: float, rays: int
+        self, kind: EffectKind, p: EffectParameters, diagonal: int, threshold: float, rays: int
     ) -> None:
         """Configure one effect profile without changing its source catalog."""
         coefficient, widening = ray_coefficients(p, 800 / max(diagonal, 1414))
@@ -281,8 +315,8 @@ class GpuPreviewRenderer:
 
     def _draw(self, count: int, rays: int) -> None:
         """Draw source quads and surface errors at the GL operation that failed."""
-        self.gl.glDrawArraysInstanced(0x0004, 0, 6, count * rays)
-        error = self.gl.glGetError()
+        self._gpu.glDrawArraysInstanced(0x0004, 0, 6, count * rays)
+        error = self._gpu.glGetError()
         if error:
             raise RuntimeError(f"GPU drawing error: 0x{error:04x}")
 
@@ -290,8 +324,11 @@ class GpuPreviewRenderer:
         """Read an immutable top-down linear buffer and apply foreground protection."""
         height, width, channels = self.crop.pixels.shape
         output = np.empty((height, width, 4), np.float32)
-        self.gl.glReadPixels(0, 0, width, height, 0x1908, 0x1406, VoidPtr(output.ctypes.data))
-        error = self.gl.glGetError()
+        # PySide stubs model void* as int; the binding consumes a VoidPtr.
+        self._gpu.glReadPixels(
+            0, 0, width, height, 0x1908, 0x1406, cast(int, VoidPtr(output.ctypes.data))
+        )
+        error = self._gpu.glGetError()
         if error:
             raise RuntimeError(f"GPU readback error: 0x{error:04x}")
         pixels = np.ascontiguousarray(output[::-1, :, :channels])
@@ -302,7 +339,7 @@ class GpuPreviewRenderer:
 
     def _effect_group(
         self,
-        kind: str,
+        kind: EffectKind,
         p: EffectParameters,
         region: Bounds,
         sampling: int,
@@ -328,7 +365,7 @@ class GpuPreviewRenderer:
         rays = p.points if kind == "primary" else 84 if kind == "secondary" else 1
         self._attributes(self.buffers[kind], rays)
         self._effect_uniforms(kind, p, diagonal, threshold, rays)
-        self.gl.glClear(0x4000)
+        self._gpu.glClear(0x4000)
         self._draw(count, rays)
         group = self._read_target(region, sampling, sky_mask)
         self.group_cache[kind] = key, group
@@ -350,12 +387,14 @@ class GpuPreviewRenderer:
             )
             pixels = self.crop.pixels if channels == 3 else np.repeat(self.crop.pixels, 3, axis=2)
             pixels = np.ascontiguousarray(pixels)
+            # Keep the binding pointer object; cast only bridges its void* stub.
             texture.setData(
                 QOpenGLTexture.PixelFormat.RGB,
                 QOpenGLTexture.PixelType.Float32,
-                VoidPtr(pixels.ctypes.data),
+                cast(int, VoidPtr(pixels.ctypes.data)),
             )
             self.source_texture, self.texture_key = texture, self.crop_key
+        assert self.source_texture is not None
         self.source_texture.bind(0)
 
     def _correction_buffer(self, mode: int) -> str:
@@ -385,24 +424,25 @@ class GpuPreviewRenderer:
             return None, None
         key = p.soft_filter, self.crop_key, sky_mask
         if self.reduction_cache is not None and self.reduction_cache[0] == key:
-            return self.reduction_cache[1:]
+            _, reduction, enlargement = self.reduction_cache
+            return reduction, enlargement
         self._bind_source_texture()
         self._uniform("originalImage", 0)
         self._uniform("rayCount", 1)
         self._uniform("softFilter", float(p.soft_filter / 100))
-        passes = []
-        self.gl.glBlendEquation(0x8008)
+        passes: list[Pixels] = []
+        self._gpu.glBlendEquation(0x8008)
         try:
             for mode in (4, 5):
                 check_cancel(cancel)
                 self._uniform("kind", mode)
                 name = self._correction_buffer(mode)
                 self._attributes(self.buffers[name], 1)
-                self.gl.glClear(0x4000)
+                self._gpu.glClear(0x4000)
                 self._draw(self.buffer_counts[name], 1)
                 passes.append(self._read_target(region, sampling, sky_mask))
         finally:
-            self.gl.glBlendEquation(0x8006)
+            self._gpu.glBlendEquation(0x8006)
         reduction, enlargement = passes
         self.reduction_cache = key, reduction, enlargement
         return reduction, enlargement
@@ -429,11 +469,13 @@ class GpuPreviewRenderer:
         self._set_crop(frame, region, sampling)
         self._set_catalog(stars, sky_mask)
         self._initialize()
+        context = self.context
+        assert context is not None
         try:
             self._bind_target()
             diagonal = image_diagonal(frame.width, frame.height)
             self._view_uniforms(region, sampling, diagonal)
-            groups = {}
+            groups: dict[EffectKind, Pixels] = {}
             for kind in KINDS:
                 check_cancel(cancel)
                 p = getattr(settings, kind)
@@ -461,8 +503,8 @@ class GpuPreviewRenderer:
         finally:
             if self.target is not None:
                 self.target.release()
-            self.program.release()
-            self.context.doneCurrent()
+            self._shader.release()
+            context.doneCurrent()
 
     def close(self) -> None:
         """Release GL objects on their worker thread; repeated close calls are safe."""
@@ -483,9 +525,9 @@ class GpuPreviewRenderer:
         self.reduction_cache = None
         self.catalog = self.catalog_mask = self.texture_key = None
         if self.vao is not None:
-            self.vao.destroy()
+            self._vertex_array.destroy()
         if self.program is not None:
-            self.program.removeAllShaders()
+            self._shader.removeAllShaders()
         self.program = self.vao = self.gl = None
         self.context.doneCurrent()
         self.context = None

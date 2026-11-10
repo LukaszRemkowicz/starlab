@@ -3,13 +3,17 @@
 import math
 from dataclasses import replace
 from threading import Event
+from typing import cast
 
 import numpy as np
 
-from ..imaging import ImageFrame, Pixels, check_cancel
+from ..imaging import ImageFrame, ImagePixels, Pixels, check_cancel
+from ..sky_mask import SkyMask
 from ..stars import Star, filter_stars
 from .profiles import (
     ArrayCache,
+    IndexArray,
+    SceneArrays,
     directions,
     gain,
     geometry_key,
@@ -19,14 +23,16 @@ from .profiles import (
     source_colors,
     sparse_profile,
 )
-from .settings import KINDS, EffectParameters, EffectSettings
+from .settings import KINDS, EffectKind, EffectParameters, EffectSettings
 
-SCENE_CACHE = ArrayCache(128)
-GROUP_CACHE = ArrayCache(32)
-LIGHT_CACHE = ArrayCache(64)
+type LitArrays = tuple[IndexArray, Pixels]
+
+SCENE_CACHE = ArrayCache[SceneArrays](128)
+GROUP_CACHE = ArrayCache[Pixels](32)
+LIGHT_CACHE = ArrayCache[LitArrays](64)
 
 
-def _grouped_ray_scene(kind: str, sampling: int, source_count: int, region: bool) -> bool:
+def _grouped_ray_scene(kind: EffectKind, sampling: int, source_count: int, region: bool) -> bool:
     """Select the ray path whose contributions are sorted for grouped reduction."""
     return ((sampling > 1 and source_count > 8) or region) and kind in (
         "primary",
@@ -43,9 +49,12 @@ def _sampled_scene(
     diagonal: int,
     sampling: int,
     cancel: Event | None,
-) -> tuple[np.ndarray, ...]:
+) -> SceneArrays:
     """Assemble sampled source batches and stably group contributions by pixel."""
-    indices, profiles, radii, sources = [], [], [], []
+    indices: list[IndexArray] = []
+    profiles: list[Pixels] = []
+    radii: list[Pixels] = []
+    sources: list[IndexArray] = []
     for start in range(0, len(positions), 512):
         for angle, weight in rays:
             check_cancel(cancel)
@@ -56,11 +65,13 @@ def _sampled_scene(
             profiles.append(values * weight)
             radii.append(radius)
             sources.append(source + start)
-    arrays = tuple(np.concatenate(parts) for parts in (indices, profiles, radii, sources))
+    arrays = cast(
+        SceneArrays, tuple(np.concatenate(parts) for parts in (indices, profiles, radii, sources))
+    )
     # Stable pixel grouping turns repeated scatter multiplication into a
     # contiguous product reduction on warm slider updates.
     order = np.argsort(arrays[0], kind="stable")
-    arrays = tuple(array[order] for array in arrays)
+    arrays = cast(SceneArrays, tuple(array[order] for array in arrays))
     return arrays
 
 
@@ -68,16 +79,19 @@ def _sparse_scene(
     width: int,
     height: int,
     stars: tuple[Star, ...],
-    kind: str,
+    kind: EffectKind,
     p: EffectParameters,
     diagonal: int,
     sampling: int,
     cancel: Event | None,
     region: bool,
-) -> tuple[np.ndarray, ...] | None:
+) -> SceneArrays | None:
     """Place cached per-source profiles, retaining their original contribution order."""
     out_width = (width + sampling - 1) // sampling
-    indices, profiles, radii, sources = [], [], [], []
+    indices: list[IndexArray] = []
+    profiles: list[Pixels] = []
+    radii: list[Pixels] = []
+    sources: list[IndexArray] = []
     rays = directions(kind, p)
     for i, star in enumerate(stars):
         check_cancel(cancel)
@@ -111,11 +125,23 @@ def _sparse_scene(
             sources.append(np.full(int(valid.sum()), i, np.int32))
     if not indices:
         return None
-    arrays = tuple(np.concatenate(parts) for parts in (indices, profiles, radii, sources))
+    arrays = cast(
+        SceneArrays, tuple(np.concatenate(parts) for parts in (indices, profiles, radii, sources))
+    )
     return arrays
 
 
-def _scene(width, height, stars, kind, p, sampling, cancel, diagonal=None):
+def _scene(
+    width: int,
+    height: int,
+    stars: tuple[Star, ...],
+    kind: EffectKind,
+    p: EffectParameters,
+    sampling: int,
+    cancel: Event | None,
+    diagonal: int | None = None,
+) -> SceneArrays:
+    """Cache integer pixel indices, transverse profiles, radii and source indices."""
     region = diagonal is not None
     diagonal = diagonal or image_diagonal(width, height)
     positions = tuple((star.x, star.y) for star in stars)
@@ -123,6 +149,7 @@ def _scene(width, height, stars, kind, p, sampling, cancel, diagonal=None):
     cached = SCENE_CACHE.get(key)
     if cached is not None:
         return cached
+    arrays: SceneArrays | None
     if _grouped_ray_scene(kind, sampling, len(stars), region):
         arrays = _sampled_scene(
             width, height, positions, directions(kind, p), p, diagonal, sampling, cancel
@@ -130,14 +157,24 @@ def _scene(width, height, stars, kind, p, sampling, cancel, diagonal=None):
     else:
         arrays = _sparse_scene(width, height, stars, kind, p, diagonal, sampling, cancel, region)
         if arrays is None:
-            return tuple(
-                np.empty(0, dtype) for dtype in (np.int32, np.float32, np.float32, np.int32)
+            return cast(
+                SceneArrays,
+                tuple(np.empty(0, dtype) for dtype in (np.int32, np.float32, np.float32, np.int32)),
             )
     check_cancel(cancel)
     return SCENE_CACHE.put(key, arrays)
 
 
-def _lit_scene(frame, stars, maximum, kind, p, sampling, cancel, diagonal=None):
+def _lit_scene(
+    frame: ImagePixels,
+    stars: tuple[Star, ...],
+    maximum: float,
+    kind: EffectKind,
+    p: EffectParameters,
+    sampling: int,
+    cancel: Event | None,
+    diagonal: int | None = None,
+) -> LitArrays:
     """Cache source-colored ray light independently of the intensity slider."""
     channels = frame.pixels.shape[2]
     key = (
@@ -195,7 +232,17 @@ def _lit_scene(frame, stars, maximum, kind, p, sampling, cancel, diagonal=None):
     return LIGHT_CACHE.put(key, (indices[selected], light.astype(np.float32)))
 
 
-def _group(frame, stars, maximum, kind, p, sampling, cancel, diagonal=None):
+def _group(
+    frame: ImagePixels,
+    stars: tuple[Star, ...],
+    maximum: float,
+    kind: EffectKind,
+    p: EffectParameters,
+    sampling: int,
+    cancel: Event | None,
+    diagonal: int | None = None,
+) -> Pixels:
+    """Screen-compose one emission group into an immutable sampled layer."""
     h, w = (frame.height + sampling - 1) // sampling, (frame.width + sampling - 1) // sampling
     channels = frame.pixels.shape[2]
     key = (
@@ -241,15 +288,16 @@ def _group(frame, stars, maximum, kind, p, sampling, cancel, diagonal=None):
 
 
 def render_effects(
-    frame: ImageFrame,
+    frame: ImagePixels,
     stars: tuple[Star, ...],
     settings: EffectSettings,
     cancel: Event | None = None,
     *,
     sampling: int = 1,
     diagonal: int | None = None,
-    sky_mask=None,
+    sky_mask: SkyMask | None = None,
 ) -> Pixels:
+    """Render Screen-composed linear emission without modifying the source pixels."""
     check_cancel(cancel)
     stars = filter_stars(stars, sky_mask)
     if sampling < 1:

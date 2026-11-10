@@ -1,5 +1,9 @@
+"""Qt window layout, local dialogs, and presentation state controlled by GUI signals."""
+
+from collections.abc import Callable
 from dataclasses import replace
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 from PySide6.QtCore import (
     QElapsedTimer,
@@ -10,7 +14,14 @@ from PySide6.QtCore import (
     QTimer,
     Signal,
 )
-from PySide6.QtGui import QAction, QKeySequence
+from PySide6.QtGui import (
+    QAction,
+    QCloseEvent,
+    QDragEnterEvent,
+    QDragMoveEvent,
+    QDropEvent,
+    QKeySequence,
+)
 from PySide6.QtWidgets import (
     QButtonGroup,
     QCheckBox,
@@ -39,24 +50,33 @@ from .effect_panel import EffectPanel
 from .image_view import ImageView
 from .theme import STYLE, icon
 
+if TYPE_CHECKING:
+    from .controller import Controller
+
 
 class Canvas(QWidget):
+    """Accept TIFF drops while the preview stack shows the empty-document prompt."""
+
     file_dropped = Signal(str)
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Create the empty canvas with local-file drag-and-drop enabled."""
         super().__init__()
         self.setObjectName("canvas")
         self.setAcceptDrops(True)
 
-    def dragEnterEvent(self, event):
+    def dragEnterEvent(self, event: QDragEnterEvent) -> None:
+        """Accept drags containing at least one local TIFF URL."""
         if local_tiff_path(event.mimeData()) is not None:
             event.acceptProposedAction()
 
-    def dragMoveEvent(self, event):
+    def dragMoveEvent(self, event: QDragMoveEvent) -> None:
+        """Continue accepting an eligible local TIFF drag."""
         if local_tiff_path(event.mimeData()) is not None:
             event.acceptProposedAction()
 
-    def dropEvent(self, event):
+    def dropEvent(self, event: QDropEvent) -> None:
+        """Emit the first eligible local TIFF path from the dropped URLs."""
         path = local_tiff_path(event.mimeData())
         if path is not None:
             self.file_dropped.emit(path)
@@ -64,6 +84,8 @@ class Canvas(QWidget):
 
 
 class MainWindow(QMainWindow):
+    """Own widgets and dialogs while delegating document and worker decisions to Controller."""
+
     open_requested = Signal(str)
     export_requested = Signal(str, bool)
     preset_load_requested = Signal(str)
@@ -74,7 +96,8 @@ class MainWindow(QMainWindow):
     redo_requested = Signal()
     apply_requested = Signal()
 
-    def __init__(self, preferences: QSettings | None = None):
+    def __init__(self, preferences: QSettings | None = None) -> None:
+        """Build widgets with optional injected persistent dialog preferences."""
         super().__init__()
         self.preferences = (
             preferences
@@ -85,10 +108,10 @@ class MainWindow(QMainWindow):
         self.resize(1440, 900)
         self.setMinimumSize(1024, 720)
         self.setStyleSheet(STYLE)
-        self.controller = None
+        self.controller: Controller | None = None
         self.mode = "result"
         self._mask_return_mode = "result"
-        self._before_mode = None
+        self._before_mode: str | None = None
         self._loaded = False
         self._activity = ""
         self.clock = QElapsedTimer()
@@ -181,7 +204,8 @@ class MainWindow(QMainWindow):
         self._general_controls()
         return self.inspector
 
-    def _empty_state(self):
+    def _empty_state(self) -> QWidget:
+        """Build the initial prompt and image-open action."""
         empty = QWidget()
         empty.setObjectName("canvas")
         box = QVBoxLayout(empty)
@@ -210,7 +234,8 @@ class MainWindow(QMainWindow):
         box.addStretch()
         return empty
 
-    def _tool_button(self, name, label, callback):
+    def _tool_button(self, name: str, label: str, callback: Callable[[], object]) -> QToolButton:
+        """Create a labeled accessible icon button connected to its action."""
         button = QToolButton()
         button.setIcon(icon(name))
         button.setToolTip(label)
@@ -218,7 +243,8 @@ class MainWindow(QMainWindow):
         button.clicked.connect(callback)
         return button
 
-    def _toolbar(self):
+    def _toolbar(self) -> QFrame:
+        """Build catalog tools, navigation actions and display-mode selectors."""
         hud = QFrame()
         hud.setObjectName("hud")
         hud.setSizePolicy(QSizePolicy.Policy.Maximum, QSizePolicy.Policy.Fixed)
@@ -234,9 +260,12 @@ class MainWindow(QMainWindow):
             ("add", "add", "Add star"),
             ("hide", "hide", "Hide / show star"),
         ]:
-            button = self._tool_button(
-                name, label, lambda checked=False, k=key: self.tool_changed.emit(k)
-            )
+
+            def select_tool(checked: bool = False, tool: str = key) -> None:
+                """Emit the captured tool name independently of Qt's checked argument."""
+                self.tool_changed.emit(tool)
+
+            button = self._tool_button(name, label, select_tool)
             button.setCheckable(True)
             button.setChecked(key == "pan")
             self.tool_group.addButton(button)
@@ -287,7 +316,8 @@ class MainWindow(QMainWindow):
         box.addWidget(self.redo_button)
         return hud
 
-    def _general_controls(self):
+    def _general_controls(self) -> None:
+        """Build detection threshold controls and bind their numeric representations."""
         box = self.effect_panel.general_box
         self.auto_detect = QCheckBox("Automatic Star Detection")
         self.auto_detect.setChecked(True)
@@ -324,7 +354,7 @@ class MainWindow(QMainWindow):
         )
         box.addWidget(threshold_slider)
         self._threshold_method = "native"
-        self._threshold_values = {"native": 0.2, "multiscale": 5.0}
+        self._threshold_values: dict[str, float] = {"native": 0.2, "multiscale": 5.0}
         self.detection_method.currentIndexChanged.connect(self._detector_threshold_mode)
         self.analyze_button = QPushButton("Detect stars")
         box.addWidget(self.analyze_button)
@@ -342,7 +372,8 @@ class MainWindow(QMainWindow):
         box.addWidget(hint)
         box.addStretch()
 
-    def _detector_threshold_mode(self, _index):
+    def _detector_threshold_mode(self, _index: int) -> None:
+        """Keep separate threshold values and ranges for each detector algorithm."""
         method = self.detection_method.currentData()
         self._threshold_values[self._threshold_method] = self.threshold.value()
         self._threshold_method = method
@@ -360,7 +391,8 @@ class MainWindow(QMainWindow):
             else "0.20 is the original proxy threshold. Lower values include fainter candidates."
         )
 
-    def _footer(self):
+    def _footer(self) -> QFrame:
+        """Build presets, activity feedback, before-view and export actions."""
         footer = QFrame()
         footer.setObjectName("footer")
         box = QHBoxLayout(footer)
@@ -388,20 +420,7 @@ class MainWindow(QMainWindow):
         box.addWidget(self.load_preset_button)
         box.addWidget(self.save_preset_button)
         box.addStretch()
-        activity = QVBoxLayout()
-        activity.setSpacing(3)
-        self.status_text = QLabel("Ready")
-        self.status_text.setObjectName("muted")
-        self.status_text.setMaximumWidth(210)
-        self.status_text.setMinimumWidth(75)
-        self.progress = QProgressBar()
-        self.progress.setTextVisible(False)
-        self.progress.setRange(0, 0)
-        self.progress.setFixedHeight(3)
-        self.progress.hide()
-        activity.addWidget(self.status_text)
-        activity.addWidget(self.progress)
-        box.addLayout(activity)
+        box.addLayout(self._activity_feedback())
         self.cancel_button = QPushButton("Cancel")
         self.cancel_button.hide()
         box.addWidget(self.cancel_button)
@@ -419,7 +438,25 @@ class MainWindow(QMainWindow):
         box.addWidget(self.export_button)
         return footer
 
-    def _preset(self, index):
+    def _activity_feedback(self) -> QVBoxLayout:
+        """Build elapsed-operation text and the indeterminate progress indicator."""
+        activity = QVBoxLayout()
+        activity.setSpacing(3)
+        self.status_text = QLabel("Ready")
+        self.status_text.setObjectName("muted")
+        self.status_text.setMaximumWidth(210)
+        self.status_text.setMinimumWidth(75)
+        self.progress = QProgressBar()
+        self.progress.setTextVisible(False)
+        self.progress.setRange(0, 0)
+        self.progress.setFixedHeight(3)
+        self.progress.hide()
+        activity.addWidget(self.status_text)
+        activity.addWidget(self.progress)
+        return activity
+
+    def _preset(self, index: int) -> None:
+        """Apply a built-in settings snapshot unless an exclusive operation is active."""
         if index == 3 or (self.controller and self.controller.exclusive):
             return
         settings = EffectSettings()
@@ -440,24 +477,29 @@ class MainWindow(QMainWindow):
         with QSignalBlocker(self.preset_combo):
             self.preset_combo.setCurrentIndex(index)
 
-    def mark_custom(self):
+    def mark_custom(self) -> None:
+        """Mark the preset selection as custom without creating a settings change."""
         with QSignalBlocker(self.preset_combo):
             self.preset_combo.setCurrentIndex(3)
 
-    def _before_pressed(self):
+    def _before_pressed(self) -> None:
+        """Temporarily switch to source pixels while retaining the previous display mode."""
         if self._before_mode is None:
             self._before_mode = self.mode
             self._view("original")
 
-    def _before_released(self):
+    def _before_released(self) -> None:
+        """Restore the display mode captured when the before button was pressed."""
         if self._before_mode is not None:
             self._view(self._before_mode)
             self._before_mode = None
 
-    def _toggle_mask(self):
+    def _toggle_mask(self) -> None:
+        """Toggle the mask overlay and retain the previous non-mask display mode."""
         self._view(self._mask_return_mode if self.mode == "mask" else "mask")
 
-    def _view(self, mode):
+    def _view(self, mode: str) -> None:
+        """Synchronize display-mode widgets and notify the controller once."""
         if mode == "mask" and self.mode != "mask" and self._before_mode is None:
             self._mask_return_mode = self.mode
         self.mode = mode
@@ -467,7 +509,8 @@ class MainWindow(QMainWindow):
             self.view_combo.setCurrentIndex(self.view_combo.findData(mode))
         self.view_changed.emit(mode)
 
-    def _shortcuts(self):
+    def _shortcuts(self) -> None:
+        """Bind standard platform shortcuts to the same actions as the visible controls."""
         for title, shortcut, callback in [
             ("Open", QKeySequence.StandardKey.Open, self.choose_open),
             ("Export", QKeySequence.StandardKey.SaveAs, self.choose_export),
@@ -479,7 +522,8 @@ class MainWindow(QMainWindow):
             action.triggered.connect(callback)
             self.addAction(action)
 
-    def set_activity(self, kind):
+    def set_activity(self, kind: str) -> None:
+        """Start elapsed-time feedback for the current operation."""
         self._activity = {
             "open": "Opening TIFF",
             "open_masked": "Opening TIFF · sky mask",
@@ -494,13 +538,16 @@ class MainWindow(QMainWindow):
         self.activity_timer.start()
         self._activity_tick()
 
-    def _activity_tick(self):
+    def _activity_tick(self) -> None:
+        """Display elapsed seconds for the active operation."""
         self.status_text.setText(f"{self._activity}… {self.clock.elapsed() // 1000}s")
 
-    def finish_activity(self):
+    def finish_activity(self) -> None:
+        """Stop activity timing after the controller reports idle."""
         self.activity_timer.stop()
 
-    def set_exclusive(self, exclusive):
+    def set_exclusive(self, exclusive: bool) -> None:
+        """Enable editing actions only when no exclusive operation owns the document."""
         for widget in (
             self.preset_combo,
             self.reset_button,
@@ -509,10 +556,12 @@ class MainWindow(QMainWindow):
         ):
             widget.setEnabled(not exclusive and (self._loaded or widget is not self.apply_button))
 
-    def choose_open(self):
+    def choose_open(self) -> None:
+        """Choose a TIFF path and remember its parent folder after selection."""
         if self.controller and self.controller.exclusive:
             return
-        directory = self.preferences.value("dialogs/open_image_directory", "", type=str)
+        # QSettings returns object in the stub even when type=str requests string conversion.
+        directory = cast(str, self.preferences.value("dialogs/open_image_directory", "", type=str))
         if not directory or not Path(directory).is_dir():
             directory = QStandardPaths.writableLocation(
                 QStandardPaths.StandardLocation.PicturesLocation
@@ -529,7 +578,8 @@ class MainWindow(QMainWindow):
             self.preferences.sync()
             self.open_requested.emit(path)
 
-    def choose_export(self):
+    def choose_export(self) -> None:
+        """Choose output content and a TIFF destination for the loaded document."""
         if not self.export_button.isEnabled():
             return
         from PySide6.QtWidgets import QInputDialog
@@ -549,19 +599,22 @@ class MainWindow(QMainWindow):
             if path:
                 self.export_requested.emit(path, kind.startswith("Effects"))
 
-    def choose_preset_load(self):
+    def choose_preset_load(self) -> None:
+        """Request loading settings from a selected preset JSON file."""
         path, _ = QFileDialog.getOpenFileName(self, "Load preset", "", "Preset (*.json)")
         if path:
             self.preset_load_requested.emit(path)
 
-    def choose_preset_save(self):
+    def choose_preset_save(self) -> None:
+        """Request saving current settings to a selected preset JSON file."""
         path, _ = QFileDialog.getSaveFileName(
             self, "Save preset", "effects.json", "Preset (*.json)"
         )
         if path:
             self.preset_save_requested.emit(path)
 
-    def set_loaded(self, loaded):
+    def set_loaded(self, loaded: bool) -> None:
+        """Reflect document availability in the preview stack and editing controls."""
         self._loaded = loaded
         for widget in (
             self.export_button,
@@ -578,11 +631,13 @@ class MainWindow(QMainWindow):
         self.image_info.setVisible(loaded)
         self.set_exclusive(False)
 
-    def show_error(self, text):
+    def show_error(self, text: str) -> None:
+        """Show or clear the persistent error banner without a modal dialog."""
         self.error_label.setText(text)
         self.error_label.setVisible(bool(text))
 
-    def closeEvent(self, event):
+    def closeEvent(self, event: QCloseEvent) -> None:
+        """Close immediately after draining or defer until worker-owned cleanup finishes."""
         if self.controller is not None and not self.controller.shutdown(timeout_ms=0):
             event.ignore()
             self.setEnabled(False)

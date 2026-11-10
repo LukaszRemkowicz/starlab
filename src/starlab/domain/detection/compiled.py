@@ -5,34 +5,56 @@ Image-dependent results are never persisted. Numba caches compiled machine code.
 """
 
 import math
-from collections import namedtuple
+from collections.abc import Callable, MutableSequence, Sequence
 from contextlib import nullcontext
-from threading import Lock
+from threading import Event, Lock
 
 import numpy as np
-from numba import get_num_threads, njit, prange, set_num_threads, threading_layer, types
+from numba import (  # type: ignore[attr-defined]  # Public threading_layer is absent from Numba stubs.
+    get_num_threads,
+    prange,
+    set_num_threads,
+    threading_layer,
+    types,
+)
 from numba.extending import overload, register_jitable
 from numba.typed import Dict, List
 from numpy.typing import NDArray
 
+from ..array_types import (
+    RGBA,
+    BoolArray,
+    CandidateRecord,
+    DoubleArray,
+    FloatArray,
+    IntArray,
+    Position,
+)
+from ..jit import njit
 from . import numeric, rays
+from .candidate import Image
+from .records import Buffer, CandidateRow, CompiledStats, IndexArray, SortableAttempts
 
-CompiledStats = namedtuple("CompiledStats", "minimum mean maximum stddev score")
 Stats = CompiledStats
-Buffer = namedtuple("Buffer", "rgb lum allowed ox oy stats colors")
-KEY = types.UniTuple(types.int64, 4)
-STAT_TYPE = types.NamedUniTuple(types.float64, 5, Stats)
-COLOR_TYPE = types.UniTuple(types.float64, 3)
-ROW_TYPE = types.UniTuple(types.float64, 8)
-ATTEMPT_TYPE = types.UniTuple(types.float64, 10)
+# These external runtime descriptors mirror the checked Python tuple/NamedTuple layouts.
+KEY = types.UniTuple(types.int64, 4)  # type: ignore[no-untyped-call]
+STAT_TYPE = types.NamedUniTuple(types.float64, 5, Stats)  # type: ignore[no-untyped-call]
+COLOR_TYPE = types.UniTuple(types.float64, 3)  # type: ignore[no-untyped-call]
+ROW_TYPE = types.UniTuple(types.float64, 8)  # type: ignore[no-untyped-call]
+ATTEMPT_TYPE = types.UniTuple(types.float64, 10)  # type: ignore[no-untyped-call]
 PARALLEL_MIN_PEAKS = 256
 MAX_CANDIDATE_COORDS = 262144
 _WORKQUEUE_LOCK = Lock()
 
 
+# Numba compares overload/implementation Parameters, including annotations.
+# Both value parameters must stay unannotated despite their different runtime roles.
 @overload(rays.f)
-def _rounded(value):
-    def impl(value):
+def _rounded(value) -> Callable[[float], np.float64]:  # type: ignore[no-untyped-def]  # noqa: ANN001
+    """Provide the float32-rounding overload for a Numba scalar type."""
+
+    def impl(value) -> np.float64:  # type: ignore[no-untyped-def]  # noqa: ANN001
+        """Round a compiled scalar to float32 and widen its storage to float64."""
         return np.float64(np.float32(value))
 
     return impl
@@ -56,7 +78,8 @@ for _name in ("quarter_position", "quarter_size", "small_size", "preliminary_sha
 f = rays.f
 
 
-def make_image(image):
+def make_image(image: Image) -> Buffer:
+    """Build contiguous decoded RGB/luma/mask arrays and empty per-tile typed caches."""
     allowed = (
         np.empty((0, 0), np.bool_) if image.allowed is None else np.ascontiguousarray(image.allowed)
     )
@@ -71,12 +94,22 @@ def make_image(image):
     )
 
 
-def scan_tile(image, peaks, threshold, neighbor_radius, coarse, excluded, visited, cancel):
+def scan_tile(
+    image: Image,
+    peaks: Sequence[tuple[int, int]],
+    threshold: float,
+    neighbor_radius: int,
+    coarse: bool,
+    excluded: Sequence[CandidateRecord],
+    visited: BoolArray,
+    cancel: Event | None,
+) -> tuple[list[CandidateRecord], int]:
+    """Qualify global pixel-index peaks, optionally preparing candidates in parallel blocks."""
     from ..imaging import check_cancel
 
     im = make_image(image)
     old = np.array([(r["x"], r["y"], r["size"]) for r in excluded], np.float64).reshape(-1, 3)
-    rows = List.empty_list(ROW_TYPE)
+    rows: MutableSequence[CandidateRow] = List.empty_list(ROW_TYPE)
     maximum, seeds = 0.0, 0
     positions = np.asarray(peaks, np.int64).reshape(-1, 2)
     if len(positions) >= PARALLEL_MIN_PEAKS:
@@ -112,14 +145,23 @@ def scan_tile(image, peaks, threshold, neighbor_radius, coarse, excluded, visite
             records,
         )
         seeds += count
-    return [
+    result: list[CandidateRecord] = [
         dict(x=r[0], y=r[1], size=r[2], brightness=r[3], rgb=list(r[4:7]), count=int(r[7]))
         for r in rows
-    ], seeds
+    ]
+    return result, seeds
 
 
 @njit(cache=True, nogil=True)
-def candidate_indices(im, positions, threshold, radius, shape, budget):
+def candidate_indices(
+    im: Buffer,
+    positions: IntArray,
+    threshold: float,
+    radius: int,
+    shape: tuple[int, int],
+    budget: int,
+) -> tuple[IndexArray, IntArray]:
+    """Index above-threshold neighboring pixel seeds within the bounded eager budget."""
     indices = np.full(im.lum.shape, -1, np.int32)
     radius = max(1, radius)
     for px, py in positions:
@@ -144,7 +186,10 @@ def candidate_indices(im, positions, threshold, radius, shape, budget):
 
 
 @njit(cache=True, nogil=True, parallel=True)
-def evaluate_candidates(im, coords, coarse, excluded):
+def evaluate_candidates(
+    im: Buffer, coords: IntArray, coarse: bool, excluded: DoubleArray
+) -> DoubleArray:
+    """Evaluate global integer seeds into N×8 rows; rejected candidates retain NaN X."""
     records = np.full((len(coords), 8), np.nan)
     for block in prange((len(coords) + 255) // 256):
         local = Buffer(
@@ -166,7 +211,16 @@ def evaluate_candidates(im, coords, coarse, excluded):
 
 
 @njit(cache=True)
-def prepared_candidate(im, x, y, coarse, excluded, indices, records):
+def prepared_candidate(
+    im: Buffer,
+    x: int,
+    y: int,
+    coarse: bool,
+    excluded: DoubleArray,
+    indices: IndexArray,
+    records: DoubleArray,
+) -> CandidateRow | None:
+    """Read a prepared global seed result, or qualify it when eager preparation fell back."""
     if indices.size == 0:
         return qualify(im, x + 0.5, y + 0.5, coarse, excluded)
     index = indices[y - im.oy, x - im.ox]
@@ -177,7 +231,8 @@ def prepared_candidate(im, x, y, coarse, excluded, indices, records):
 
 
 @njit(cache=True)
-def merge(rows, new, maximum):
+def merge(rows: MutableSequence[CandidateRow], new: CandidateRow, maximum: float) -> float:
+    """Merge a fresh seed with the first backward overlap and retain sorted insertion."""
     threshold = f(new[1] - f(max(new[2], maximum) + 1))
     for i in range(len(rows) - 1, -1, -1):
         old = rows[i]
@@ -199,7 +254,10 @@ def merge(rows, new, maximum):
 
 
 @njit(cache=True)
-def tuple8(a, b, remain, weight, count):
+def tuple8(
+    a: CandidateRow, b: CandidateRow, remain: float, weight: float, count: float
+) -> CandidateRow:
+    """Blend seven measured fields with float32 rounding and store the updated count."""
     values = np.empty(7)
     for i in range(7):
         values[i] = f(f(a[i] * remain) + f(b[i] * weight))
@@ -214,11 +272,11 @@ def _neighbor_attempts(
     threshold: float,
     neighbor_radius: int,
     coarse: bool,
-    excluded: NDArray[np.float64],
-    visited: NDArray[np.bool_],
-    indices: NDArray[np.int32],
-    records: NDArray[np.float64],
-    attempts: List,
+    excluded: DoubleArray,
+    visited: BoolArray,
+    indices: IndexArray,
+    records: DoubleArray,
+    attempts: SortableAttempts,
 ) -> int:
     """Append accepted neighborhood seeds in row order and return all evaluated seeds."""
     seeds = 0
@@ -240,18 +298,19 @@ def _neighbor_attempts(
 
 @njit(cache=True, nogil=True)
 def scan_block(
-    im,
-    peaks,
-    threshold,
-    neighbor_radius,
-    coarse,
-    excluded,
-    visited,
-    rows,
-    maximum,
-    indices,
-    records,
-):
+    im: Buffer,
+    peaks: IntArray,
+    threshold: float,
+    neighbor_radius: int,
+    coarse: bool,
+    excluded: DoubleArray,
+    visited: BoolArray,
+    rows: MutableSequence[CandidateRow],
+    maximum: float,
+    indices: IndexArray,
+    records: DoubleArray,
+) -> tuple[float, int]:
+    """Process at most one cancellation block of peaks using native attempt/merge order."""
     seeds = 0
     height, width = visited.shape
     directions = ((0, 0), (1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (-1, 1), (-1, -1), (1, -1))
@@ -259,7 +318,7 @@ def scan_block(
         px, py = peaks[p, 0], peaks[p, 1]
         if covered(px + 0.5, py + 0.5, excluded):
             continue
-        attempts = List.empty_list(ATTEMPT_TYPE)
+        attempts: SortableAttempts = List.empty_list(ATTEMPT_TYPE)
         accepted = False
         for direction in directions:
             x, y = px + direction[0], py + direction[1]
@@ -298,12 +357,16 @@ def scan_block(
 
 
 @njit(cache=True)
-def inside(im, x, y):
-    return im.ox <= x < im.ox + im.rgb.shape[1] and im.oy <= y < im.oy + im.rgb.shape[0]
+def inside(im: Buffer, x: float, y: float) -> bool:
+    """Test global coordinates against the compiled tile bounds."""
+    width: int = im.rgb.shape[1]
+    height: int = im.rgb.shape[0]
+    return im.ox <= x < im.ox + width and im.oy <= y < im.oy + height
 
 
 @njit(cache=True)
-def sample(im, x, y):
+def sample(im: Buffer, x: float, y: float) -> RGBA:
+    """Read a native-truncated RGB sample; invalid or excluded samples have zero alpha."""
     ix, iy = int(x) - im.ox, int(y) - im.oy
     if not (0 <= ix < im.rgb.shape[1] and 0 <= iy < im.rgb.shape[0]):
         return (0.0, 0.0, 0.0, 0.0)
@@ -313,7 +376,10 @@ def sample(im, x, y):
 
 
 @njit(cache=True)
-def support(im, x, y, index, ring):
+def support(
+    im: Buffer, x: float, y: float, index: int, ring: bool
+) -> tuple[FloatArray, FloatArray, FloatArray]:
+    """Enumerate allowed disk/ring weights, luminance, and RGB in native square order."""
     ix, iy = math.floor(x), math.floor(y)
     cx, cy = (x - ix) - 0.5, (y - iy) - 0.5
     radius = index * 0.25
@@ -334,9 +400,11 @@ def support(im, x, y, index, ring):
                 continue
             ax, ay = np.float32(dx - cx), np.float32(dy - cy)
             distance = np.float32(math.sqrt(np.float32(np.float32(ax * ax) + np.float32(ay * ay))))
+            # NumPy stubs lose the concrete mixed float/float32 min/max result.
+            # Keep the recovered rounding expression rather than changing its arithmetic.
             if ring:
                 weight = np.float32(
-                    max(
+                    max(  # type: ignore[arg-type]
                         0.0,
                         np.float32(
                             np.float32(1.15) - abs(np.float32(np.float32(radius) - distance))
@@ -346,7 +414,7 @@ def support(im, x, y, index, ring):
                 )
             else:
                 weight = np.float32(
-                    min(1.0, max(0.0, np.float32(np.float32(radius + f(0.6)) - distance)))
+                    min(1.0, max(0.0, np.float32(np.float32(radius + f(0.6)) - distance)))  # type: ignore[arg-type]
                 )
             if weight > 0:
                 weights[n], values[n] = weight, im.lum[yy, xx]
@@ -356,7 +424,8 @@ def support(im, x, y, index, ring):
 
 
 @njit(cache=True)
-def lane_sum(values):
+def lane_sum(values: FloatArray) -> float:
+    """Reduce eight float32 accumulation lanes in the recovered native combination order."""
     count = len(values) // 8 * 8
     lanes = np.zeros(8, np.float32)
     for i in range(count):
@@ -375,7 +444,8 @@ def lane_sum(values):
 
 
 @njit(cache=True)
-def stats(im, x, y, index, ring=False):
+def stats(im: Buffer, x: float, y: float, index: int, ring: bool = False) -> CompiledStats | None:
+    """Return quarter-position weighted statistics; indices outside [0,1056) are invalid."""
     if not 0 <= index < 1056:
         return None
     key = (int(math.floor(x * 4)), int(math.floor(y * 4)), index, int(ring))
@@ -405,7 +475,8 @@ def stats(im, x, y, index, ring=False):
 
 
 @njit(cache=True)
-def color(im, x, y, index, ring=False):
+def color(im: Buffer, x: float, y: float, index: int, ring: bool = False) -> DoubleArray:
+    """Return three weighted float32 RGB channels stored as float64, or zeroes."""
     if not 0 <= index < 1056:
         return np.zeros(3)
     key = (int(math.floor(x * 4)), int(math.floor(y * 4)), index, int(ring))
@@ -461,7 +532,8 @@ def _extend_ray(
 
 
 @njit(cache=True)
-def initial(im, x, y):
+def initial(im: Buffer, x: float, y: float) -> tuple[bool, float, float, float]:
+    """Trace native ray extents, repair outliers, and validate the recentered size estimate."""
     center = sample(im, x, y)
     center_luma = rays.luma(center)
     limit = 32 if center_luma < f(0.75) else 266
@@ -521,12 +593,17 @@ def initial(im, x, y):
 
 
 @njit(cache=True)
-def luma_color(value):
-    return value[0] * numeric.LUMA[0] + value[1] * numeric.LUMA[1] + value[2] * numeric.LUMA[2]
+def luma_color(value: DoubleArray) -> float:
+    """Combine weighted color channels using the shrink-stage operation order."""
+    luminance: float = (
+        value[0] * numeric.LUMA[0] + value[1] * numeric.LUMA[1] + value[2] * numeric.LUMA[2]
+    )
+    return luminance
 
 
 @njit(cache=True, error_model="numpy")
-def shrink(im, x, y, size):
+def shrink(im: Buffer, x: float, y: float, size: float) -> float:
+    """Shrink the initial radius using native disk/ring luminance thresholds."""
     index = int(size * 1.32)
     if index > 8:
         a, b = (
@@ -546,7 +623,8 @@ def shrink(im, x, y, size):
 
 
 @njit(cache=True)
-def refine_position(im, x, y, size):
+def refine_position(im: Buffer, x: float, y: float, size: float) -> tuple[float, float, bool]:
+    """Hill-climb in native direction/tie order and report whether the center moved."""
     x, y = f(x), f(y)
     index = max(1, int(size * 4))
     initial_stats = stats(im, x, y, index)
@@ -580,12 +658,14 @@ def refine_position(im, x, y, size):
 
 
 @njit(cache=True)
-def refine_size(im, x, y, size):
+def refine_size(im: Buffer, x: float, y: float, size: float) -> tuple[float, bool]:
+    """Refine source radius in native iteration order and report a size change."""
     original, direction = size, 0
     for iteration in range(2, 8):
         old, step = size, max(size * 0.05 / iteration, 0.25)
         if size < 1.25:
-            peak, background = color(im, x, y, 5).max(), stats(im, x, y, 10, True).minimum
+            # Only indices outside [0,1056) yield None; fixed index10 is always valid.
+            peak, background = color(im, x, y, 5).max(), stats(im, x, y, 10, True).minimum  # type: ignore[union-attr]
             if peak > background:
                 size = numeric.small_size((peak - background) / (1 - background))
                 direction = 1 if size > old else -1 if size < old else direction
@@ -615,7 +695,8 @@ def refine_size(im, x, y, size):
 
 
 @njit(cache=True)
-def covered(x, y, excluded):
+def covered(x: float, y: float, excluded: DoubleArray) -> bool:
+    """Test a global point against N×3 float64 exclusion disks [x,y,size]."""
     for i in range(len(excluded)):
         if (x - excluded[i, 0]) ** 2 + (y - excluded[i, 1]) ** 2 < excluded[i, 2] ** 2:
             return True
@@ -686,7 +767,10 @@ def _accept_shape(im: Buffer, x: float, y: float, size: float) -> bool:
 
 
 @njit(cache=True)
-def qualify(im, x, y, coarse, excluded):
+def qualify(
+    im: Buffer, x: float, y: float, coarse: bool, excluded: DoubleArray
+) -> CandidateRow | None:
+    """Qualify a half-pixel seed and return its eight-field raw source row on success."""
     ok, x, y, size = initial(im, x, y)
     if not ok:
         return None
@@ -724,7 +808,7 @@ def qualify(im, x, y, coarse, excluded):
 
 
 @njit(cache=True)
-def repair(position, radii):
+def repair(position: Position, radii: DoubleArray) -> tuple[bool, Position, DoubleArray]:
     """3DA00. Repaired array is returned even on failure (native mutates it).
 
     Outlier marking uses the ORIGINAL adjacent values; repair uses the marked

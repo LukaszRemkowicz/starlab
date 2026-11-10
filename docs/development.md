@@ -16,11 +16,14 @@ The distribution and console command are `star-effects-lab`; the Python package 
 uv run pytest -q
 uv run ruff check src tests
 uv run ruff format --check src tests
+uv run mypy
 ```
 
 Qt tests use the offscreen platform through their test configuration. They exercise application workflows without driving a user's desktop. Numerical tests cover image validation, color transforms, detector regressions, CPU kernel agreement, masks, source corrections, rendering profiles, history and stale preview handling. Some UI tests have timeouts and require generic Numba specializations to be available; a first run after numerical-code edits can compile them.
 
-Ruff checks selected syntax/import/error rules, import ordering, unused suppressions, McCabe complexity (maximum10) and statement count (maximum50). Two function-scoped exceptions document numerical state machines whose exact accumulator/rejection order is intentional: the two-axis rolling filter and conservative sparse peak screening. No module-wide complexity suppressions are used. A passing run does not establish duplication freedom, complete typing or scientific correctness; independent numerical and workflow checks remain necessary.
+Ruff checks selected syntax/import/error rules, import ordering, unused suppressions, McCabe complexity (maximum10) and statement count (maximum50). Two function-scoped exceptions document numerical state machines whose exact accumulator/rejection order is intentional: the two-axis rolling filter and conservative sparse peak screening. No module-wide complexity suppressions are used. Annotation and public-documentation rules are also enabled. Mypy checks all production modules in strict mode; array aliases distinguish dtype, and protocols describe service boundaries. The signature-preserving JIT adapter keeps static checking across Numba decorators without changing runtime compilation. Two overload-factory parameters remain intentionally unannotated because Numba requires their annotations to equal the implementation parameters. Untyped external-library stubs are isolated by boundary casts; strict checking does not prove array shape or numerical accuracy. Independent image and workflow checks remain necessary.
+
+The Windows quality workflow runs the locked environment, lint, formatting, strict type checking, ordinary tests and wheel build on pushes and pull requests. It follows the [official uv Actions integration](https://docs.astral.sh/uv/guides/integration/github/). A hosted headless test run does not establish hardware shader correctness.
 
 ## Layout
 

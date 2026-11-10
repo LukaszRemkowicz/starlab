@@ -1,3 +1,5 @@
+"""Qt parameter widgets translating gestures into immutable effect settings."""
+
 from dataclasses import replace
 
 from PySide6.QtCore import QSignalBlocker, Qt, Signal
@@ -48,11 +50,14 @@ BASIC = {"quantity", "intensity", "length", "angle", "points", "size", "soft_fil
 
 
 class ParameterControl(QWidget):
+    """Keep one numeric spin box and slider synchronized without recursive signals."""
+
     changed = Signal(float)
     edit_started = Signal()
     edit_finished = Signal()
 
-    def __init__(self, key: str, parent=None):
+    def __init__(self, key: str, parent: QWidget | None = None) -> None:
+        """Build a control using the shared parameter range and display precision."""
         super().__init__(parent)
         self.key = key
         tips = {
@@ -94,16 +99,19 @@ class ParameterControl(QWidget):
         self.slider.sliderReleased.connect(self.edit_finished)
 
     def set_value(self, value: float) -> None:
+        """Update both controls without emitting an edit or value-change signal."""
         with QSignalBlocker(self.spin), QSignalBlocker(self.slider):
             self.spin.setValue(value)
             self.slider.setValue(round(value * self.factor))
 
     def _spin_changed(self, value: float) -> None:
+        """Mirror a numeric edit to the slider and emit its value once."""
         with QSignalBlocker(self.slider):
             self.slider.setValue(round(value * self.factor))
         self.changed.emit(value)
 
     def _slider_changed(self, value: int) -> None:
+        """Mirror a slider position in parameter units and emit its value once."""
         numeric = value / self.factor
         with QSignalBlocker(self.spin):
             self.spin.setValue(numeric)
@@ -111,11 +119,14 @@ class ParameterControl(QWidget):
 
 
 class EffectPanel(QWidget):
+    """Present grouped effect settings and propagate slider edit boundaries."""
+
     settings_changed = Signal(object)
     edit_started = Signal()
     edit_finished = Signal()
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: QWidget | None = None) -> None:
+        """Build the general tab and all effect groups from shared parameter metadata."""
         super().__init__(parent)
         self.settings = EffectSettings()
         self.controls: dict[str, dict[str, ParameterControl]] = {}
@@ -205,16 +216,19 @@ class EffectPanel(QWidget):
         scroll.setWidget(body)
         return scroll
 
-    def _change(self, kind: str, key: str, value) -> None:
+    def _change(self, kind: str, key: str, value: float | bool) -> None:
+        """Replace one immutable parameter group and emit the updated settings snapshot."""
         group = replace(getattr(self.settings, kind), **{key: value})
         self.settings = replace(self.settings, **{kind: group})
         self.settings_changed.emit(self.settings)
 
     def _reset(self, kind: str) -> None:
+        """Restore one group to defaults while retaining all other group settings."""
         self.set_settings(replace(self.settings, **{kind: getattr(EffectSettings(), kind)}))
         self.settings_changed.emit(self.settings)
 
     def set_settings(self, settings: EffectSettings) -> None:
+        """Reflect a settings snapshot without creating another user edit."""
         self.settings = settings
         for kind in KINDS:
             group = getattr(settings, kind)
@@ -224,6 +238,7 @@ class EffectPanel(QWidget):
                 control.set_value(getattr(group, key))
 
     def _mode(self, basic: bool) -> None:
+        """Hide advanced-only controls while preserving their stored parameter values."""
         for kind in KINDS:
             for key, control in self.controls[kind].items():
                 control.setVisible(not basic or key in BASIC)
