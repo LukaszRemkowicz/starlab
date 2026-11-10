@@ -2,6 +2,7 @@
 
 import hashlib
 import io
+import json
 from pathlib import Path
 
 import numpy as np
@@ -27,3 +28,34 @@ def load_analysis_tables(path: Path | None = None) -> tuple[NDArray[np.float32],
         write = tables["write"].copy()
     read.flags.writeable = write.flags.writeable = False
     return read, write
+
+
+def load_color_cube(path: Path | None = None) -> NDArray[np.uint8]:
+    """Reconstruct the universal RGB8 transform after checking its data identity.
+
+    The archive stores uint8 residuals and three channel-axis baselines. Addition
+    intentionally wraps modulo256. The result has shape(256,256,256,3), remains
+    read-only, and consumes48MiB regardless of photograph size. JSON describes
+    the transform; it is not interchangeable with the compressed numeric data.
+    """
+    path = path or Path(__file__).with_name("full_lcms_lut.npz")
+    metadata = json.loads(path.with_suffix(".json").read_text(encoding="utf-8"))
+    if metadata.get("shape") != [256, 256, 256, 3] or metadata.get("dtype") != "uint8":
+        raise ValueError("Color-transform metadata has unsupported dimensions or dtype.")
+    archive: bytes = path.read_bytes()
+    if hashlib.sha256(archive).hexdigest() != metadata["archive_sha256"]:
+        raise ValueError("Color-transform archive does not match its recorded identity.")
+    with np.load(io.BytesIO(archive), allow_pickle=False) as stored:
+        cube = stored["delta"]
+        baselines = tuple(stored[channel] for channel in ("red", "green", "blue"))
+    if cube.shape != (256, 256, 256, 3) or cube.dtype != np.uint8 or any(
+        values.shape != (256,) or values.dtype != np.uint8 for values in baselines
+    ):
+        raise ValueError("Color-transform arrays have unsupported dimensions or dtype.")
+    np.add(cube[..., 0], baselines[0][:, None, None], out=cube[..., 0])
+    np.add(cube[..., 1], baselines[1][None, :, None], out=cube[..., 1])
+    np.add(cube[..., 2], baselines[2][None, None, :], out=cube[..., 2])
+    if hashlib.sha256(memoryview(cube)).hexdigest() != metadata["table_sha256"]:
+        raise ValueError("Universal color cube does not match its recorded identity.")
+    cube.flags.writeable = False
+    return cube

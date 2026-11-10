@@ -3,22 +3,19 @@
 Packaged transfer tables provide deterministic transforms. See docs/assets.md
 for their contents and integrity metadata."""
 
-import hashlib
 import io
-import json
 import os
 import struct
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from functools import lru_cache
-from pathlib import Path
 
 import numpy as np
 from numba import njit
 from PIL import Image, ImageCms
 
 from ..imaging import check_cancel, linear_to_srgb
-from .lookup_assets import load_analysis_tables
+from .lookup_assets import load_analysis_tables, load_color_cube
 from .numeric import LUMA
 
 READ, WRITE = load_analysis_tables()
@@ -251,17 +248,7 @@ def _full_lcms():
     global _LCMS_TABLE
     with _LCMS_LOCK:
         if _LCMS_TABLE is None:
-            path = Path(__file__).with_name("full_lcms_lut.npz")
-            metadata = json.loads(path.with_suffix(".json").read_text())
-            with np.load(path, allow_pickle=False) as stored:
-                cube = stored["delta"]
-                np.add(cube[..., 0], stored["red"][:, None, None], out=cube[..., 0])
-                np.add(cube[..., 1], stored["green"][None, :, None], out=cube[..., 1])
-                np.add(cube[..., 2], stored["blue"][None, None, :], out=cube[..., 2])
-            if hashlib.sha256(memoryview(cube)).hexdigest() != metadata["table_sha256"]:
-                raise ValueError("Universal LCMS cube does not match its recorded identity.")
-            cube.flags.writeable = False
-            _LCMS_TABLE = cube
+            _LCMS_TABLE = load_color_cube()
         return _LCMS_TABLE
 
 

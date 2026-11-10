@@ -25,3 +25,22 @@ def test_changed_analysis_archive_fails_before_arrays_are_used(tmp_path):
     np.savez(path, read=np.zeros(1), write=np.zeros(1))
     with pytest.raises(ValueError, match="Analysis lookup archive"):
         load_analysis_tables(path)
+
+
+def test_color_transform_archive_integrity_is_checked_before_decompression(tmp_path):
+    import json
+    from pathlib import Path
+
+    from starlab.domain.detection.lookup_assets import load_color_cube
+
+    original = Path("src/starlab/domain/detection/full_lcms_lut.json")
+    path = tmp_path / "cube.npz"
+    path.write_bytes(b"not a numpy archive")
+    path.with_suffix(".json").write_text(original.read_text())
+    with pytest.raises(ValueError, match="Color-transform archive"):
+        load_color_cube(path)
+    metadata = json.loads(original.read_text())
+    metadata["shape"] = [256, 256, 256, 4]
+    path.with_suffix(".json").write_text(json.dumps(metadata))
+    with pytest.raises(ValueError, match="Color-transform metadata"):
+        load_color_cube(path)
