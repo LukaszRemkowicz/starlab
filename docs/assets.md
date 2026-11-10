@@ -14,6 +14,8 @@ Runtime data is checked in beside the code that consumes it. These files are not
 
 NPZ is a NumPy archive of named arrays. The JSON file describes its corresponding data and does not replace it. ONNX stores the neural-network graph and weights. GLSL shader sources run on the GPU; they are executable parts of the preview, not documentation or Python modules.
 
+`analysis_luts.npz` is 5,624 bytes: `read` is 256 float32 values and `write` is 4,096 uint8 values (5,120 array bytes in total). The loader verifies the archive SHA-256 before exposing read-only arrays. READ approximates gamma 2.4 but differs from a freshly calculated power by up to about 1.13e-6; retaining stored values preserves threshold decisions. WRITE quantizes normalized analysis levels back to byte codes. Neither array is a source-detection result or a cached photograph.
+
 The RGB8 transform archive covers 256×256×256 input colors and reconstructs a uint8 three-channel table from compressed residuals. Its archive hash and reconstructed-table hash serve different integrity checks. See the JSON metadata for the exact encoding and transform parameters. The sky model likewise validates its ONNX SHA-256 against recorded metadata before use.
 
 ## Test fixtures

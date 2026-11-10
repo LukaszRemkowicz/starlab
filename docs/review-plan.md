@@ -3,7 +3,7 @@
 The user authorized implementation after the complete baseline review, in the existing isolated worktree. Preserve the approved application behavior and use separate commits for every numbered item that changes code. Do not rewrite the reviewed publication commit again.
 
 - [x] Complete review and record baseline, asset explanations and preservation constraints in code-review.md.
-- [ ] Item2: validate/document analysis lookup data and read-only ownership.
+- [x] Item2: validate/document analysis lookup data and read-only ownership.22 focused tests pass.
 - [ ] Item3: remove genuine duplication/dead scanning work; preserve independent numerical backends.
 - [ ] Item4: replace categorical branch dispatch with match where clearer.
 - [ ] Item5: separate/validate universal transform loading and metadata meaning.

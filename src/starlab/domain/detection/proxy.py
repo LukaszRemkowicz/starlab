@@ -18,11 +18,10 @@ from numba import njit
 from PIL import Image, ImageCms
 
 from ..imaging import check_cancel, linear_to_srgb
+from .lookup_assets import load_analysis_tables
 from .numeric import LUMA
 
-with np.load(Path(__file__).with_name("analysis_luts.npz")) as tables:
-    READ = tables["read"].copy()
-    WRITE = tables["write"].copy()
+READ, WRITE = load_analysis_tables()
 
 COARSE_WORKERS = min(8, os.cpu_count() or 1)
 _LCMS_TABLE = None
