@@ -25,3 +25,26 @@ Original shows source pixels, Result includes source corrections and effect laye
 ## Save
 
 Presets are JSON settings files. Export writes a new 16-bit TIFF, either the complete Result or added Effects only on black. Source corrections cannot be represented by the added-light layer alone. The input image is never overwritten. The export color encoding is sRGB for RGB images; arbitrary original metadata is not retained.
+
+## Application identity
+
+The running application uses the supplied artwork for its Qt application and window
+icons. Windows also receives a stable taskbar application identity. The inspector
+header shows a small icon beside the installed package version, generated from
+`project.version` in `pyproject.toml`; it is not duplicated in the GUI source.
+PNG and multi-resolution ICO artwork are packaged with the application. macOS Dock
+integration uses Qt's application icon API and still requires testing on a Mac.
+A future standalone installer or app bundle will also need native launcher metadata;
+the current `uv` console launcher is not a standalone installer.
+
+## Unexpected exits
+
+A normal application launch writes `startup.log` beneath Qt's local application
+data directory, in its `logs` subdirectory. On Windows this is usually
+`%LOCALAPPDATA%\Star Effects Lab\Star Effects Lab\logs\startup.log`.
+It records startup, worker stages, Python exceptions, and normal Qt shutdown.
+The startup log rotates at 2 MiB and retains two backups. Native fault traces
+are written separately to `native-crash.log`, whose open descriptor remains valid
+when the startup log rotates. Tracing is enabled for the session unless another
+fault handler is already active. An unwritable log directory does not prevent startup. Logs contain
+local diagnostic text, not image pixels, and are not uploaded.

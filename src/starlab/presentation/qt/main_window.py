@@ -45,6 +45,7 @@ from PySide6.QtWidgets import (
 )
 
 from ...domain.effects.settings import EffectSettings
+from .branding import APPLICATION_NAME, application_icon, application_version
 from .drop_paths import accept_tiff_drag, drop_tiff
 from .effect_panel import EffectPanel
 from .image_view import ImageView
@@ -99,7 +100,8 @@ class MainWindow(QMainWindow):
             if preferences is not None
             else QSettings("Star Effects Lab", "Star Effects Lab")
         )
-        self.setWindowTitle("Star Effects Lab")
+        self.setWindowTitle(APPLICATION_NAME)
+        self.setWindowIcon(application_icon())
         self.resize(1440, 900)
         self.setMinimumSize(1024, 720)
         self.setStyleSheet(STYLE)
@@ -185,9 +187,7 @@ class MainWindow(QMainWindow):
         header.setObjectName("panelHeader")
         header_box: QHBoxLayout = QHBoxLayout(header)
         header_box.setContentsMargins(12, 12, 12, 12)
-        title: QLabel = QLabel("Parameters")
-        title.setStyleSheet("font-weight: 600;")
-        header_box.addWidget(title)
+        header_box.addWidget(self._branding_badge())
         header_box.addStretch()
         self.filename = QLabel("No image")
         self.filename.setObjectName("muted")
@@ -198,6 +198,23 @@ class MainWindow(QMainWindow):
         sidebar.addWidget(self.effect_panel, 1)
         self._general_controls()
         return self.inspector
+
+    def _branding_badge(self) -> QWidget:
+        """Keep application artwork and its installed version together in the header."""
+        badge: QWidget = QWidget()
+        layout: QHBoxLayout = QHBoxLayout(badge)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(8)
+        artwork: QLabel = QLabel()
+        artwork.setPixmap(self.windowIcon().pixmap(28, 28))
+        artwork.setFixedSize(28, 28)
+        artwork.setAccessibleName(APPLICATION_NAME)
+        self.version_label = QLabel(f"v{application_version()}")
+        self.version_label.setObjectName("applicationVersion")
+        badge.setToolTip(f"{APPLICATION_NAME} {application_version()}")
+        layout.addWidget(artwork)
+        layout.addWidget(self.version_label)
+        return badge
 
     def _empty_state(self) -> QWidget:
         """Build the initial prompt and image-open action."""
