@@ -53,3 +53,5 @@ is therefore not a finished photograph. CPU export uses independent NumPy/Numba
 profiles; duplicating the mathematics across execution languages is intentional.
 Numerical GPU tests must compile and execute both shader files on a real context;
 CPU fixture tests alone cannot detect a broken uniform or shader change.
+
+The [LUT versus direct LittleCMS comparison](lut-vs-lcms-comparison.md) measures the universal cube's actual benefit, numerical equivalence and memory cost on two full photographic inputs.

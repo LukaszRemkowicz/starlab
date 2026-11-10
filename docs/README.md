@@ -9,4 +9,6 @@
 - [Code review](code-review.md): baseline findings across source, shaders and tests.
 - [Review results](review-results.md): changes by item, commits and verification evidence.
 
+- [LUT versus LittleCMS](lut-vs-lcms-comparison.md): exhaustive equivalence, detector timing and memory measurements.
+
 These documents describe the current application. Historical investigation logs, local experiments and generated comparison artifacts are not part of the published project.
