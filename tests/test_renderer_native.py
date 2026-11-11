@@ -75,6 +75,15 @@ def test_manual_brightness_edit_changes_emitted_light():
     assert edited.sum() < render_effects(frame, stars, settings).sum()
 
 
+def test_brightness_above_one_keeps_effects_finite_and_visible():
+    path = PROBES / "color-quantity-1793869750289/primary-q50.tif"
+    frame, stars, settings, _ = native_case(path)
+    brighter = (replace(stars[0], brightness=10.0), *stars[1:])
+    result = render_effects(frame, brighter, settings)
+    assert np.isfinite(result).all()
+    assert result.max() > 0
+
+
 def test_streamed_source_batches_preserve_screen_composition(monkeypatch):
     from starlab.domain.effects import render
 

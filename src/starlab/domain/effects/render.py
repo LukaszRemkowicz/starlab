@@ -229,7 +229,11 @@ def _lit_scene(
     )
     brightness: FloatArray = np.array([star.brightness for star in stars], np.float32)
     threshold: float = (1 - parameters.quantity / 100) ** 2 * maximum
-    factors: FloatArray = np.maximum(brightness - threshold, 0) / ((1 - threshold) * brightness)
+    # Edited brightness may exceed 1; normalizing by the ceiling keeps the denominator positive.
+    ceiling: float = max(maximum, 1.0)
+    factors: FloatArray = np.maximum(brightness - threshold, 0) / (
+        (ceiling - threshold) * brightness
+    )
     original: DoubleArray = np.array([star.color for star in stars])
     colors: FloatArray = source_colors(original, parameters.hue, parameters.saturation)
     # The native catalog already has this luminance. The ratio additionally

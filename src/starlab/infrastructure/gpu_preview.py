@@ -311,6 +311,7 @@ class GpuPreviewRenderer:
             rayLength=parameters.length,
             intensity=gain(kind, parameters),
             threshold=threshold,
+            ceiling=max(self.maximum, 1.0),
             hue=parameters.hue,
             saturation=parameters.saturation,
             rainbow=parameters.rainbow,
