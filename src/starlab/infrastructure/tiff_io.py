@@ -235,6 +235,21 @@ class EncodedRows:
         self.grid_rows: int = -(-self.height // self.seg_rows)
         self.grid_cols: int = -(-self.width // self.seg_cols)
         self.kept: tuple[int, EncodedPixels] | None = None  # (strip-row index, its decoded rows)
+        self.pool: ThreadPoolExecutor | None = None
+
+    def __enter__(self) -> EncodedRows:
+        """Use as a context manager so the decode threads end with the reader."""
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        """Stop the decode threads, if any were started."""
+        self.close()
+
+    def close(self) -> None:
+        """Shut the reusable decode executor down; later reads start a new one."""
+        pool, self.pool = self.pool, None
+        if pool is not None:
+            pool.shutdown()
 
     def _place(
         self, out: EncodedPixels, top: int, row0: int, col0: int, plane: int, data: EncodedPixels
@@ -262,20 +277,21 @@ class EncodedRows:
             result = page.decode(*item, **args)
             return item[1], result[0]
 
-        with ThreadPoolExecutor(workers) as pool:
-            for start in range(0, len(indices), 2 * workers):
-                items: list[tuple[bytes | None, int]] = []
-                with handle.lock:
-                    for index in indices[start : start + 2 * workers]:
-                        count: int = page.databytecounts[index]
-                        handle.seek(page.dataoffsets[index])
-                        items.append((handle.read(count) if count else None, index))
-                yield from pool.map(decode, items)
+        if self.pool is None:
+            self.pool = ThreadPoolExecutor(workers)
+        for start in range(0, len(indices), 2 * workers):
+            items: list[tuple[bytes | None, int]] = []
+            with handle.lock:
+                for index in indices[start : start + 2 * workers]:
+                    count: int = page.databytecounts[index]
+                    handle.seek(page.dataoffsets[index])
+                    items.append((handle.read(count) if count else None, index))
+            yield from self.pool.map(decode, items)
 
     def rows(self, top: int, bottom: int, step: int = 1) -> EncodedPixels:
-        """Return rows [top, bottom); with step>1 only rows top, top+step, ... are filled."""
+        """Return rows top, top+step, ... below `bottom`; only those are read or decoded."""
         if self.mapped is not None:
-            return np.asarray(self.mapped[top:bottom], dtype=self.dtype)
+            return np.asarray(self.mapped[top:bottom:step], dtype=self.dtype)
         out: EncodedPixels = np.zeros((bottom - top, self.width, self.channels), self.dtype)
         kept, self.kept = self.kept, None
         last: int = (bottom - 1) // self.seg_rows
@@ -304,7 +320,7 @@ class EncodedRows:
                 retained = self._extend(retained, plane, col, data)
         if retained is not None:
             self.kept = (last, retained)
-        return out
+        return out[::step]
 
     def _extend(
         self, band: EncodedPixels | None, plane: int, col: int, data: EncodedPixels
@@ -378,11 +394,11 @@ def read_tiff(path: Path | str, cancel: Event | None = None) -> ImageFrame:
     path = Path(path)
     with tifffile.TiffFile(path) as tiff_file:
         page, note = _validated_page(tiff_file)
-        reader: EncodedRows = EncodedRows(page)
-        shape: tuple[int, int, int] = (reader.height, reader.width, reader.channels)
-        return _convert_integer_image(
-            reader.rows, shape, int(np.iinfo(reader.dtype).max), path, note, cancel
-        )
+        with EncodedRows(page) as reader:
+            shape: tuple[int, int, int] = (reader.height, reader.width, reader.channels)
+            return _convert_integer_image(
+                reader.rows, shape, int(np.iinfo(reader.dtype).max), path, note, cancel
+            )
 
 
 def _slice_rows(array: EncodedPixels) -> Callable[[int, int], EncodedPixels]:
@@ -408,34 +424,41 @@ def read_tiff_preview(
         page, note = _validated_page(tiff_file)
         width, height = page.imagewidth, page.imagelength
         stride: int = max(1, (max(width, height) + max_edge - 1) // max_edge)
-        reader: EncodedRows = EncodedRows(page)
-        shape: tuple[int, int, int] = (-(-height // stride), -(-width // stride), reader.channels)
-
-        def sampled(top: int, bottom: int) -> EncodedPixels:
-            """Return strided output rows [top, bottom) of the preview grid."""
-            rows: EncodedPixels = reader.rows(
-                top * stride, min((bottom - 1) * stride + 1, height), stride
+        with EncodedRows(page) as reader:
+            shape: tuple[int, int, int] = (
+                -(-height // stride),
+                -(-width // stride),
+                reader.channels,
             )
-            return rows[::stride, ::stride]
 
-        block: int = max(1, ROWS_PER_BLOCK // stride)
-        # Keep ImageFrame's 2×2 minimum for exceptionally thin panoramas.
-        if min(shape[:2]) < 2:
-            thin: EncodedPixels = cast(
-                EncodedPixels,
-                np.concatenate(
-                    [sampled(row, min(row + block, shape[0])) for row in range(0, shape[0], block)]
-                ),
+            def sampled(top: int, bottom: int) -> EncodedPixels:
+                """Return strided output rows [top, bottom) of the preview grid."""
+                rows: EncodedPixels = reader.rows(
+                    top * stride, min((bottom - 1) * stride + 1, height), stride
+                )
+                return rows[:, ::stride]
+
+            block: int = max(1, ROWS_PER_BLOCK // stride)
+            # Keep ImageFrame's 2×2 minimum for exceptionally thin panoramas.
+            if min(shape[:2]) < 2:
+                thin: EncodedPixels = cast(
+                    EncodedPixels,
+                    np.concatenate(
+                        [
+                            sampled(row, min(row + block, shape[0]))
+                            for row in range(0, shape[0], block)
+                        ]
+                    ),
+                )
+                thin = cast(EncodedPixels, np.repeat(thin, 2, axis=0 if thin.shape[0] == 1 else 1))
+                shape = (thin.shape[0], thin.shape[1], shape[2])
+                read_rows = _slice_rows(thin)
+            else:
+                read_rows = sampled
+            frame: ImageFrame = _convert_integer_image(
+                read_rows, shape, int(np.iinfo(reader.dtype).max), path, note, cancel, block
             )
-            thin = cast(EncodedPixels, np.repeat(thin, 2, axis=0 if thin.shape[0] == 1 else 1))
-            shape = (thin.shape[0], thin.shape[1], shape[2])
-            read_rows = _slice_rows(thin)
-        else:
-            read_rows = sampled
-        frame: ImageFrame = _convert_integer_image(
-            read_rows, shape, int(np.iinfo(reader.dtype).max), path, note, cancel, block
-        )
-        return frame, 1 / stride, width, height
+            return frame, 1 / stride, width, height
 
 
 def _encoded_rows(

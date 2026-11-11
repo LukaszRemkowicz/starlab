@@ -22,6 +22,7 @@ LAYOUTS = {
     "zlib-tiled": {"compression": "zlib", "tile": (16, 32)},
     "planar-zlib": {"compression": "zlib", "rowsperstrip": 6, "planarconfig": "separate"},
     "planar-plain": {"planarconfig": "separate"},
+    "planar-zlib-tiled": {"compression": "zlib", "tile": (16, 32), "planarconfig": "separate"},
     "big-endian-zlib": {"compression": "zlib", "rowsperstrip": 9, "byteorder": ">"},
     "big-endian-plain": {"byteorder": ">"},
 }
@@ -73,8 +74,47 @@ def test_streamed_frame_rows_and_preview_match_full_decode(tmp_path, name, dtype
         # Sequential, overlapping, repeated and strided requests all agree with the reference.
         for top, bottom, step in [(0, 10, 1), (10, 30, 1), (28, 53, 1), (0, 53, 1), (3, 40, 4)]:
             got = reader.rows(top, bottom, step)
-            assert np.array_equal(got[::step], data[top:bottom][::step])
+            assert np.array_equal(got, data[top:bottom:step])
             assert got.dtype.isnative
+
+
+@pytest.mark.parametrize(
+    "layout", [{"rowsperstrip": 16}, {"tile": (16, 32)}], ids=["jpeg-strips", "jpeg-tiles"]
+)
+def test_jpeg_gray_rows_match_full_decode(tmp_path, layout):
+    rng = np.random.default_rng(2)
+    data = rng.integers(0, 256, (H, W), dtype=np.uint8)
+    path = tmp_path / "jpeg.tif"
+    tifffile.imwrite(path, data, photometric="minisblack", compression="jpeg", **layout)
+    reference = tifffile.imread(path)[..., None]
+    assert np.array_equal(read_tiff(path).pixels, _linear(reference))
+    with tifffile.TiffFile(path) as tiff_file:
+        with EncodedRows(tiff_file.pages[0]) as reader:
+            for top, bottom, step in [(0, 10, 1), (10, 30, 1), (28, 53, 1), (3, 40, 4)]:
+                assert np.array_equal(reader.rows(top, bottom, step), reference[top:bottom:step])
+
+
+def test_big_endian_plain_strided_rows_touch_only_sampled_rows(tmp_path):
+    path, data = _write(tmp_path, "big-endian-plain", np.uint16, 3)
+    with tifffile.TiffFile(path) as tiff_file, EncodedRows(tiff_file.pages[0]) as reader:
+        assert reader.mapped is not None
+        got = reader.rows(2, 50, 5)
+        assert got.shape[0] == len(range(2, 50, 5))
+        assert np.array_equal(got, data[2:50:5])
+
+
+def test_decode_threads_stop_with_the_reader(tmp_path):
+    path, _ = _write(tmp_path, "zlib-strips", np.uint16, 3)
+    with tifffile.TiffFile(path) as tiff_file:
+        with EncodedRows(tiff_file.pages[0]) as reader:
+            reader.rows(0, 10)
+            pool = reader.pool
+            reader.rows(10, 20)
+            assert reader.pool is pool  # one executor serves every request
+        assert reader.pool is None
+        assert pool is not None
+        with pytest.raises(RuntimeError):
+            pool.submit(int)  # shut down
 
 
 @pytest.mark.parametrize("name", list(LAYOUTS))

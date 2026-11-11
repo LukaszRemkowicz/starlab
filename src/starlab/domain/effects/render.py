@@ -118,6 +118,7 @@ def _sparse_scene(
     sampling: int,
     cancel: Event | None,
     region: bool,
+    export: bool = False,
 ) -> SceneArrays | None:
     """Place cached per-source profiles, retaining their original contribution order."""
     out_width: int = (width + sampling - 1) // sampling
@@ -147,19 +148,15 @@ def _sparse_scene(
                 residue,
                 angle,
                 bounds=(-origin_x, -origin_y, width - origin_x, height - origin_y)
-                if region
+                if region and not export  # export bands share the unbounded cached profile
                 else None,
             )
-            if kind in ("primary", "secondary"):  # rows ascend: keep only the image's rows
-                if (
-                    not len(offset_y)
-                    or offset_y[0] >= height - origin_y
-                    or offset_y[-1] < -origin_y
-                ):
-                    continue
-                first, last = np.searchsorted(offset_y, (-origin_y, height - origin_y))
-                offset_x, offset_y = offset_x[first:last], offset_y[first:last]
-                values, radius = values[first:last], radius[first:last]
+            # Rows ascend (rays are sorted, radial grids are row-major): keep only the image's rows.
+            if not len(offset_y) or offset_y[0] >= height - origin_y or offset_y[-1] < -origin_y:
+                continue
+            first, last = np.searchsorted(offset_y, (-origin_y, height - origin_y))
+            offset_x, offset_y = offset_x[first:last], offset_y[first:last]
+            values, radius = values[first:last], radius[first:last]
             world_x: IndexArray
             world_y: IndexArray
             world_x, world_y = offset_x + origin_x, offset_y + origin_y
@@ -225,7 +222,7 @@ def _scene(
         )
     else:
         arrays = _sparse_scene(
-            width, height, stars, kind, parameters, diagonal, sampling, cancel, region
+            width, height, stars, kind, parameters, diagonal, sampling, cancel, region, export
         )
         if arrays is None:
             return cast(

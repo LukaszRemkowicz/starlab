@@ -166,14 +166,10 @@ class SkyMaskService:
         assert self.segmenter is not None
         with tifffile.TiffFile(source) as tiff_file:
             page, _ = _validated_page(tiff_file)
-            reader: EncodedRows = EncodedRows(page)
-            return build_sky_mask(
-                shape,
-                reader.rows,
-                self.segmenter,
-                cancel,
-                block_mean=_block_mean,
-            )
+            with EncodedRows(page) as reader:
+                return build_sky_mask(
+                    shape, reader.rows, self.segmenter, cancel, block_mean=_block_mean
+                )
 
     def _from_working_frame(self, frame: ImageFrame, cancel: Event | None) -> SkyMask:
         """Encode in-memory working samples when no TIFF source exists."""

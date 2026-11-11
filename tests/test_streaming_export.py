@@ -1,4 +1,5 @@
 from dataclasses import replace
+from threading import Event
 
 import numpy as np
 import pytest
@@ -9,7 +10,7 @@ from starlab.application.use_cases import ImageServices, _apply_export_source_fi
 from starlab.domain.effects.profiles import image_diagonal
 from starlab.domain.effects.render import composite, render_effects
 from starlab.domain.effects.settings import KINDS, EffectSettings
-from starlab.domain.imaging import ImageFrame, linear_to_srgb
+from starlab.domain.imaging import Cancelled, ImageFrame, linear_to_srgb
 from starlab.domain.sky_mask import SkyMask
 from starlab.domain.stars import Star
 from starlab.infrastructure.tiff_io import write_tiff
@@ -82,6 +83,41 @@ def test_streamed_export_matches_whole_image_export(tmp_path, monkeypatch, effec
         path, frame, stars, settings, effects_only, None, None, sky
     )
     expected = reference(frame, stars, settings, effects_only, sky)
-    difference = np.abs(tifffile.imread(path).astype(np.int32) - expected)
-    assert difference.max() <= 1
-    assert (difference > 0).mean() < 1e-3
+    np.testing.assert_array_equal(tifffile.imread(path), expected)
+
+
+@pytest.mark.parametrize("band_rows", [400, 7], ids=["band-taller-than-extent", "band-tiny"])
+def test_soft_and_ring_export_bands_of_any_height_are_exact(tmp_path, monkeypatch, band_rows):
+    monkeypatch.setattr(use_cases, "EXPORT_BAND_ROWS", band_rows)
+    frame, stars = scene(160, 120, 12, seed=5)
+    base = all_effects()
+    settings = replace(
+        base,
+        primary=replace(base.primary, enabled=False),
+        secondary=replace(base.secondary, enabled=False),
+        soft=replace(base.soft, size=20),
+        ring=replace(base.ring, size=20),
+    )
+    path = tmp_path / "out.tif"
+    ImageServices(None, write_tiff).export(path, frame, stars, settings, False, None, None, None)
+    np.testing.assert_array_equal(
+        tifffile.imread(path), reference(frame, stars, settings, False, None)
+    )
+
+
+def test_consumer_stopping_early_leaves_no_temp_file_and_keeps_destination(tmp_path):
+    frame, _ = scene(40, 30, 0)
+    path = tmp_path / "out.tif"
+    path.write_bytes(b"original")
+    stop = Event()
+
+    def bands():
+        yield frame.pixels[:10]
+        stop.set()  # the consumer gives up while the stream is still open
+        yield frame.pixels[10:20]
+        yield frame.pixels[20:]
+
+    with pytest.raises(Cancelled):
+        write_tiff(path, frame, bands(), cancel=stop)
+    assert path.read_bytes() == b"original"
+    assert [p.name for p in tmp_path.iterdir()] == ["out.tif"]
