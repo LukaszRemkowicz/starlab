@@ -9,6 +9,7 @@ import numpy as np
 from numpy.typing import ArrayLike, NDArray
 
 from ..array_types import BoolArray, Bounds, DoubleArray, FloatArray, IntArray, Position
+from ..jit import njit
 from .constants import SECONDARY_RAY_COUNT, SECONDARY_RAYS
 from .settings import EffectKind, EffectParameters
 
@@ -210,31 +211,38 @@ def scene_batch_size(
     return max(1, int(1048576 / max(per_source, 1)))
 
 
+@njit(cache=True, nogil=True)
+def _footprint(distance: float, ratio: float) -> float:
+    """Average the cubic ray falloff over 15 transverse samples of one pixel."""
+    total: float = 0.0
+    for sample in range(15):
+        total += max(1 - abs(distance + sample / 14 - 0.5) * ratio, 0.0) ** 3
+    return total / 15
+
+
+@njit(cache=True, nogil=True)
 def transverse_profile(
     cross: DoubleArray, coefficient: float, denominator: DoubleArray
 ) -> DoubleArray:
-    """The native 15 × 7 quadrature, vectorized in bounded blocks."""
-    result: DoubleArray = np.maximum(1 - np.abs(cross) * coefficient / denominator, 0) ** 3
-    near_indices: IntArray = np.flatnonzero(cross <= 1.5)
-    offsets: DoubleArray = np.arange(15) / 14 - 0.5
-    shifts: DoubleArray = np.arange(-3, 4) / 8
-    for start in range(0, len(near_indices), 4096):
-        sample_indices: IntArray = near_indices[start : start + 4096]
-        sample_distances: DoubleArray = cross[sample_indices, None]
-        sample_ratios: DoubleArray = coefficient / denominator[sample_indices, None]
-        result[sample_indices] = (
-            np.maximum(1 - np.abs(sample_distances + offsets) * sample_ratios, 0) ** 3
-        ).mean(axis=1)
-        sample_indices = sample_indices[cross[sample_indices] < 1.5]
-        if not len(sample_indices):
-            continue
-        shifted: DoubleArray = cross[sample_indices, None] + shifts
-        sample_ratios = coefficient / denominator[sample_indices, None]
-        point: DoubleArray = np.maximum(1 - np.abs(shifted) * sample_ratios, 0) ** 3
-        samples: DoubleArray = (
-            np.maximum(1 - np.abs(shifted[..., None] + offsets) * sample_ratios[..., None], 0) ** 3
-        )
-        result[sample_indices] = np.where(shifted <= 1.5, samples.mean(axis=2), point).mean(axis=1)
+    """The native 15 × 7 quadrature: point samples far away, supersampled near the ray."""
+    result: DoubleArray = np.empty(len(cross))
+    for index in range(len(cross)):
+        distance: float = cross[index]
+        ratio: float = coefficient / denominator[index]
+        if distance > 1.5:
+            result[index] = max(1 - abs(distance) * coefficient / denominator[index], 0.0) ** 3
+        elif distance == 1.5:
+            result[index] = _footprint(distance, ratio)
+        else:
+            total: float = 0.0
+            for step in range(7):
+                shifted: float = distance + (step - 3) / 8
+                total += (
+                    _footprint(shifted, ratio)
+                    if shifted <= 1.5
+                    else max(1 - abs(shifted) * ratio, 0.0) ** 3
+                )
+            result[index] = total / 7
     return result
 
 
