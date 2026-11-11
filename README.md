@@ -132,6 +132,11 @@ effect.
 | **Detect stars** | Runs detection again with the current settings. If you have edited stars by hand, the app asks first, because detection replaces those edits. |
 | **Show star centers** | Marks each detected star in the preview. |
 
+The app remembers the stars it found, and your edits to them, only while the
+photo is open. Moving sliders never runs detection again. When you close the app
+or open another photo, the stars are found afresh; nothing is saved next to your
+files.
+
 ### Effect tabs
 
 Each effect tab (**Primary** and **Secondary** under **Spikes**, plus **Soft

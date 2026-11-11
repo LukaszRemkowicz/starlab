@@ -1,6 +1,6 @@
 """Coordinate immutable previews, original-pixel analysis and protected image export."""
 
-from collections.abc import Callable, Iterator
+from collections.abc import Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -287,8 +287,6 @@ class ImageServices:
 
     read: ImageReader
     write: ImageWriter
-    load_catalog: Callable[[Path, DetectionSettings], tuple[Star, ...] | None] | None = None
-    save_catalog: Callable[[Path, DetectionSettings, tuple[Star, ...]], None] | None = None
     read_preview: PreviewReader | None = None
     preview: PreviewRenderer | None = None
     sky_mask: SkyMaskProvider | None = None
@@ -317,20 +315,14 @@ class ImageServices:
         settings: DetectionSettings = DetectionSettings(),
         cancel: Event | None = None,
         *,
-        force: bool = False,
         sky_mask: SkyMask | None = None,
     ) -> tuple[Star, ...]:
-        """Reuse an authorized catalogue cache or detect and measure original source pixels."""
+        """Detect and measure sources on the original pixels of the open image."""
         check_cancel(cancel)
         if sky_mask is None and settings.sky_only and self.sky_mask is not None:
             sky_mask = self.sky_mask(frame, source, cancel)
         if settings.sky_only and sky_mask is None:
             raise ValueError("Sky mask is unavailable. Disable Sky only to analyze without it.")
-        if source is not None and self.load_catalog is not None and not force:
-            cached: tuple[Star, ...] | None = self.load_catalog(source, settings)
-            if cached is not None:
-                check_cancel(cancel)
-                return cached
         stars: tuple[Star, ...] = (
             detect_stars(frame, settings, cancel, sky_mask=sky_mask)
             if sky_mask is not None
@@ -338,8 +330,6 @@ class ImageServices:
         )
         stars = calibrate_sources(frame, stars, sky_mask=sky_mask, cancel=cancel)
         check_cancel(cancel)
-        if source is not None and self.save_catalog is not None:
-            self.save_catalog(source, settings, stars)
         return stars
 
     def export(

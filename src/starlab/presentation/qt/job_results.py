@@ -36,7 +36,6 @@ class MaskResult(NamedTuple):
     revision: int
     mask: SkyMask
     settings: DetectionSettings
-    force: bool
     detect: bool
 
 

@@ -88,8 +88,8 @@ class Controller(QObject):
         window.image_view.detail_requested.connect(self.request_detail)
         window.export_requested.connect(self.export_path)
         window.apply_requested.connect(self.refresh)
-        window.analyze_button.clicked.connect(lambda: self.analyze(force=True))
-        window.detection_method.currentIndexChanged.connect(lambda _: self.analyze(force=False))
+        window.analyze_button.clicked.connect(lambda: self.analyze())
+        window.detection_method.currentIndexChanged.connect(lambda _: self.analyze())
         window.cancel_button.clicked.connect(self.cancel)
         window.effect_panel.settings_changed.connect(self.change_settings)
         window.effect_panel.edit_started.connect(self.begin_edit)
@@ -174,7 +174,7 @@ class Controller(QObject):
 
             self.runner.submit("open_preview", read_thumbnail)
 
-    def analyze(self, *, force: bool = True, detect: bool = True) -> None:
+    def analyze(self, *, detect: bool = True) -> None:
         """Confirm replacement of manual edits and prepare masking and star detection."""
         frame: ImageFrame | None = self.session.frame
         if frame is None or self.exclusive:
@@ -202,7 +202,7 @@ class Controller(QObject):
         if settings.sky_only:
             if self.session.sky_mask is not None:
                 if detect:
-                    self._submit_detection(revision, settings, self.session.sky_mask, force)
+                    self._submit_detection(revision, settings, self.session.sky_mask)
                 else:
                     self.refresh()
                 return
@@ -216,16 +216,15 @@ class Controller(QObject):
                     revision,
                     mask_service(frame, source, cancel),
                     settings,
-                    force,
                     detect,
                 ),
             )
             return
         self.mask_preview = None
-        self._submit_detection(revision, settings, None, force)
+        self._submit_detection(revision, settings, None)
 
     def _submit_detection(
-        self, revision: int, settings: DetectionSettings, sky_mask: SkyMask | None, force: bool
+        self, revision: int, settings: DetectionSettings, sky_mask: SkyMask | None
     ) -> None:
         """Submit catalog detection from the captured frame, mask and detector settings."""
         frame, source = self.session.frame, self.source
@@ -235,9 +234,7 @@ class Controller(QObject):
             "analyze",
             lambda cancel: AnalysisResult(
                 revision,
-                self.services.analyze(
-                    frame, source, settings, cancel, force=force, sky_mask=sky_mask
-                ),
+                self.services.analyze(frame, source, settings, cancel, sky_mask=sky_mask),
                 sky_mask,
                 settings,
             ),
@@ -316,7 +313,7 @@ class Controller(QObject):
         if not self.window.image_view.fitted:
             self.request_detail()
         if self.window.auto_detect.isChecked() or self.services.sky_mask is not None:
-            self.analyze(force=False, detect=self.window.auto_detect.isChecked())
+            self.analyze(detect=self.window.auto_detect.isChecked())
         else:
             self.refresh()
 
@@ -355,7 +352,6 @@ class Controller(QObject):
         revision: int,
         mask: SkyMask,
         settings: DetectionSettings,
-        force: bool,
         detect: bool,
     ) -> None:
         """Accept a current mask before starting the optional catalog detection."""
@@ -369,7 +365,7 @@ class Controller(QObject):
         if self.window.mode == "mask":
             self.display()
         if detect:
-            self._submit_detection(revision, settings, mask, force)
+            self._submit_detection(revision, settings, mask)
         else:
             self.mask_preview = None
             self.refresh()
