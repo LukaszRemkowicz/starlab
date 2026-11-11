@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import json
 import logging
 import os
 import tempfile
@@ -11,7 +10,7 @@ import weakref
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
-from typing import TypedDict, cast
+from typing import cast
 
 import cv2
 import numpy as np
@@ -25,15 +24,11 @@ from ..domain.sky_mask import EncodedArray, SkyMask, SkySegmenter, build_sky_mas
 from .tiff_io import _mapped_pixels, _validated_page
 
 MODEL_DIRECTORY = Path(__file__).with_name("models")
+# Inference contract of the packaged sky-mask.onnx; the hash pins these values to that file.
+MODEL_SHA256 = "b39141ebe7339f3aec897c7da058a935032540f80c1da04d7abf7fc1650d606d"
+MODEL_TILE = 256
+MODEL_OVERLAP = 32
 logger = logging.getLogger(__name__)
-
-
-class _ModelMetadata(TypedDict):
-    """Consumed fields of the packaged model's larger provenance record."""
-
-    onnx_sha256: str
-    tile: int
-    overlap: int
 
 
 @dataclass(frozen=True)
@@ -87,14 +82,10 @@ class OnnxSkySegmenter:
     def __init__(self) -> None:
         """Validate the packaged weight hash before opening its network graph."""
         model: Path = MODEL_DIRECTORY / "sky-mask.onnx"
-        model_metadata: _ModelMetadata = cast(
-            _ModelMetadata,
-            json.loads((MODEL_DIRECTORY / "sky-mask.json").read_text(encoding="utf-8")),
-        )
         self.identity = hashlib.sha256(model.read_bytes()).hexdigest()
-        if self.identity != model_metadata["onnx_sha256"]:
+        if self.identity != MODEL_SHA256:
             raise ValueError("Sky model does not match its recorded identity.")
-        self.tile, self.overlap = int(model_metadata["tile"]), int(model_metadata["overlap"])
+        self.tile, self.overlap = MODEL_TILE, MODEL_OVERLAP
         self.network = cv2.dnn.readNetFromONNX(str(model))
 
     def sky_logits(self, image: FloatArray) -> FloatArray:
@@ -127,14 +118,8 @@ class SkyMaskService:
         self.last_frame: weakref.ReferenceType[ImageFrame | _ImageDimensions] | None = None
         self.last_mask: SkyMask | None = None
         recipe: Path = Path(__file__).parents[1] / "domain/sky_mask.py"
-        metadata_bytes: bytes = (MODEL_DIRECTORY / "sky-mask.json").read_bytes()
-        metadata: _ModelMetadata = cast(_ModelMetadata, json.loads(metadata_bytes))
-        self.model_identity: str = cast(
-            str, getattr(segmenter, "identity", metadata["onnx_sha256"])
-        )
-        self.recipe = hashlib.sha256(
-            recipe.read_bytes() + Path(__file__).read_bytes() + metadata_bytes
-        ).hexdigest()
+        self.model_identity: str = cast(str, getattr(segmenter, "identity", MODEL_SHA256))
+        self.recipe = hashlib.sha256(recipe.read_bytes() + Path(__file__).read_bytes()).hexdigest()
 
     def from_source(self, source: Path, cancel: Event | None = None) -> SkyMask:
         """Build a full-coordinate mask directly from an encoded TIFF source."""

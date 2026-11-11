@@ -83,7 +83,6 @@ def engine_signature() -> str:
         directory / "sky_mask.py",
         directory / "photometry.py",
         Path(__file__).with_name("sky_mask.py"),
-        Path(__file__).with_name("models") / "sky-mask.json",
         Path(__file__).with_name("models") / "sky-mask.onnx",
         Path(__file__).with_name("tiff_io.py"),
         *sorted((directory / "detection").glob("*.py")),
