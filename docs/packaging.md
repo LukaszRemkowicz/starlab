@@ -23,14 +23,31 @@ kernels before the user first opens a photo.
 
 ### How the app behaves today
 
-At every launch `bootstrap.start_preparation` starts a background process that
-runs `application.warmup.warm_up`. That function runs the real open, sky-mask,
-detection (both methods), preview and export path on a small synthetic image in
-a temporary folder, so Numba compiles exactly the specializations the app uses.
-If the code is already compiled, the process only loads it and exits. Opening a
-photo and detection wait for that process (`ImageServices.ready`) instead of
-compiling a second time. No photo or star data is written to disk; only Numba's
-compiled-code cache is.
+At every launch `bootstrap.start_preparation` starts a background process
+(`starlab.preparation`). It first compares a stamp file (`prepared-code` in the
+app's data folder) with a signature of this build: a hash of the package sources,
+Python, Numba and CPU type. If they match and Numba's compiled-code cache exists,
+it exits at once (about 0.1 s).
+
+Otherwise it runs `application.warmup.warm_up`. That function writes small
+synthetic star fields to a temporary folder and runs the app's real open,
+thumbnail, sky-mask, detection, preview and export path on them:
+
+- a 512 px image with hundreds of stars, a large saturated star and a border star,
+  saved as 16-bit and 8-bit, compressed and uncompressed, RGB and grayscale;
+- a 1300 × 1100 image, so the tiled detector path is compiled too.
+
+Numba compiles separate machine code for each input layout (bit depth,
+memory-mapped or decoded, single or multiple tiles, at least 256 stars per tile),
+so every one of these is needed. Afterwards it writes the stamp. Measured on an
+Apple-silicon Mac: about 40 s once, then detection on real 8- and 16-bit photos
+takes 0.04-0.7 s.
+
+Opening a photo and detection wait for that process (`ImageServices.ready`), at
+most 120 s, instead of compiling a second time. The process stops when the app
+exits or crashes (it watches its stdin pipe). Its errors go to
+`logs/preparation.log` and a failure is logged in `startup.log`. No photo or star
+data is written to disk; only Numba's compiled code and the stamp are.
 
 ### Option 1 (recommended): compile during installation
 
@@ -38,12 +55,13 @@ The installer copies the files and then, as its last step, runs the same
 warm-up:
 
 ```text
-<installed python> -c "from starlab.application.warmup import warm_up; from starlab.bootstrap import create_services; warm_up(create_services(sky_mask=True))"
+<installed python> -P -c "import sys; from starlab.preparation import main; main(sys.argv[1:])" "<app data folder>/prepared-code"
 ```
 
-The value of `bootstrap.PREPARE` is this exact command string.
+The app itself runs `bootstrap.PREPARE` with the stamp path as its argument;
+an installer should do the same.
 
-- The user only sees the installation take about 20 s longer; the first launch
+- The user only sees the installation take about 40 s longer; the first launch
   is already fast.
 - The code is compiled for the user's own CPU, so it is the fastest and most
   reliable option.

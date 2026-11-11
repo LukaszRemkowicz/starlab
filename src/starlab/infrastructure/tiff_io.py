@@ -340,3 +340,15 @@ def write_tiff(
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def write_samples(path: Path | str, samples: NDArray[np.integer], compress: bool) -> None:
+    """Write already-encoded 8/16-bit samples as an untagged TIFF (used by the warm-up)."""
+    gray: bool = samples.shape[2] == 1
+    tifffile.imwrite(
+        path,
+        samples[..., 0] if gray else samples,
+        photometric="minisblack" if gray else "rgb",
+        compression="zlib" if compress else None,
+        metadata=None,
+    )

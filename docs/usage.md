@@ -46,5 +46,5 @@ It records startup, worker stages, Python exceptions, and normal Qt shutdown.
 The startup log rotates at 2 MiB and retains two backups. Native fault traces
 are written separately to `native-crash.log`, whose open descriptor remains valid
 when the startup log rotates. Tracing is enabled for the session unless another
-fault handler is already active. An unwritable log directory does not prevent startup. Logs contain
+fault handler is already active. Logs are required: if the log folder or a log file cannot be created, the app shows the reason and does not start. Logs contain
 local diagnostic text, not image pixels, and are not uploaded.

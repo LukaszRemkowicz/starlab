@@ -11,9 +11,13 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 
+class DiagnosticsUnavailable(OSError):
+    """The log folder or a log file cannot be created; the app must not start."""
+
+
 @contextmanager
 def application_diagnostics(directory: Path) -> Iterator[logging.Logger]:
-    """Record one desktop session without making an unwritable log directory fatal."""
+    """Record one desktop session; raise DiagnosticsUnavailable if logs cannot be written."""
     logger: logging.Logger = logging.getLogger("starlab")
     previous_level: int = logger.level
     with ExitStack() as resources:
@@ -26,10 +30,8 @@ def application_diagnostics(directory: Path) -> Iterator[logging.Logger]:
             native_trace: TextIOWrapper = resources.enter_context(
                 (directory / "native-crash.log").open("a", encoding="utf-8")
             )
-        except OSError:
-            logger.warning("Application diagnostics are unavailable in %s", directory)
-            yield logger
-            return
+        except OSError as exc:
+            raise DiagnosticsUnavailable(f"Cannot create log files in {directory}: {exc}") from exc
         handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(name)s %(message)s"))
         logger.addHandler(handler)
         logger.setLevel(logging.INFO)
