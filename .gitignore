@@ -13,3 +13,6 @@ dist/
 .idea/
 tools/
 docs/evidence/
+
+# Internal process notes, kept locally only
+superpowers/

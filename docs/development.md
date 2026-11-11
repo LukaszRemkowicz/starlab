@@ -53,7 +53,6 @@ Pylint compares similar text across modules; PyCharm can also identify renamed
 structural copies and same-file duplication. A passing clone scan is one check,
 not proof that every conceivable similar algorithm has been eliminated. Review
 must still distinguish shared business rules from backend-specific data access.
-See [the duplicate cleanup](duplicate-cleanup.md) for the measured scope.
 
 ## Native GPU checks
 
