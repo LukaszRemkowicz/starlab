@@ -5,6 +5,7 @@
 - [Image pipeline](image-pipeline.md): working colors, source measurement, compositing and cancellation.
 - [Packaged assets](assets.md): lookup tables, model weights, metadata, shader files and test fixtures.
 - [Development](development.md): environment setup, checks, fixture layout and current verification limits.
+- [Memory and chunked processing](memory.md): where memory goes and how large photos are processed in bands and tiles.
 - [Packaging and installers](packaging.md): planned Windows/macOS installers and the no-first-run-wait requirement.
 
 - [LUT versus LittleCMS](lut-vs-lcms-comparison.md): exhaustive equivalence, detector timing and memory measurements.

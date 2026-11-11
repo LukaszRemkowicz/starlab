@@ -27,4 +27,4 @@ Source corrections preserve the exact central sample of a centered source model 
 
 Preview coordinates map to original pixels through an explicit origin and integer sampling step. The catalogue remains global when rendering a crop. Original view bypasses source corrections and effects.
 
-Workers check cancellation between bounded batches or image strips. They cannot interrupt an individual native-library call. Export applies source corrections in row strips to avoid allocating an additional full-image correction buffer. Large exports still require memory for the original image, effects and output.
+Workers check cancellation between bounded batches or image strips. They cannot interrupt an individual native-library call. Export renders, composites, corrects, encodes and writes one 256-row band at a time, so only the working image stays full-size in memory; see [Memory and chunked processing](memory.md).
