@@ -81,12 +81,13 @@ class OnnxSkySegmenter:
 
     def __init__(self) -> None:
         """Validate the packaged weight hash before opening its network graph."""
-        model: Path = MODEL_DIRECTORY / "sky-mask.onnx"
-        self.identity = hashlib.sha256(model.read_bytes()).hexdigest()
+        weights: bytes = (MODEL_DIRECTORY / "sky-mask.onnx").read_bytes()
+        self.identity = hashlib.sha256(weights).hexdigest()
         if self.identity != MODEL_SHA256:
             raise ValueError("Sky model does not match its recorded identity.")
         self.tile, self.overlap = MODEL_TILE, MODEL_OVERLAP
-        self.network = cv2.dnn.readNetFromONNX(str(model))
+        # Load the exact bytes that were verified, not the file a second time.
+        self.network = cv2.dnn.readNetFromONNX(np.frombuffer(weights, np.uint8))
 
     def sky_logits(self, image: FloatArray) -> FloatArray:
         """Infer one H×W raw logit plane from a normalized H×W×3 float32 tile."""

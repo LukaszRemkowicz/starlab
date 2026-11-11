@@ -317,3 +317,14 @@ def test_compressed_tiff_decodes_in_memory_without_temp_files(tmp_path, monkeypa
     monkeypatch.setattr(tempfile_module, "NamedTemporaryFile", no_temp_files)
     frame = read_tiff(source)
     assert frame.pixels.shape == (32, 40, 3)
+
+
+def test_preset_rejects_deep_nesting_and_non_files(tmp_path):
+    from starlab.infrastructure.preset_json import load_preset
+
+    nested = tmp_path / "nested.json"
+    nested.write_text("[" * 99_000, encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_preset(nested)
+    with pytest.raises(ValueError):
+        load_preset(tmp_path)

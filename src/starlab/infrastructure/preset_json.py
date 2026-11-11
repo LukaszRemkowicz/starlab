@@ -11,12 +11,16 @@ from ..domain.presets import parse_preset, preset_data
 def load_preset(path: Path | str) -> EffectSettings:
     """Load a size-bounded settings file through the domain schema validator."""
     path = Path(path)
-    if path.stat().st_size > 100_000:
+    if not path.is_file():
+        raise ValueError("Preset must be a regular file.")
+    with path.open("rb") as stream:
+        raw: bytes = stream.read(100_001)  # bounded even if the size changes after a check
+    if len(raw) > 100_000:
         raise ValueError("Preset is too large.")
     try:
-        data: object = json.loads(path.read_text(encoding="utf-8"))
+        data: object = json.loads(raw.decode("utf-8"))
         return parse_preset(data)
-    except (UnicodeError, json.JSONDecodeError) as exc:
+    except (UnicodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError("Preset must be a valid UTF-8 JSON file.") from exc
 
 
