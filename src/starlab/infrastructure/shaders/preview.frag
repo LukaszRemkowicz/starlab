@@ -42,6 +42,30 @@ float transverse(float cross,float a,float footprint) {
     for(int j=-3;j<=3;j++) sum+=fifteen(cross+float(j)/8.0,a);
     return sum/7.0;
 }
+vec3 rainbowTint(vec3 c,float r) {
+    if(rainbow<=0.0) return c;
+    float u=r*scale*125000.0/pow(107.0-frequency,2.0);
+    float theta=radians((floor(u)+36.0*(50.0-phase))*0.1);
+    vec3 modulation=gray!=0 ? vec3(sin(theta)) : vec3(sin(theta),cos(theta),-sin(theta));
+    return c*max(vec3(1.0)+0.017*rainbow*min(u/3000.0,1.0)*modulation,0.0);
+}
+// Ray light at one point, integrated across a square footprint of the given size.
+vec3 rayLight(vec2 point,float footprint) {
+    vec2 delta=point-center;
+    float r=length(delta);
+    bool horizontal=abs(direction.x)>=abs(direction.y);
+    float along=horizontal ? point.x-integerOrigin.x : point.y-integerOrigin.y;
+    bool positive=horizontal ? direction.x>0.0 : direction.y>0.0;
+    float coverage=clamp((positive ? along : -along)/footprint+0.5,0.0,1.0);
+    float dominant=horizontal ? abs(direction.x) : abs(direction.y);
+    float slope=horizontal ? direction.y/direction.x : direction.x/direction.y;
+    float cross=horizontal ? abs(delta.y-delta.x*slope) : abs(delta.x-delta.y*slope);
+    float a=coefficient*dominant/(1.0+r*widening);
+    float width=footprint*(1.0+abs(slope));
+    float value=coverage*(primitive(cross+width/2.0,a)-primitive(cross-width/2.0,a))/width;
+    value*=max(29.0*(pow(1.0+r*scale,-190.0/(rayLength+25.0))-0.000015),0.0);
+    return rainbowTint(light*value,r);
+}
 float radialFlare(float r) {
     if(kind==SOFT) return max(5.7*pow(max(1.0-r/softSize,0.0),softPower)-0.00025,0.0);
     float inner=ringPeak*(1.0-(0.03+0.0097*innerWidth));
@@ -83,6 +107,17 @@ void main() {
         fragColor=vec4(sum/64.0,1.0);
         return;
     }
+    if(kind<SOFT && sampling>1.0) {
+        // Zoomed out: average 4x4 sub-samples, each with its own steep falloff and
+        // highlight limit, like a block of export pixels, instead of one point.
+        vec3 sum=vec3(0);
+        for(int y=0;y<4;y++) for(int x=0;x<4;x++) {
+            vec2 offset=((vec2(x,y)+0.5)/4.0-0.5)*sampling;
+            sum+=fitToWhite(rayLight(world+offset,sampling/4.0));
+        }
+        fragColor=vec4(sum/16.0,1.0);
+        return;
+    }
     float value;
     if(kind<SOFT) {
         bool horizontal=abs(direction.x)>=abs(direction.y);
@@ -104,12 +139,6 @@ void main() {
         value=radialFlare(radius);
     }
     // Per-source light is limited before the renderer blends overlapping quads.
-    vec3 result=light*value;
-    if(kind<SOFT && rainbow>0.0) {
-        float u=radius*scale*125000.0/pow(107.0-frequency,2.0);
-        float theta=radians((floor(u)+36.0*(50.0-phase))*0.1);
-        vec3 modulation=gray!=0 ? vec3(sin(theta)) : vec3(sin(theta),cos(theta),-sin(theta));
-        result*=max(vec3(1.0)+0.017*rainbow*min(u/3000.0,1.0)*modulation,0.0);
-    }
+    vec3 result=kind<SOFT ? rainbowTint(light*value,radius) : light*value;
     fragColor=vec4(fitToWhite(result),1.0);
 }
