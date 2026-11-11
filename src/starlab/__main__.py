@@ -7,23 +7,11 @@ from pathlib import Path
 from PySide6.QtCore import QStandardPaths
 from PySide6.QtWidgets import QApplication
 
-from .bootstrap import create_services, create_window, start_preparation
+from .bootstrap import create_window, start_preparation
 from .infrastructure.desktop_identity import set_process_identity
 from .infrastructure.diagnostics import application_diagnostics
 from .presentation.qt.branding import APPLICATION_ID, configure_application
 from .presentation.qt.main_window import MainWindow
-
-
-def prepare() -> int:
-    """Compile the numerical code once, so the first detection after launch is fast."""
-    from time import perf_counter
-
-    from .application.warmup import warm_up
-
-    started: float = perf_counter()
-    stars: int = warm_up(create_services(sky_mask=True))
-    print(f"Star Effects Lab is ready ({stars} test stars, {perf_counter() - started:.1f} s).")
-    return 0
 
 
 def main() -> int:
@@ -32,12 +20,7 @@ def main() -> int:
         description="Star Effects Lab — standalone TIFF diffraction effects"
     )
     parser.add_argument("image", nargs="?", help="Optional TIFF image to open")
-    parser.add_argument(
-        "--prepare", action="store_true", help="Compile the image code ahead of time and exit"
-    )
     args: argparse.Namespace = parser.parse_args()
-    if args.prepare:
-        return prepare()
     set_process_identity(APPLICATION_ID)
     app: QApplication = QApplication(sys.argv[:1])
     configure_application(app)

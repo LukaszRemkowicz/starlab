@@ -92,14 +92,6 @@ yourself.
    uv sync
    ```
 
-4. **Prepare the app.** This compiles the image code once, which takes about
-   20 seconds. Without this step the app does it in the background the first
-   time you start it:
-
-   ```powershell
-   uv run star-effects-lab --prepare
-   ```
-
 ## Start the app
 
 From the `starlab` folder, run:
@@ -116,9 +108,10 @@ uv run star-effects-lab 'D:\photos\night-sky.tif'
 
 On macOS, a path looks like `~/Pictures/night-sky.tif`.
 
-If you skipped **Prepare the app**, the first start compiles the image code in
-the background. A photo opened during that time waits for it, about 20 seconds
-once. After that, finding stars usually takes about a second.
+The very first start after installing prepares the app's image code in the
+background, which takes about 20 seconds once. The window is usable straight
+away; a photo you open during that time simply waits for it. After that, finding
+stars usually takes about a second.
 
 ## Your first edit in five steps
 
@@ -275,10 +268,10 @@ done in your photo editor:
 **The window is black or the app closes right after starting.**
 Update your graphics card driver. The preview needs OpenGL 3.3.
 
-**Finding stars takes 20 seconds or more.**
-The image code has not been compiled yet. Run `uv run star-effects-lab
---prepare` once; after that, detection usually takes about a second. Large
-panoramas need more time and memory, so close other memory-hungry programs.
+**Finding stars takes about 20 seconds.**
+This happens once, on the first start after installing, while the app prepares
+its image code. Later, detection usually takes about a second. Large panoramas
+need more time and memory, so close other memory-hungry programs.
 
 **A star was missed, or something that is not a star got an effect.**
 Use **Add star** or **Hide / show star**, or change the detection threshold in

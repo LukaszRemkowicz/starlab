@@ -14,9 +14,16 @@ from .infrastructure.tiff_io import read_tiff, read_tiff_preview, write_tiff
 from .presentation.qt.controller import Controller
 from .presentation.qt.main_window import MainWindow
 
+# Runs in the background process every launch: compiles kernels, or loads them if already compiled.
+PREPARE = (
+    "from starlab.application.warmup import warm_up; "
+    "from starlab.bootstrap import create_services; "
+    "warm_up(create_services(sky_mask=True))"
+)
+
 
 def create_services(*, sky_mask: bool) -> ImageServices:
-    """Build the image services shared by the window and the --prepare command."""
+    """Build the image services shared by the window and background preparation."""
     services: ImageServices = ImageServices(read_tiff, write_tiff, read_preview=read_tiff_preview)
     if sky_mask:
         from .infrastructure.sky_mask import SkyMaskService
@@ -62,7 +69,7 @@ def start_preparation() -> tuple[subprocess.Popen[bytes], Callable[[Event | None
     ends (or fails), work continues and compiles anything still missing itself.
     """
     process: subprocess.Popen[bytes] = subprocess.Popen(
-        [sys.executable, "-m", "starlab", "--prepare"],
+        [sys.executable, "-c", PREPARE],
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
