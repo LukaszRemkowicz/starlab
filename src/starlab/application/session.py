@@ -148,6 +148,7 @@ class Session:
         """Move one history snapshot between stacks and invalidate stale worker results."""
         if not source:
             return False
+        self._gesture_start = None  # a pending slider press must not resurrect a pre-undo state
         target.append(self._state())
         state: EditState = source.pop()
         self.settings, self.stars, self.edited = state.settings, state.stars, state.edited

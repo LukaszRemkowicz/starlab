@@ -103,3 +103,19 @@ def test_slider_gesture_records_one_state_and_noop_click_keeps_history():
     assert s.settings == first
     assert s.undo()
     assert s.settings == original
+
+
+def test_undo_after_motionless_slider_press_keeps_history_order():
+    s = session()
+    base = s.settings
+
+    def angle(value):
+        return replace(base, primary=replace(base.primary, angle=value))
+
+    for value in (10, 20, 30):
+        s.set_settings(angle(value))
+    s.begin_edit()  # pressed, never moved
+    assert s.undo()
+    s.set_settings(angle(40))
+    assert s.undo()
+    assert s.settings.primary.angle == 20
