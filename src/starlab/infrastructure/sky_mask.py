@@ -21,7 +21,7 @@ from ..domain.array_types import FloatArray, IntArray
 from ..domain.imaging import ImageFrame, check_cancel, linear_to_srgb
 from ..domain.jit import njit
 from ..domain.sky_mask import EncodedArray, SkyMask, SkySegmenter, build_sky_mask
-from .tiff_io import _mapped_pixels, _validated_page
+from .tiff_io import EncodedRows, _validated_page
 
 MODEL_DIRECTORY = Path(__file__).with_name("models")
 # Inference contract of the packaged sky-mask.onnx; the hash pins these values to that file.
@@ -166,10 +166,10 @@ class SkyMaskService:
         assert self.segmenter is not None
         with tifffile.TiffFile(source) as tiff_file:
             page, _ = _validated_page(tiff_file)
-            raw: EncodedArray = _mapped_pixels(page)
+            reader: EncodedRows = EncodedRows(page)
             return build_sky_mask(
                 shape,
-                lambda top, bottom: raw[top:bottom],
+                reader.rows,
                 self.segmenter,
                 cancel,
                 block_mean=_block_mean,

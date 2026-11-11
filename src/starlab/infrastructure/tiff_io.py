@@ -5,7 +5,8 @@ from __future__ import annotations
 import io
 import os
 import struct
-from collections.abc import Iterable, Iterator
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
 from functools import lru_cache
 from pathlib import Path
 from threading import Event
@@ -201,16 +202,126 @@ def _validated_page(tiff_file: tifffile.TiffFile) -> tuple[tifffile.TiffPage, st
     return page, _check_profile(tag.value if tag else None, page.photometric == 2)
 
 
-def _mapped_pixels(page: tifffile.TiffPage) -> EncodedPixels:
-    """Expose validated unsigned samples as H×W×C, mapping/decoding only as needed."""
-    # Uncompressed contiguous TIFFs map the source file directly. Everything else decodes
-    # in RAM: tifffile's "memmap" fallback would write the photo to a temporary file.
-    data: EncodedPixels = page.asarray(out="memmap" if page.is_memmappable else None)
-    if page.planarconfig == 2 and data.ndim == 3:
-        data = np.moveaxis(data, 0, -1)
-    if data.ndim == 2:
-        data = data[..., None]
-    return data
+class EncodedRows:
+    """Read encoded unsigned samples as H×W×C rows without holding a decoded file.
+
+    Uncompressed contiguous pages are memory-mapped. Every other page decodes, per
+    request, only the strips or tiles that intersect the requested rows (in parallel,
+    never writing to disk) and keeps just the last partially used strip row, so
+    sequential bands decode each segment once. A band is released after use. A
+    TIFF stored as ONE compressed strip (or planar with one strip per plane) must
+    be decoded whole to read any row, so it needs about one decoded image of RAM.
+    """
+
+    def __init__(self, page: TiffPage) -> None:
+        """Describe the segment grid of a validated page."""
+        self.page = page
+        self.height, self.width = page.imagelength, page.imagewidth
+        self.channels: int = page.samplesperpixel
+        self.dtype = cast(
+            np.dtype[np.uint8] | np.dtype[np.uint16], np.dtype(page.dtype).newbyteorder("=")
+        )
+        self.mapped: EncodedPixels | None = None
+        if page.is_memmappable:
+            # Mapping the source never writes: tifffile's "memmap" fallback for other pages would.
+            mapped: EncodedPixels = page.asarray(out="memmap")
+            if page.planarconfig == 2 and mapped.ndim == 3:
+                mapped = np.moveaxis(mapped, 0, -1)
+            self.mapped = mapped.reshape(self.height, self.width, self.channels)
+        self.planar: bool = page.planarconfig == 2 and self.channels > 1
+        # Segment height/width: tile, or strip rows (clipped, a lone strip is rowsperstrip=2**32-1).
+        self.seg_rows: int = page.tile[0] if page.tile else min(page.rowsperstrip, self.height)
+        self.seg_cols: int = page.tile[1] if page.tile else self.width
+        self.grid_rows: int = -(-self.height // self.seg_rows)
+        self.grid_cols: int = -(-self.width // self.seg_cols)
+        self.kept: tuple[int, EncodedPixels] | None = None  # (strip-row index, its decoded rows)
+
+    def _place(
+        self, out: EncodedPixels, top: int, row0: int, col0: int, plane: int, data: EncodedPixels
+    ) -> None:
+        """Copy the part of one decoded segment that falls inside the output rows."""
+        lo, hi = max(top, row0), min(top + out.shape[0], row0 + data.shape[1], self.height)
+        width: int = min(data.shape[2], self.width - col0)
+        if lo < hi:
+            part: EncodedPixels = data[0, lo - row0 : hi - row0, :width]
+            if self.planar:
+                out[lo - top : hi - top, col0 : col0 + width, plane] = part[..., 0]
+            else:
+                out[lo - top : hi - top, col0 : col0 + width] = part
+
+    def _decode(self, indices: list[int]) -> Iterator[tuple[int, EncodedPixels | None]]:
+        """Decode the given segments a few at a time, yielding each with its index."""
+        page, handle = self.page, self.page.parent.filehandle
+        workers: int = max(1, page.maxworkers)
+        args: dict[str, object] = {"_fullsize": page.is_tiled}
+        if page.compression in {6, 7, 34892, 33007}:  # JPEG
+            args["jpegtables"] = page.jpegtables
+            args["jpegheader"] = page.jpegheader
+
+        def decode(item: tuple[bytes | None, int]) -> tuple[int, EncodedPixels | None]:
+            result = page.decode(*item, **args)
+            return item[1], result[0]
+
+        with ThreadPoolExecutor(workers) as pool:
+            for start in range(0, len(indices), 2 * workers):
+                items: list[tuple[bytes | None, int]] = []
+                with handle.lock:
+                    for index in indices[start : start + 2 * workers]:
+                        count: int = page.databytecounts[index]
+                        handle.seek(page.dataoffsets[index])
+                        items.append((handle.read(count) if count else None, index))
+                yield from pool.map(decode, items)
+
+    def rows(self, top: int, bottom: int, step: int = 1) -> EncodedPixels:
+        """Return rows [top, bottom); with step>1 only rows top, top+step, ... are filled."""
+        if self.mapped is not None:
+            return np.asarray(self.mapped[top:bottom], dtype=self.dtype)
+        out: EncodedPixels = np.zeros((bottom - top, self.width, self.channels), self.dtype)
+        kept, self.kept = self.kept, None
+        last: int = (bottom - 1) // self.seg_rows
+        partial: bool = (last + 1) * self.seg_rows > bottom
+        wanted: list[int] = []
+        for band in range(top // self.seg_rows, last + 1):
+            lo, hi = band * self.seg_rows, (band + 1) * self.seg_rows
+            if -(-(lo - top) // step) * step + top >= hi:
+                continue  # no sampled row inside this strip row
+            if kept is not None and kept[0] == band:
+                start, stop = max(top, lo), min(bottom, hi)
+                out[start - top : stop - top] = kept[1][start - lo : stop - lo]
+                self.kept = kept if band == last and partial else None
+                continue
+            for plane in range(self.channels if self.planar else 1):
+                first: int = (plane * self.grid_rows + band) * self.grid_cols
+                wanted += range(first, first + self.grid_cols)
+        retained: EncodedPixels | None = None
+        for index, data in self._decode(wanted):
+            if data is None:
+                continue
+            plane, rest = divmod(index, self.grid_rows * self.grid_cols)
+            band, col = divmod(rest, self.grid_cols)
+            self._place(out, top, band * self.seg_rows, col * self.seg_cols, plane, data)
+            if band == last and partial:
+                retained = self._extend(retained, plane, col, data)
+        if retained is not None:
+            self.kept = (last, retained)
+        return out
+
+    def _extend(
+        self, band: EncodedPixels | None, plane: int, col: int, data: EncodedPixels
+    ) -> EncodedPixels:
+        """Add a decoded segment to the retained strip row (a plain view if it spans the row)."""
+        if band is None and not self.planar and self.grid_cols == 1:
+            return np.asarray(data[0, :, : self.width], dtype=self.dtype)
+        if band is None:
+            band = np.zeros((data.shape[1], self.width, self.channels), self.dtype)
+        left: int = col * self.seg_cols
+        width: int = min(data.shape[2], self.width - left)
+        rows: int = min(data.shape[1], band.shape[0])
+        if self.planar:
+            band[:rows, left : left + width, plane] = data[0, :rows, :width, 0]
+        else:
+            band[:rows, left : left + width] = data[0, :rows, :width]
+        return band
 
 
 @lru_cache(maxsize=4)
@@ -237,17 +348,21 @@ def _transfer_integer_block(source: EncodedPixels, table: Pixels, destination: P
 
 
 def _convert_integer_image(
-    data: EncodedPixels, path: Path, note: str, cancel: Event | None
+    read_rows: Callable[[int, int], EncodedPixels],
+    shape: tuple[int, int, int],
+    maximum: int,
+    path: Path,
+    note: str,
+    cancel: Event | None,
+    block: int = ROWS_PER_BLOCK,
 ) -> ImageFrame:
-    """Convert validated samples in cancellable strips, then transfer buffer ownership."""
-    normalized: FloatArray = np.empty(data.shape, np.float32)
-    table: FloatArray = _integer_transfer(np.iinfo(data.dtype).max)
-    for row in range(0, data.shape[0], ROWS_PER_BLOCK):
+    """Convert encoded row bands in cancellable strips, then transfer buffer ownership."""
+    normalized: FloatArray = np.empty(shape, np.float32)
+    table: FloatArray = _integer_transfer(maximum)
+    for row in range(0, shape[0], block):
         check_cancel(cancel)
-        source: EncodedPixels = np.asarray(
-            data[row : row + ROWS_PER_BLOCK], dtype=data.dtype.newbyteorder("=")
-        )
-        _transfer_integer_block(source, table, normalized[row : row + ROWS_PER_BLOCK])
+        source: EncodedPixels = read_rows(row, min(row + block, shape[0]))
+        _transfer_integer_block(source, table, normalized[row : row + block])
     check_cancel(cancel)
     return ImageFrame._from_owned_validated(
         normalized,
@@ -263,8 +378,16 @@ def read_tiff(path: Path | str, cancel: Event | None = None) -> ImageFrame:
     path = Path(path)
     with tifffile.TiffFile(path) as tiff_file:
         page, note = _validated_page(tiff_file)
-        data: EncodedPixels = _mapped_pixels(page)
-        return _convert_integer_image(data, path, note, cancel)
+        reader: EncodedRows = EncodedRows(page)
+        shape: tuple[int, int, int] = (reader.height, reader.width, reader.channels)
+        return _convert_integer_image(
+            reader.rows, shape, int(np.iinfo(reader.dtype).max), path, note, cancel
+        )
+
+
+def _slice_rows(array: EncodedPixels) -> Callable[[int, int], EncodedPixels]:
+    """Serve row bands of an in-memory array through the reader interface."""
+    return lambda top, bottom: array[top:bottom]
 
 
 def read_tiff_preview(
@@ -272,9 +395,10 @@ def read_tiff_preview(
 ) -> tuple[ImageFrame, float, int, int]:
     """Return a quick strided preview, scale, original width and original height.
 
-    Compatible uncompressed files are sampled directly from their map before
-    float conversion. Compressed TIFFs are decoded in memory first.
-    This is an opening preview, not an antialiased export or detection input.
+    Rows are read band by band (see EncodedRows): uncompressed files are sampled
+    from their map; compressed ones decode only strips/tiles holding a sampled row
+    and keep none of them. This is an opening preview, not an antialiased export
+    or detection input.
     """
     check_cancel(cancel)
     if max_edge < 2:
@@ -284,11 +408,34 @@ def read_tiff_preview(
         page, note = _validated_page(tiff_file)
         width, height = page.imagewidth, page.imagelength
         stride: int = max(1, (max(width, height) + max_edge - 1) // max_edge)
-        data: EncodedPixels = _mapped_pixels(page)[::stride, ::stride]
+        reader: EncodedRows = EncodedRows(page)
+        shape: tuple[int, int, int] = (-(-height // stride), -(-width // stride), reader.channels)
+
+        def sampled(top: int, bottom: int) -> EncodedPixels:
+            """Return strided output rows [top, bottom) of the preview grid."""
+            rows: EncodedPixels = reader.rows(
+                top * stride, min((bottom - 1) * stride + 1, height), stride
+            )
+            return rows[::stride, ::stride]
+
+        block: int = max(1, ROWS_PER_BLOCK // stride)
         # Keep ImageFrame's 2×2 minimum for exceptionally thin panoramas.
-        if min(data.shape[:2]) < 2:
-            data = cast(EncodedPixels, np.repeat(data, 2, axis=0 if data.shape[0] == 1 else 1))
-        return _convert_integer_image(data, path, note, cancel), 1 / stride, width, height
+        if min(shape[:2]) < 2:
+            thin: EncodedPixels = cast(
+                EncodedPixels,
+                np.concatenate(
+                    [sampled(row, min(row + block, shape[0])) for row in range(0, shape[0], block)]
+                ),
+            )
+            thin = cast(EncodedPixels, np.repeat(thin, 2, axis=0 if thin.shape[0] == 1 else 1))
+            shape = (thin.shape[0], thin.shape[1], shape[2])
+            read_rows = _slice_rows(thin)
+        else:
+            read_rows = sampled
+        frame: ImageFrame = _convert_integer_image(
+            read_rows, shape, int(np.iinfo(reader.dtype).max), path, note, cancel, block
+        )
+        return frame, 1 / stride, width, height
 
 
 def _encoded_rows(
