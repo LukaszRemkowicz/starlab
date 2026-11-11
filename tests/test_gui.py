@@ -361,6 +361,8 @@ def test_footer_shows_opened_path_elided_with_full_tooltip(qtbot, tmp_path):
     assert label.full_text() == label.toolTip() == str(source)
     label.setFixedWidth(60)
     qtbot.waitUntil(lambda: "…" in label.text())
-    assert label.text().startswith(str(source)[:2]) and label.text().endswith(source.name[-2:])
+    # Middle elision keeps both ends; how many characters fit depends on the platform font.
+    head, tail = label.text().split("…")
+    assert str(source).startswith(head) and str(source).endswith(tail) and head and tail
     window.set_loaded(False)
     assert label.full_text() == "" and label.text() == ""
