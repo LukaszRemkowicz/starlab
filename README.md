@@ -32,8 +32,8 @@ The app is free for everyone under the [MIT License](LICENSE).
   and add a second, finer set of spikes if you want one.
 - **Soft glow and halo rings.** Add the look of a softening filter or a lens
   ring around bright stars.
-- **Soft filter.** Small stars get slightly smaller and big stars slightly
-  larger, much like a diffusion filter on the lens.
+- **Soft filter.** Small stars get smaller and big stars larger, clearly
+  visible at high values, much like a diffusion filter on the lens.
 - **Color.** Keep each star's natural color, change the hue and saturation, or
   add a rainbow tint to the spikes.
 - **Live preview.** See every change straight away, compare it with the
@@ -181,7 +181,7 @@ to see the main sliders only. Switching between the two keeps your values.
 | **Number of points** | How many spikes each star gets (Primary only). |
 | **Spike sharpness**, **Spike spread** | How thin and how fanned out the spikes are. |
 | **Size** | How large the glow or ring is. |
-| **Soft filter** | Shrinks small stars and enlarges big ones (Soft Flare tab). At 0 the stars stay as they are. |
+| **Soft filter** | Shrinks small stars and enlarges big ones, noticeably at high values (Soft Flare tab). At 0 the stars stay as they are. |
 | **Edge falloff**, **Inner/Outer edge width and falloff** | How softly the glow or ring fades at its edges. |
 | **Color saturation**, **Color hue** | Change the effect's color. At saturation 0 each effect keeps its star's natural color. |
 | **Rainbow intensity**, **frequency**, **phase** | Add a rainbow tint along the spikes and control how it repeats. |

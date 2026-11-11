@@ -60,21 +60,21 @@ def test_source_corrections_match_closed_form_pixels_and_maximum_overlap():
     )
     # Sigma=1, distance=1 and strength=50%; the plane leaves RGB residuals
     # (0.2, 0.4, 0.6) to the right and (0.17, 0.37, 0.57) below the source.
-    # Closed-form values below were calculated at 50-digit precision.
+    # Closed-form values below follow the soft-filter formulas (the larger of the two overlaps).
     np.testing.assert_allclose(
         reduction[[7, 8], [8, 7]],
         [
-            [0.01709891454088309, 0.03419782908176618, 0.05129674362264927],
-            [0.014534077359750627, 0.03163299190063372, 0.04873190644151681],
+            [0.05357532700859688, 0.10715065401719376, 0.1607259810257906],
+            [0.04553902795730735, 0.09911435496590422, 0.15268968197450108],
         ],
         atol=1e-8,
         rtol=0,
     )
     np.testing.assert_allclose(
         enlargement[7, 8],
-        [0.018356733057493357, 0.036713466114986715, 0.05507019917248007],
+        [0.028614602435737352, 0.057229204871474704, 0.08584380730721206],
         atol=1e-8,
         rtol=0,
     )
     assert not reduction[7, 7].any() and not enlargement[7, 7].any()
-    assert not reduction[7, 10].any() and not enlargement[7, 13].any()
+    assert not reduction[7, 10].any()

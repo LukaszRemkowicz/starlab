@@ -94,10 +94,10 @@ def _raster_reduction(
                 if squared_sigma_distance >= 9:
                     continue
                 fraction: float = (
-                    0.55
+                    0.9
                     * amount
-                    * (1 - 2 * weight)
-                    * (1 - math.exp(-squared_sigma_distance / 2))
+                    * math.sqrt(1 - 2 * weight)
+                    * (1 - math.exp(-squared_sigma_distance * 1.4))
                     * (1 - squared_sigma_distance / 9) ** 2
                 )
                 for channel in range(pixels.shape[2]):
@@ -180,7 +180,9 @@ def _raster_enlargement(
         y: np.float64
         x, y, weight, width = row[:4]
         sigma: float = width / 2.354820045
-        cutoff: float = 6 * sigma
+        spread: float = 1.5 + 2.5 * (2 * weight - 1)  # bigger stars get a wider halo
+        cutoff: float = 3 * spread * sigma
+        limit: float = 9 * spread * spread
         left, top, right, bottom = _source_bounds(
             x, y, cutoff, origin_x, origin_y, sampling, output.shape[1], output.shape[0]
         )
@@ -191,13 +193,16 @@ def _raster_enlargement(
                 squared_sigma_distance: float = (delta_x * delta_x + delta_y * delta_y) / (
                     sigma * sigma
                 )
-                if squared_sigma_distance >= 36:
+                if squared_sigma_distance >= limit:
                     continue
                 wings: float = (
-                    math.exp(-squared_sigma_distance / 4.5) - math.exp(-squared_sigma_distance / 2)
-                ) * (1 - squared_sigma_distance / 36) ** 2
+                    math.exp(-squared_sigma_distance / (2 * spread * spread))
+                    - math.exp(-squared_sigma_distance / 2)
+                ) * (1 - squared_sigma_distance / limit) ** 2
                 for channel in range(output.shape[2]):
-                    light: float = amount * (2 * weight - 1) * row[4 + channel] * wings
+                    light: float = (
+                        0.8 * amount * math.sqrt(2 * weight - 1) * row[4 + channel] * wings
+                    )
                     output[pixel_y, pixel_x, channel] = max(
                         output[pixel_y, pixel_x, channel], light
                     )

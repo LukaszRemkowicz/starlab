@@ -64,7 +64,7 @@ void main() {
         world=horizontal ? vec2(major,minor) : vec2(minor,major);
     } else {
         float extent=cutoff;
-        if(kind>=SOURCE_SHRINK) { center=position; extent=(kind==SOURCE_SHRINK ? 3.0 : 6.0)*profileWidth/2.354820045; }
+        if(kind>=SOURCE_SHRINK) { center=position; extent=(kind==SOURCE_SHRINK ? 3.0 : 3.0*(1.5+2.5*(2.0*sizeWeight-1.0)))*profileWidth/2.354820045; }
         world=center+vec2(corner.x*2.0-1.0,corner.y)*(extent+sampling);
     }
     // Half-pixel offset maps image centers to OpenGL fragment centers.

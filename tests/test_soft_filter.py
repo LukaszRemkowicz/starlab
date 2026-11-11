@@ -82,7 +82,7 @@ def test_reduction_narrows_small_source_at_fixed_half_height_without_raising_pea
         return np.interp(profile[0] / 2, profile[::-1], x[::-1])
 
     before, after = half_width(frame.pixels), half_width(reduced)
-    assert 0.85 * before < after < before
+    assert 0.4 * before < after < 0.8 * before  # clearly narrower, not erased
     assert reduced[48, 40, 2] == frame.pixels[48, 40, 2]
 
 
@@ -151,7 +151,7 @@ def test_large_source_expansion_preserves_center_color_and_masks_foreground():
     large = star_enlargement(frame.pixels, records, 100)
     assert not large[48, 115].any()
     np.testing.assert_allclose(large[48, 122] / large[48, 122, 2], [1 / 3, 2 / 3, 1], atol=1e-6)
-    assert not large[:, :80].any()
+    assert not large[:, :60].any()  # halo reaches at most 12 sigma = 48 px
     np.testing.assert_array_equal(
         star_enlargement(frame.pixels, np.concatenate([records, records]), 100), large
     )
