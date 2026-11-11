@@ -48,11 +48,10 @@ You need:
   but has not been checked.
 - **A graphics card that supports OpenGL 3.3.** Almost any graphics card from
   the last ten years does.
-- **Enough memory for your photo.** The app keeps the whole photo in memory.
-  Measured on a 48-megapixel photo, it needs about 2.5 GB at its peak, or about
-  4 GB if the TIFF is compressed (LZW/ZIP). That is roughly 50-85 bytes per
-  pixel, so a 200-megapixel panorama needs 10-17 GB. Very large panoramas may
-  not fit on a computer with 16 GB of RAM.
+- **Enough memory for your photo.** The app keeps one working copy of the photo
+  in memory and processes the rest in pieces. Measured on a 48-megapixel photo,
+  it needs about 2 GB at its peak, compressed or not. That is roughly 40-45
+  bytes per pixel, so a 200-megapixel panorama needs about 8-9 GB.
 - **An internet connection** for the first install.
 
 ## Install
