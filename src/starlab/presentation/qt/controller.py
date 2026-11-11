@@ -308,6 +308,7 @@ class Controller(QObject):
         self.window.image_view.stars = ()
         self._show_frame_info(frame)
         self.window.set_loaded(True)
+        self.window.path_label.set_full_text(str(path))
         self.window.status_text.setText(frame.note)
         self.display()
         if not self.window.image_view.fitted:
