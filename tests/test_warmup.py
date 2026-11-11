@@ -1,5 +1,8 @@
+import sys
 import tempfile
 from pathlib import Path
+
+import pytest
 
 from starlab.application.warmup import _synthetic_sky, warm_up
 from starlab.bootstrap import create_services
@@ -13,7 +16,7 @@ def test_warm_up_runs_the_production_path_and_leaves_no_files():
     assert set(Path(tempfile.gettempdir()).glob("star-effects-lab-*")) == before
 
 
-def test_open_and_detection_wait_for_background_compilation(tmp_path):
+def test_detection_but_not_opening_waits_for_background_compilation(tmp_path):
     services = create_services(sky_mask=False)
     calls = []
     services.ready = calls.append
@@ -21,8 +24,9 @@ def test_open_and_detection_wait_for_background_compilation(tmp_path):
     frame = _synthetic_sky(64, 64, 20)
     services.write(source, frame, frame.pixels)
     frame, _ = services.open_image(source)
+    assert calls == []
     services.analyze(frame, source)
-    assert calls == [None, None]
+    assert calls == [None]
 
 
 def test_preparation_runs_once_per_program_build(tmp_path, monkeypatch):
@@ -53,6 +57,7 @@ def test_background_preparation_process_succeeds(tmp_path, caplog):
     assert "Background preparation" not in caplog.text
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows watches the parent PID instead")
 def test_background_preparation_stops_when_the_app_goes_away(tmp_path, monkeypatch):
     from starlab.bootstrap import start_preparation
 
@@ -74,8 +79,6 @@ def test_failed_background_preparation_is_logged(tmp_path, monkeypatch, caplog):
 
 
 def test_unwritable_preparation_log_raises(tmp_path):
-    import pytest
-
     from starlab.bootstrap import start_preparation
 
     blocked = tmp_path / "file"
