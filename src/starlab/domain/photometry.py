@@ -387,6 +387,27 @@ def _source_aperture(
 
 
 @njit(cache=True)
+def _owned(
+    pixel_x: int,
+    pixel_y: int,
+    distance: float,
+    positions: DoubleArray,
+    neighbours: IntArray,
+    index: int,
+) -> bool:
+    """Assign a pixel to its nearest source; ties go to the lower index to avoid double counts."""
+    for other in neighbours[index]:
+        if other < len(positions) and other != index:
+            neighbour_x: np.float64
+            neighbour_y: np.float64
+            neighbour_x, neighbour_y = positions[other]
+            other_distance: float = (pixel_x - neighbour_x) ** 2 + (pixel_y - neighbour_y) ** 2
+            if other_distance < distance or (other_distance == distance and other < index):
+                return False
+    return True
+
+
+@njit(cache=True)
 def _integrate_owned_aperture(
     pixels: FloatArray,
     classes: ByteArray,
@@ -400,42 +421,40 @@ def _integrate_owned_aperture(
     neighbours: IntArray,
     index: int,
 ) -> tuple[float, DoubleArray]:
-    """Sum signed source flux only over finite pixels owned by this aperture."""
+    """Sum signed source flux only over finite pixels owned by this aperture.
+
+    Aperture pixels outside the image are replaced by their point reflection through the
+    source center, assuming a symmetric PSF, so border sources are not under-measured.
+    """
     background_level, gradient_x, gradient_y = background
+    height, width = pixels.shape[0], pixels.shape[1]
     flux: float = 0.0
     rgb: DoubleArray = np.zeros(3)
-    for pixel_y in range(
-        max(0, math.ceil(y - radius)), min(pixels.shape[0], math.floor(y + radius) + 1)
-    ):
-        for pixel_x in range(
-            max(0, math.ceil(x - radius)), min(pixels.shape[1], math.floor(x + radius) + 1)
-        ):
-            delta_x: float
-            delta_y: float
-            delta_x, delta_y = pixel_x - x, pixel_y - y
-            distance: float = delta_x * delta_x + delta_y * delta_y
+    for pixel_y in range(math.ceil(y - radius), math.floor(y + radius) + 1):
+        for pixel_x in range(math.ceil(x - radius), math.floor(x + radius) + 1):
+            distance: float = (pixel_x - x) ** 2 + (pixel_y - y) ** 2
             if distance > radius * radius:
                 continue
-            owned: bool = True
-            for other in neighbours[index]:
-                if other < len(positions) and other != index:
-                    neighbour_x: np.float64
-                    neighbour_y: np.float64
-                    neighbour_x, neighbour_y = positions[other]
-                    if (pixel_x - neighbour_x) ** 2 + (pixel_y - neighbour_y) ** 2 < distance:
-                        owned = False
-                        break
-            if owned:
-                value: float = _sample_luminance(pixels, classes, cell_size, pixel_x, pixel_y)
-                if math.isfinite(value):
-                    flux += value - background_level - gradient_x * delta_x - gradient_y * delta_y
-                    for channel in range(3):
-                        rgb[channel] += (
-                            pixels[pixel_y, pixel_x, 0 if pixels.shape[2] == 1 else channel]
-                            - planes[channel, 0]
-                            - planes[channel, 1] * delta_x
-                            - planes[channel, 2] * delta_y
-                        )
+            if not _owned(pixel_x, pixel_y, distance, positions, neighbours, index):
+                continue
+            sample_x: int = pixel_x
+            sample_y: int = pixel_y
+            if not (0 <= pixel_x < width and 0 <= pixel_y < height):
+                sample_x, sample_y = round(2 * x - pixel_x), round(2 * y - pixel_y)
+                if not (0 <= sample_x < width and 0 <= sample_y < height):
+                    continue
+            delta_x: float = sample_x - x
+            delta_y: float = sample_y - y
+            value: float = _sample_luminance(pixels, classes, cell_size, sample_x, sample_y)
+            if math.isfinite(value):
+                flux += value - background_level - gradient_x * delta_x - gradient_y * delta_y
+                for channel in range(3):
+                    rgb[channel] += (
+                        pixels[sample_y, sample_x, 0 if pixels.shape[2] == 1 else channel]
+                        - planes[channel, 0]
+                        - planes[channel, 1] * delta_x
+                        - planes[channel, 2] * delta_y
+                    )
     return flux, rgb
 
 

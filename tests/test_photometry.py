@@ -146,3 +146,25 @@ def test_application_analysis_applies_photometry(monkeypatch):
     monkeypatch.setattr(use_cases, "detect_stars", lambda *args, **kwargs: stars)
     result = use_cases.ImageServices(None, None).analyze(frame, None)
     assert result[0].brightness == pytest.approx(result[1].brightness, rel=0.04)
+
+
+@pytest.mark.parametrize("x", [1.3, 3.3])
+def test_border_source_flux_matches_interior_source(x):
+    from starlab.domain.photometry import measure_source_signals
+
+    yy, xx = np.mgrid[:144, :96]
+    sigma, y = 2.0, 70.7
+    pixels = 0.02 + 5 * np.exp(-((xx - x) ** 2 + (yy - y) ** 2) / (2 * sigma**2)) / (
+        2 * np.pi * sigma**2
+    )
+    frame = ImageFrame(np.repeat(pixels[..., None], 3, axis=2).astype(np.float32))
+    star = Star(1, x, y, 0.2, (0.2,) * 3, 1)
+    np.testing.assert_allclose(measure_source_signals(frame, (star,)), 5, rtol=0.05)
+
+
+def test_coincident_sources_split_flux_instead_of_counting_it_twice():
+    from starlab.domain.photometry import measure_source_signals
+
+    frame, stars = field((2,))
+    twin = replace(stars[0], id=2)
+    assert measure_source_signals(frame, (stars[0], twin)).sum() == pytest.approx(5, rel=0.05)
