@@ -155,3 +155,61 @@ def test_mask_builder_rejects_nonfinite_model_logits():
 
     with pytest.raises(ValueError, match="invalid logits"):
         build_sky_mask((8, 8), lambda top, bottom: np.zeros((bottom - top, 8, 3)), Network())
+
+
+def _whole_image_reference(reduced, segmenter):
+    """Original whole-image algorithm: normalize, pad, accumulate full-size logits, classify."""
+    from starlab.domain.sky_mask import _classify_logits
+
+    normalized = np.empty_like(reduced, dtype=np.float16)
+    for channel in range(3):
+        sample = reduced[::4, ::4, channel]
+        median = float(np.median(sample))
+        high = float(np.percentile(sample, 99.5))
+        normalized[..., channel] = np.clip(
+            (reduced[..., channel] - median) / max(high - median, 1e-6), -1, 8
+        )
+    height, width = normalized.shape[:2]
+    tile, overlap = segmenter.tile, segmenter.overlap
+    padded_height, padded_width = max(height, tile), max(width, tile)
+    normalized = np.pad(
+        normalized, ((0, padded_height - height), (0, padded_width - width), (0, 0)), mode="edge"
+    )
+    total = np.zeros((padded_height, padded_width), np.float32)
+    count = np.zeros_like(total)
+    stride = tile - overlap
+    for top in sorted({*range(0, padded_height - tile, stride), padded_height - tile}):
+        for left in sorted({*range(0, padded_width - tile, stride), padded_width - tile}):
+            part = normalized[top : top + tile, left : left + tile].astype(np.float32)
+            total[top : top + tile, left : left + tile] += segmenter.sky_logits(part)
+            count[top : top + tile, left : left + tile] += 1
+    return _classify_logits((total / count)[:height, :width])
+
+
+@pytest.mark.parametrize("shape", [(1000, 1500), (700, 400), (300, 2100), (520, 1100), (100, 60)])
+@pytest.mark.parametrize("batch_size", [1, 3, 8])
+def test_streamed_build_matches_whole_image_reference(shape, batch_size):
+    rng = np.random.default_rng(7)
+    image = rng.integers(0, 65536, (*shape, 3), dtype=np.uint16)
+
+    class Network:
+        tile = 64
+        overlap = 16
+
+        def sky_logits(self, tile):
+            return (tile[..., 0] * 2.0 - tile[..., 1] + 0.5 * tile[..., 2] - 0.2).astype(np.float32)
+
+        def sky_logits_batch(self, tiles):
+            return np.stack([self.sky_logits(tile) for tile in tiles])
+
+    network = Network()
+    network.batch_size = batch_size
+    mask = build_sky_mask(shape, lambda top, bottom: image[top:bottom], network)
+    reduced = (
+        image[: shape[0] // 2 * 2, : shape[1] // 2 * 2]
+        .reshape(shape[0] // 2, 2, shape[1] // 2, 2, 3)
+        .mean(axis=(1, 3), dtype=np.float32)
+    )
+    expected = _whole_image_reference(reduced, network)
+    np.testing.assert_array_equal(mask.classes[: expected.shape[0], : expected.shape[1]], expected)
+    assert {*np.unique(expected)} > {FOREGROUND, SKY}
