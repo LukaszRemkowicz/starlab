@@ -543,24 +543,24 @@ class GpuPreviewRenderer:
         """Release GL objects on their worker thread; repeated close calls are safe."""
         if self.context is None:
             return
-        if not self.context.makeCurrent(self.surface):
-            self.context = None
-            return
-        self.target = None
-        if self.source_texture is not None:
-            self.source_texture.destroy()
-            self.source_texture = None
-        for buffer in self.buffers.values():
-            buffer.destroy()
+        # Without a current context GL objects die with the context; CPU-side state must still go.
+        current: bool = self.context.makeCurrent(self.surface)
+        if current:
+            if self.source_texture is not None:
+                self.source_texture.destroy()
+            for buffer in self.buffers.values():
+                buffer.destroy()
+            if self.vao is not None:
+                self._vertex_array.destroy()
+            if self.program is not None:
+                self._shader.removeAllShaders()
+        self.target = self.source_texture = None
         self.buffers.clear()
         self.buffer_keys.clear()
         self.group_cache.clear()
         self.reduction_cache = None
         self.catalog = self.catalog_mask = self.texture_key = None
-        if self.vao is not None:
-            self._vertex_array.destroy()
-        if self.program is not None:
-            self._shader.removeAllShaders()
         self.program = self.vao = self.gl = None
-        self.context.doneCurrent()
+        if current:
+            self.context.doneCurrent()
         self.context = None
