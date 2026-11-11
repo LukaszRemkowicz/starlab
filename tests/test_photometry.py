@@ -168,3 +168,36 @@ def test_coincident_sources_split_flux_instead_of_counting_it_twice():
     frame, stars = field((2,))
     twin = replace(stars[0], id=2)
     assert measure_source_signals(frame, (stars[0], twin)).sum() == pytest.approx(5, rel=0.05)
+
+
+def test_corner_source_flux_matches_interior_source():
+    from starlab.domain.photometry import measure_source_signals
+
+    yy, xx = np.mgrid[:96, :96]
+    sigma = 2.0
+    pixels = 0.02 + 5 * np.exp(-(xx**2 + yy**2) / (2 * sigma**2)) / (2 * np.pi * sigma**2)
+    frame = ImageFrame(np.repeat(pixels[..., None], 3, axis=2).astype(np.float32))
+    star = Star(1, 0.0, 0.0, 0.2, (0.2,) * 3, 1)
+    np.testing.assert_allclose(measure_source_signals(frame, (star,)), 5, rtol=0.05)
+
+
+def test_identical_close_sources_get_identical_flux():
+    from starlab.domain.photometry import measure_source_signals
+
+    yy, xx = np.mgrid[:96, :160]
+    pixels = np.full(xx.shape, 0.02)
+    stars = []
+    for index, x in enumerate((77.0, 83.0)):
+        pixels += 5 * np.exp(-((xx - x) ** 2 + (yy - 48.0) ** 2) / 8) / (8 * np.pi)
+        stars.append(Star(index + 1, x, 48.0, 0.2, (0.2,) * 3, 1))
+    frame = ImageFrame(np.repeat(pixels[..., None], 3, axis=2).astype(np.float32))
+    first, second = measure_source_signals(frame, tuple(stars))
+    assert first == pytest.approx(second, rel=0.01)
+
+
+def test_coincident_sources_share_flux_equally():
+    from starlab.domain.photometry import measure_source_signals
+
+    frame, stars = field((2,))
+    measured = measure_source_signals(frame, (stars[0], replace(stars[0], id=2)))
+    np.testing.assert_allclose(measured, 2.5, rtol=0.05)
