@@ -65,13 +65,15 @@ class _ElidedLabel(QLabel):
         """Start empty, shrinkable to nothing and capped in width."""
         super().__init__()
         self._full: str = ""
-        self.setMaximumWidth(420)
+        self.setMaximumWidth(600)
+        self.hide()
         self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
 
     def set_full_text(self, text: str) -> None:
         """Remember the full path (also as tooltip) and show its elided form."""
         self._full = text
         self.setToolTip(text)
+        self.setVisible(bool(text))  # no empty padded box on the canvas
         self._elide()
         self.updateGeometry()
 
@@ -82,7 +84,9 @@ class _ElidedLabel(QLabel):
     def sizeHint(self) -> QSize:
         """Ask for the full text width; the layout may give less."""
         hint: QSize = super().sizeHint()
-        hint.setWidth(QFontMetrics(self.font()).horizontalAdvance(self._full) + 2)
+        self.ensurePolished()  # stylesheet padding must be applied before measuring it
+        padding: int = self.width() - self.contentsRect().width()
+        hint.setWidth(QFontMetrics(self.font()).horizontalAdvance(self._full) + padding + 6)
         return hint
 
     def minimumSizeHint(self) -> QSize:
@@ -98,7 +102,7 @@ class _ElidedLabel(QLabel):
         """Show the text elided in the middle for the current width."""
         self.setText(
             QFontMetrics(self.font()).elidedText(
-                self._full, Qt.TextElideMode.ElideMiddle, max(self.width(), 0)
+                self._full, Qt.TextElideMode.ElideMiddle, max(self.contentsRect().width(), 0)
             )
         )
 
@@ -219,6 +223,13 @@ class MainWindow(QMainWindow):
         self.image_info.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         canvas_layout.addWidget(
             self.image_info, 0, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft
+        )
+        # Opened file path, on the same strip as the size, at the right edge.
+        self.path_label = _ElidedLabel()
+        self.path_label.setObjectName("imageInfo")
+        self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        canvas_layout.addWidget(
+            self.path_label, 0, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight
         )
         return self.canvas
 
@@ -497,10 +508,6 @@ class MainWindow(QMainWindow):
         self.export_button.setObjectName("accent")
         self.export_button.clicked.connect(self.choose_export)
         box.addWidget(self.export_button)
-        self.path_label = _ElidedLabel()
-        self.path_label.setObjectName("muted")
-        self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
-        box.addWidget(self.path_label)
         return footer
 
     def _activity_feedback(self) -> QVBoxLayout:
