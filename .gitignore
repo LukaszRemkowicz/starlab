@@ -16,3 +16,4 @@ docs/evidence/
 
 # Internal process notes, kept locally only
 superpowers/
+.numba-cache/
