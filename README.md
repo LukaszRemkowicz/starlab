@@ -256,8 +256,9 @@ such as EXIF is not copied into the export.
 | Works | Does not work yet |
 | --- | --- |
 | TIFF (`.tif`, `.tiff`), 8 or 16 bits per channel | JPEG, PNG, RAW, FITS; 12-bit or 32-bit TIFF |
-| Uncompressed or compressed (LZW, ZIP) | Images with transparency (alpha), CMYK, palette images |
-| RGB color with an sRGB profile or no profile | Other profiles, such as Adobe RGB or ProPhoto |
+| Uncompressed or compressed (LZW, ZIP) | CMYK, palette images |
+| RGB color with an sRGB profile, no profile, or a matrix/curve profile such as Adobe RGB, Display P3 or ProPhoto (converted to sRGB on open) | RGB profiles built on lookup tables |
+| RGB or grayscale with an extra alpha channel (ignored) | |
 | Grayscale with no profile | Grayscale with an embedded profile (such as Gray Gamma 2.2) |
 | Single-page TIFF | Multi-page TIFF, HDR images |
 
@@ -267,11 +268,11 @@ the way most editors save them.
 If the app rejects your file, its message tells you why. The usual fixes, all
 done in your photo editor:
 
-- **Wrong color profile:** convert a color image to sRGB. Removing the profile
-  is not the same as converting it. For grayscale, convert to sRGB grayscale or
+- **Unsupported color profile:** convert a color image to sRGB. Removing the
+  profile is not the same as converting it. Common wide-gamut profiles are
+  converted for you on open; colors outside sRGB are clipped. For grayscale, convert to sRGB grayscale or
   save without a profile.
 - **Rotated image:** save the image with its rotation applied.
-- **Transparency:** flatten the image before saving.
 
 ## Tips
 

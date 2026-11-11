@@ -7,6 +7,7 @@ import os
 import struct
 from collections.abc import Callable, Iterable, Iterator
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from threading import Event
@@ -143,13 +144,127 @@ def _matches_srgb(
     )
 
 
-def _check_profile(profile: bytes | None, rgb: bool) -> str:
-    """Validate color interpretation and return the import note or raise ValueError."""
+def _s15(data: bytes, count: int, offset: int = 0) -> DoubleArray:
+    """Read `count` big-endian s15Fixed16 numbers."""
+    if len(data) < offset + 4 * count:
+        raise ValueError("Truncated ICC number array.")
+    return np.frombuffer(data, dtype=">i4", count=count, offset=offset).astype(np.float64) / 65536
+
+
+_PARAMETRIC_COUNTS = {0: 1, 1: 3, 2: 4, 3: 5, 4: 7}
+
+
+def _evaluate_curve(tag: bytes, x: DoubleArray) -> DoubleArray:
+    """Evaluate an ICC 'curv' or 'para' tone curve at x in [0, 1], clipped to [0, 1].
+
+    https://www.color.org/icc34.pdf, clauses 10.5 and 10.15.
+    """
+    if len(tag) < 12 or tag[4:8] != bytes(4):
+        raise ValueError("Malformed ICC curve.")
+    if tag[:4] == b"curv":
+        count: int = struct.unpack_from(">I", tag, 8)[0]
+        if len(tag) < 12 + 2 * count:
+            raise ValueError("Malformed ICC curve.")
+        if count == 0:
+            return x.copy()
+        values: DoubleArray = np.frombuffer(tag, dtype=">u2", count=count, offset=12)
+        if count == 1:
+            return np.clip(x ** (float(values[0]) / 256), 0, 1)
+        return np.interp(x, np.linspace(0, 1, count), values.astype(np.float64) / 65535)
+    if tag[:4] != b"para":
+        raise ValueError("Unsupported ICC curve type.")
+    return _parametric_curve(tag, x)
+
+
+def _parametric_curve(tag: bytes, x: DoubleArray) -> DoubleArray:
+    """Evaluate an ICC 'para' function type 0-4."""
+    function: int = struct.unpack_from(">H", tag, 8)[0]
+    if function not in _PARAMETRIC_COUNTS or struct.unpack_from(">H", tag, 10)[0]:
+        raise ValueError("Unsupported ICC parametric curve.")
+    g, *rest = _s15(tag, _PARAMETRIC_COUNTS[function], 12)
+    a, b, c, d, e, f = [*rest, 0, 0, 0, 0, 0, 0][:6]
+    if function == 0:
+        y: DoubleArray = x**g
+    else:
+        if a == 0 and function < 3:
+            raise ValueError("Malformed ICC parametric curve.")
+        base: DoubleArray = np.maximum(a * x + b, 0) ** g
+        if function == 1:
+            y = np.where(x >= -b / a, base, 0)
+        elif function == 2:
+            y = np.where(x >= -b / a, base + c, c)
+        elif function == 3:
+            y = np.where(x >= d, base, c * x)
+        else:
+            y = np.where(x >= d, base + e, c * x + f)
+    return np.clip(np.nan_to_num(y), 0, 1)
+
+
+@dataclass(frozen=True)
+class IccConversion:
+    """Matrix/TRC RGB profile to linear sRGB: relative colorimetric, no black compensation."""
+
+    name: str
+    curves: tuple[bytes, bytes, bytes]
+    matrix: tuple[tuple[float, ...], ...]
+
+    def tables(self, maximum: int) -> FloatArray:
+        """Return per-channel code-to-linear tables, one row per channel."""
+        codes: DoubleArray = np.arange(maximum + 1, dtype=np.float64) / maximum
+        return np.stack([_evaluate_curve(curve, codes) for curve in self.curves]).astype(np.float32)
+
+    def encode_means(self, means: FloatArray, maximum: int) -> FloatArray:
+        """Map reduced encoded means (code scale) to sRGB-encoded values on the same scale."""
+        tables: FloatArray = self.tables(maximum)
+        codes: DoubleArray = np.arange(maximum + 1, dtype=np.float64)
+        linear: DoubleArray = np.stack(
+            [np.interp(means[..., c], codes, tables[c]) for c in range(3)], axis=-1
+        )
+        converted: DoubleArray = np.clip(linear @ np.array(self.matrix).T, 0, 1)
+        return linear_to_srgb(converted.astype(np.float32)) * maximum
+
+
+def _matrix_conversion(
+    name: str, characteristics: ProfileCharacteristics, reference: ProfileCharacteristics
+) -> IccConversion:
+    """Describe a pure matrix/TRC RGB profile as a conversion to sRGB, or raise ValueError."""
+    header, tags = characteristics
+    required: set[bytes] = {b"rXYZ", b"gXYZ", b"bXYZ", b"rTRC", b"gTRC", b"bTRC", b"wtpt"}
+    if (
+        header[4:8] not in (b"mntr", b"scnr", b"spac")
+        or header[8:16] != b"RGB XYZ "
+        or not required <= tags.keys()
+        or tags.keys() - required - {b"chad", b"chrm", b"bkpt"}
+    ):
+        raise ValueError("Not a matrix/TRC RGB profile.")
+
+    def colorants(profile_tags: dict[bytes, bytes]) -> DoubleArray:
+        columns: list[DoubleArray] = []
+        for signature in (b"rXYZ", b"gXYZ", b"bXYZ"):
+            tag: bytes = profile_tags[signature]
+            if len(tag) < 20 or tag[:8] != b"XYZ \0\0\0\0":
+                raise ValueError("Malformed ICC colorant.")
+            columns.append(_s15(tag, 3, 8))
+        return np.stack(columns, axis=1)
+
+    source, target = colorants(tags), colorants(reference[1])
+    if abs(np.linalg.det(source)) < 1e-6:
+        raise ValueError("Singular ICC colorant matrix.")
+    matrix: DoubleArray = np.linalg.solve(target, source)
+    curves: tuple[bytes, bytes, bytes] = (tags[b"rTRC"], tags[b"gTRC"], tags[b"bTRC"])
+    for curve in curves:
+        _evaluate_curve(curve, np.zeros(1))  # reject malformed curves now, not during decode
+    return IccConversion(name, curves, tuple(tuple(float(v) for v in row) for row in matrix))
+
+
+def _check_profile(profile: bytes | None, rgb: bool) -> tuple[str, IccConversion | None]:
+    """Validate color interpretation; return the import note and any needed conversion."""
     if not profile:
         return (
             "Untagged image: sRGB assumed."
             if rgb
-            else "Untagged grayscale: sRGB tone curve assumed."
+            else "Untagged grayscale: sRGB tone curve assumed.",
+            None,
         )
     try:
         parsed: ImageCmsProfile = ImageCms.ImageCmsProfile(io.BytesIO(profile))
@@ -161,21 +276,36 @@ def _check_profile(profile: bytes | None, rgb: bool) -> str:
     reference_characteristics: tuple[bytes, dict[bytes, bytes]] = _profile_characteristics(
         reference
     )
-    if not rgb or not _matches_srgb(characteristics, reference_characteristics):
-        raise ValueError(
-            f"Profile '{name}' is not supported by this prototype's strict ICC check. "
-            "Convert to sRGB in your editor, then export an untagged RGB TIFF. "
-            "Removing a profile alone does not convert colors."
+    if rgb and _matches_srgb(characteristics, reference_characteristics):
+        suffix: str = (
+            " (validated sRGB matrix/TRC variant)"
+            if characteristics != reference_characteristics
+            else ""
         )
-    suffix: str = (
-        " (validated sRGB matrix/TRC variant)"
-        if characteristics != reference_characteristics
-        else ""
+        return f"Embedded sRGB profile: {name}{suffix}", None
+    if rgb:
+        try:
+            conversion: IccConversion = _matrix_conversion(
+                name, characteristics, reference_characteristics
+            )
+        except ValueError:
+            pass  # LUT, unknown-tag or malformed profiles fall through to the strict rejection
+        else:
+            return (
+                f"Converted from '{name}' to sRGB (relative colorimetric); "
+                "colors outside sRGB were clipped.",
+                conversion,
+            )
+    raise ValueError(
+        f"Profile '{name}' is not supported by this prototype's strict ICC check. "
+        "Convert to sRGB in your editor, then export an untagged RGB TIFF. "
+        "Removing a profile alone does not convert colors."
     )
-    return f"Embedded sRGB profile: {name}{suffix}"
 
 
-def _validated_page(tiff_file: tifffile.TiffFile) -> tuple[tifffile.TiffPage, str]:
+def _validated_page(
+    tiff_file: tifffile.TiffFile,
+) -> tuple[tifffile.TiffPage, str, IccConversion | None]:
     """Accept one supported page and describe its validated color interpretation."""
     if len(tiff_file.pages) != 1:
         raise ValueError("Use a single-page, flattened TIFF (no image stacks).")
@@ -204,14 +334,13 @@ def _validated_page(tiff_file: tifffile.TiffFile) -> tuple[tifffile.TiffPage, st
     if min(page.imagelength, page.imagewidth) < 2:
         raise ValueError("Expected an image of at least 2 × 2 pixels.")
     tag: TiffTag | None = page.tags.get(34675)
-    note: str = _check_profile(tag.value if tag else None, page.photometric == 2)
+    note, conversion = _check_profile(tag.value if tag else None, page.photometric == 2)
     if 1 in extras:  # Premultiplied color is the image composited over black: a valid flattening.
-        return (
-            page,
-            note
-            + " Alpha channel ignored (premultiplied: transparent areas appear black); export has no alpha.",
-        )
-    return page, note + (" Alpha channel ignored; export has no alpha." if extras else "")
+        note += " Alpha channel ignored (premultiplied: transparent areas appear black);"
+        note += " export has no alpha."
+    elif extras:
+        note += " Alpha channel ignored; export has no alpha."
+    return page, note, conversion
 
 
 class EncodedRows:
@@ -378,6 +507,21 @@ def _transfer_integer_block(source: EncodedPixels, table: Pixels, destination: P
                 destination[y, x, channel] = table[source[y, x, channel]]
 
 
+@njit(cache=True, nogil=True)
+def _convert_icc_block(
+    source: EncodedPixels, tables: Pixels, matrix: Pixels, destination: Pixels
+) -> None:
+    """Decode each channel's TRC, apply the 3x3 matrix to linear sRGB and clip to [0, 1]."""
+    for y in range(source.shape[0]):
+        for x in range(source.shape[1]):
+            r = tables[0, source[y, x, 0]]
+            g = tables[1, source[y, x, 1]]
+            b = tables[2, source[y, x, 2]]
+            for channel in range(3):
+                value = matrix[channel, 0] * r + matrix[channel, 1] * g + matrix[channel, 2] * b
+                destination[y, x, channel] = min(1.0, max(0.0, value))
+
+
 def _convert_integer_image(
     read_rows: Callable[[int, int], EncodedPixels],
     shape: tuple[int, int, int],
@@ -386,14 +530,20 @@ def _convert_integer_image(
     note: str,
     cancel: Event | None,
     block: int = ROWS_PER_BLOCK,
+    conversion: IccConversion | None = None,
 ) -> ImageFrame:
     """Convert encoded row bands in cancellable strips, then transfer buffer ownership."""
     normalized: FloatArray = np.empty(shape, np.float32)
     table: FloatArray = _integer_transfer(maximum)
+    tables: FloatArray | None = conversion.tables(maximum) if conversion else None
+    matrix: FloatArray | None = np.array(conversion.matrix, np.float32) if conversion else None
     for row in range(0, shape[0], block):
         check_cancel(cancel)
         source: EncodedPixels = read_rows(row, min(row + block, shape[0]))
-        _transfer_integer_block(source, table, normalized[row : row + block])
+        if tables is not None and matrix is not None:
+            _convert_icc_block(source, tables, matrix, normalized[row : row + block])
+        else:
+            _transfer_integer_block(source, table, normalized[row : row + block])
     check_cancel(cancel)
     return ImageFrame._from_owned_validated(
         normalized,
@@ -408,11 +558,17 @@ def read_tiff(path: Path | str, cancel: Event | None = None) -> ImageFrame:
     check_cancel(cancel)
     path = Path(path)
     with tifffile.TiffFile(path) as tiff_file:
-        page, note = _validated_page(tiff_file)
+        page, note, conversion = _validated_page(tiff_file)
         with EncodedRows(page) as reader:
             shape: tuple[int, int, int] = (reader.height, reader.width, reader.channels)
             return _convert_integer_image(
-                reader.rows, shape, int(np.iinfo(reader.dtype).max), path, note, cancel
+                reader.rows,
+                shape,
+                int(np.iinfo(reader.dtype).max),
+                path,
+                note,
+                cancel,
+                conversion=conversion,
             )
 
 
@@ -436,7 +592,7 @@ def read_tiff_preview(
         raise ValueError("Preview edge must be at least two pixels.")
     path = Path(path)
     with tifffile.TiffFile(path) as tiff_file:
-        page, note = _validated_page(tiff_file)
+        page, note, conversion = _validated_page(tiff_file)
         width, height = page.imagewidth, page.imagelength
         stride: int = max(1, (max(width, height) + max_edge - 1) // max_edge)
         with EncodedRows(page) as reader:
@@ -471,7 +627,14 @@ def read_tiff_preview(
             else:
                 read_rows = sampled
             frame: ImageFrame = _convert_integer_image(
-                read_rows, shape, int(np.iinfo(reader.dtype).max), path, note, cancel, block
+                read_rows,
+                shape,
+                int(np.iinfo(reader.dtype).max),
+                path,
+                note,
+                cancel,
+                block,
+                conversion,
             )
             return frame, 1 / stride, width, height
 

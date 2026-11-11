@@ -118,8 +118,11 @@ def test_srgb_description_does_not_hide_changed_colorimetry(tmp_path, change):
     assert "srgb" in ImageCms.getProfileName(ImageCms.ImageCmsProfile(io.BytesIO(profile))).lower()
     path = tmp_path / "changed-srgb.tif"
     _write_rgb16(path, profile)
-    with pytest.raises(ValueError, match="not supported"):
-        read_tiff(path)
+    if change == "lut":
+        with pytest.raises(ValueError, match="not supported"):
+            read_tiff(path)
+    else:  # a changed matrix/TRC profile is converted by its own colorimetry, never trusted as sRGB
+        assert read_tiff(path).note.startswith("Converted from")
 
 
 def test_nonzero_black_point_tag_is_ignored(tmp_path):

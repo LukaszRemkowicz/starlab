@@ -2,7 +2,7 @@
 
 ## Input and color
 
-Input validation rejects unsupported page count, channel layout, sample format, orientation and color profiles. Accepted image samples become immutable float32 linear-sRGB working pixels. The original file and its numerical samples remain the source of truth.
+Input validation rejects unsupported page count, channel layout, sample format, orientation and color profiles. Accepted image samples become immutable float32 linear-sRGB working pixels. RGB images with a matrix/TRC profile other than sRGB (for example Adobe RGB, Display P3 or ProPhoto) are converted on open: each channel's tone curve is decoded, a 3x3 matrix maps the profile's colorants to sRGB primaries (relative colorimetric, no black point compensation, as LittleCMS does for matrix/shaper profiles), and results outside sRGB are clipped to [0, 1]. Profiles with lookup tables or unknown tags are rejected. The sky mask and thumbnail see the same converted colors. The original file and its numerical samples remain the source of truth.
 
 The detector uses quantized analysis proxies. Global normalization prevents each tile from independently ranking or rescaling its sky region. Approximate seed selection accelerates candidate qualification; it is not an exhaustive evaluation of every source configuration. The optional multiscale detector estimates local background and tests compact structure at several scales.
 
