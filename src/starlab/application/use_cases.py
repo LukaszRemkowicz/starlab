@@ -18,7 +18,7 @@ from ..domain.effects.soft_filter import (
     star_enlargement,
     star_reduction,
 )
-from ..domain.imaging import ImageFrame, Pixels, check_cancel
+from ..domain.imaging import ImageFrame, Pixels, check_cancel, preview_region_bounds
 from ..domain.photometry import calibrate_sources
 from ..domain.sky_mask import SkyMask
 from ..domain.stars import DetectionSettings, Star, detect_stars, filter_stars
@@ -99,23 +99,6 @@ class _RegionView:
         return int(self.pixels.shape[0])
 
 
-def _preview_region_bounds(
-    frame: ImageFrame, region: tuple[int, int, int, int], sampling: int
-) -> tuple[int, int, int, int]:
-    """Clip a requested ROI and require two sampled pixels along each image axis."""
-    left, top, right, bottom = region
-    left, top = max(0, int(left)), max(0, int(top))
-    right, bottom = min(frame.width, int(right)), min(frame.height, int(bottom))
-    if (
-        type(sampling) is not int
-        or sampling < 1
-        or (right - left + sampling - 1) // sampling < 2
-        or (bottom - top + sampling - 1) // sampling < 2
-    ):
-        raise ValueError("Preview region must contain at least two sampled pixels on each axis.")
-    return left, top, right, bottom
-
-
 def _region_sources(
     stars: tuple[Star, ...],
     settings: EffectSettings,
@@ -172,7 +155,7 @@ def _render_region(
 ) -> Preview:
     """Render a source-aligned crop while retaining full-image effect scaling."""
     check_cancel(cancel)
-    left, top, right, bottom = _preview_region_bounds(frame, region, sampling)
+    left, top, right, bottom = preview_region_bounds(frame, region, sampling)
     diagonal: int = image_diagonal(frame.width, frame.height)
     translated: tuple[Star, ...] = _region_sources(
         stars, settings, (left, top, right, bottom), diagonal

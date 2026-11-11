@@ -36,7 +36,7 @@ from ..domain.effects.profiles import (
     sine,
 )
 from ..domain.effects.settings import KINDS, EffectKind, EffectParameters, EffectSettings
-from ..domain.imaging import ImageFrame, Pixels, check_cancel
+from ..domain.imaging import ImageFrame, Pixels, check_cancel, preview_region_bounds
 from ..domain.sky_mask import SkyMask
 from ..domain.stars import Star
 
@@ -59,7 +59,7 @@ def _view_region(
 ) -> tuple[Bounds, int, bool]:
     """Choose integer sampling with at least two samples per full-image axis."""
     if region is not None:
-        return region, sampling, True
+        return preview_region_bounds(frame, region, sampling), sampling, True
     stride: int = (
         1
         if full_resolution
@@ -236,10 +236,12 @@ class GpuPreviewRenderer:
             self.target = None
             framebuffer_format: QOpenGLFramebufferObjectFormat = QOpenGLFramebufferObjectFormat()
             framebuffer_format.setInternalTextureFormat(0x8814)
-            self.target = QOpenGLFramebufferObject(width, height, framebuffer_format)
-            if not self.target.isValid():
+            target = QOpenGLFramebufferObject(width, height, framebuffer_format)
+            if not target.isValid():  # never keep a failed buffer for the next call
                 raise RuntimeError("Cannot allocate the preview framebuffer.")
-        self.target.bind()
+            self.target = target
+        if not self.target.bind():
+            raise RuntimeError("Cannot bind the preview framebuffer.")
         self._gpu.glViewport(0, 0, width, height)
         self._gpu.glDisable(0x0B71)
         self._gpu.glEnable(0x0BE2)

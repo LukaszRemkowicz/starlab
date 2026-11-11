@@ -146,7 +146,9 @@ def _check_profile(profile: bytes | None, rgb: bool) -> str:
     """Validate color interpretation and return the import note or raise ValueError."""
     if not profile:
         return (
-            "Untagged image: sRGB assumed." if rgb else "Untagged grayscale: sRGB tone curve assumed."
+            "Untagged image: sRGB assumed."
+            if rgb
+            else "Untagged grayscale: sRGB tone curve assumed."
         )
     try:
         parsed: ImageCmsProfile = ImageCms.ImageCmsProfile(io.BytesIO(profile))
