@@ -303,6 +303,21 @@ def _check_profile(profile: bytes | None, rgb: bool) -> tuple[str, IccConversion
     )
 
 
+def _alpha_note(page: TiffPage, extras: tuple[int, ...]) -> str:
+    """Describe ignored extra samples; premultiplied alpha is restored only when interleaved."""
+    if 1 in extras:
+        if page.planarconfig == 2:
+            raise ValueError(
+                "Premultiplied alpha is supported only in interleaved TIFFs; "
+                "flatten or export without alpha."
+            )
+        return (
+            " Alpha channel ignored (premultiplied colors restored;"
+            " fully transparent areas are black); export has no alpha."
+        )
+    return " Alpha channel ignored; export has no alpha." if extras else ""
+
+
 def _validated_page(
     tiff_file: tifffile.TiffFile,
 ) -> tuple[tifffile.TiffPage, str, IccConversion | None]:
@@ -335,12 +350,7 @@ def _validated_page(
         raise ValueError("Expected an image of at least 2 × 2 pixels.")
     tag: TiffTag | None = page.tags.get(34675)
     note, conversion = _check_profile(tag.value if tag else None, page.photometric == 2)
-    if 1 in extras:  # Premultiplied color is the image composited over black: a valid flattening.
-        note += " Alpha channel ignored (premultiplied: transparent areas appear black);"
-        note += " export has no alpha."
-    elif extras:
-        note += " Alpha channel ignored; export has no alpha."
-    return page, note, conversion
+    return page, note + _alpha_note(page, extras), conversion
 
 
 class EncodedRows:
@@ -360,6 +370,9 @@ class EncodedRows:
         self.height, self.width = page.imagelength, page.imagewidth
         self.samples: int = page.samplesperpixel  # stored per pixel, including ignored extras
         self.channels: int = 3 if page.photometric == 2 else 1  # color channels returned
+        extras: list[int] = [int(extra) for extra in page.extrasamples]
+        # Index of a premultiplied alpha sample (ExtraSamples 1), whose color is restored on read.
+        self.alpha: int | None = self.channels + extras.index(1) if 1 in extras else None
         self.dtype = cast(
             np.dtype[np.uint8] | np.dtype[np.uint16], np.dtype(page.dtype).newbyteorder("=")
         )
@@ -394,6 +407,22 @@ class EncodedRows:
         pool, self.pool = self.pool, None
         if pool is not None:
             pool.shutdown()
+
+    def _color(self, samples: EncodedPixels) -> EncodedPixels:
+        """Return the color channels, undoing premultiplied alpha (rounded, as Registar does)."""
+        colors: EncodedPixels = np.asarray(samples[..., : self.channels], dtype=self.dtype)
+        if self.alpha is None:
+            return colors
+        maximum: int = int(np.iinfo(self.dtype).max)
+        alpha: NDArray[np.uint32] = samples[..., self.alpha].astype(np.uint32)
+        if alpha.size == 0 or int(alpha.min()) == maximum:
+            return colors  # fully opaque band: stored color is already the true color
+        # stored * maximum <= 65535**2 fits uint32; alpha 0 has no color left, so it becomes black.
+        restored: NDArray[np.uint32] = (
+            colors.astype(np.uint32) * maximum + (alpha // 2)[..., None]
+        ) // np.maximum(alpha, 1)[..., None]
+        restored[alpha == 0] = 0
+        return cast(EncodedPixels, np.minimum(restored, maximum).astype(self.dtype))
 
     def _place(
         self, out: EncodedPixels, top: int, row0: int, col0: int, plane: int, data: EncodedPixels
@@ -435,7 +464,7 @@ class EncodedRows:
     def rows(self, top: int, bottom: int, step: int = 1) -> EncodedPixels:
         """Return rows top, top+step, ... below `bottom`; only those are read or decoded."""
         if self.mapped is not None:
-            return np.asarray(self.mapped[top:bottom:step, :, : self.channels], dtype=self.dtype)
+            return self._color(self.mapped[top:bottom:step])
         out: EncodedPixels = np.zeros((bottom - top, self.width, self.stored), self.dtype)
         kept, self.kept = self.kept, None
         last: int = (bottom - 1) // self.seg_rows
@@ -464,7 +493,7 @@ class EncodedRows:
                 retained = self._extend(retained, plane, col, data)
         if retained is not None:
             self.kept = (last, retained)
-        return out[::step, :, : self.channels]
+        return self._color(out[::step])
 
     def _extend(
         self, band: EncodedPixels | None, plane: int, col: int, data: EncodedPixels

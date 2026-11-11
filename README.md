@@ -258,7 +258,7 @@ such as EXIF is not copied into the export.
 | TIFF (`.tif`, `.tiff`), 8 or 16 bits per channel | JPEG, PNG, RAW, FITS; 12-bit or 32-bit TIFF |
 | Uncompressed or compressed (LZW, ZIP) | CMYK, palette images |
 | RGB color with an sRGB profile, no profile, or a matrix/curve profile such as Adobe RGB, Display P3 or ProPhoto (converted to sRGB on open) | RGB profiles built on lookup tables |
-| RGB or grayscale with an extra alpha channel (ignored) | |
+| RGB or grayscale with an extra alpha channel (ignored; premultiplied colors are restored, fully transparent areas become black) | Premultiplied alpha in planar TIFFs |
 | Grayscale with no profile | Grayscale with an embedded profile (such as Gray Gamma 2.2) |
 | Single-page TIFF | Multi-page TIFF, HDR images |
 

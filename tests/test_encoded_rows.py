@@ -201,10 +201,76 @@ def test_unassociated_alpha_is_ignored(tmp_path, name, colors):
             assert np.array_equal(reader.rows(top, bottom, step), data[top:bottom:step, :, :colors])
 
 
-def test_associated_alpha_is_read_as_stored_color(tmp_path):
-    data = np.random.default_rng(4).integers(0, 65535, (4, 4, 4), dtype=np.uint16)
-    path = tmp_path / "premultiplied.tif"
-    tifffile.imwrite(path, data, photometric="rgb", extrasamples=["assocalpha"], metadata=None)
+ORDER_NAMES = {"<": "little", ">": "big"}
+
+
+@pytest.mark.parametrize("byteorder", ["<", ">"])
+def test_associated_alpha_restores_true_color_across_strips(tmp_path, byteorder):
+    """Registar's case: premultiplied storage, rowsperstrip=2 so bands cross strips."""
+    rgb = np.broadcast_to((6000, 12000, 18000), (5, 7, 3)).astype(np.uint16)
+    alpha = np.resize(np.array([0, 21845, 43690, 65535], np.uint16), (5, 7))
+    stored = ((rgb.astype(np.uint32) * alpha[:, :, None] + 32767) // 65535).astype(np.uint16)
+    expected = rgb.copy()
+    expected[alpha == 0] = 0
+    path = tmp_path / f"assoc-{ORDER_NAMES[byteorder]}.tif"
+    tifffile.imwrite(
+        path,
+        np.dstack((stored, alpha)).astype(np.dtype(f"{byteorder}u2")),
+        byteorder=byteorder,
+        photometric="rgb",
+        extrasamples=["assocalpha"],
+        rowsperstrip=2,
+        metadata=None,
+    )
+    with tifffile.TiffFile(path) as tiff_file, EncodedRows(tiff_file.pages[0]) as reader:
+        for top, bottom, step in [(0, 5, 1), (1, 4, 1), (0, 5, 3), (3, 5, 1)]:
+            got = reader.rows(top, bottom, step)
+            assert got.dtype == np.uint16 and got.dtype.isnative
+            assert np.array_equal(got, expected[top:bottom:step])
     frame = read_tiff(path)
-    assert np.array_equal(frame.pixels, _linear(data[..., :3]))
-    assert "premultiplied: transparent areas appear black" in frame.note
+    assert "premultiplied colors restored" in frame.note
+    assert np.array_equal(frame.pixels, _linear(expected))
+
+
+@pytest.mark.parametrize("compression", [None, "zlib"])
+def test_opaque_associated_alpha_keeps_stored_color(tmp_path, compression):
+    data = np.random.default_rng(8).integers(0, 65535, (9, 8, 4), dtype=np.uint16)
+    data[..., 3] = 65535
+    path = tmp_path / "opaque.tif"
+    tifffile.imwrite(
+        path,
+        data,
+        photometric="rgb",
+        extrasamples=["assocalpha"],
+        compression=compression,
+        rowsperstrip=2,
+        metadata=None,
+    )
+    with tifffile.TiffFile(path) as tiff_file, EncodedRows(tiff_file.pages[0]) as reader:
+        assert np.array_equal(reader.rows(0, 9), data[..., :3])
+
+
+def test_associated_alpha_gray_and_8bit_clamp(tmp_path):
+    data = np.array([[[200, 100], [10, 0]], [[255, 255], [50, 25]]], np.uint8)  # gray, alpha
+    path = tmp_path / "gray.tif"
+    tifffile.imwrite(
+        path, data, photometric="minisblack", extrasamples=["assocalpha"], metadata=None
+    )
+    with tifffile.TiffFile(path) as tiff_file, EncodedRows(tiff_file.pages[0]) as reader:
+        got = reader.rows(0, 2)
+    # 200 stored at alpha 100 would exceed the range: clamped to 255; alpha 0 gives black.
+    assert got[..., 0].tolist() == [[255, 0], [255, 255]]
+
+
+def test_planar_associated_alpha_is_rejected(tmp_path):
+    path = tmp_path / "planar.tif"
+    tifffile.imwrite(
+        path,
+        np.zeros((4, 4, 4), np.uint16),
+        photometric="rgb",
+        planarconfig="separate",
+        extrasamples=["assocalpha"],
+        metadata=None,
+    )
+    with pytest.raises(ValueError, match="interleaved"):
+        read_tiff(path)
