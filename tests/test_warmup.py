@@ -25,20 +25,32 @@ def test_open_and_detection_wait_for_background_compilation(tmp_path):
     assert calls == [None, None]
 
 
-def test_background_preparation_runs_once_per_program_build(tmp_path, monkeypatch, caplog):
-    from starlab.bootstrap import start_preparation
-    from starlab.preparation import code_signature
+def test_preparation_runs_once_per_program_build(tmp_path, monkeypatch):
+    from starlab import preparation
+    from starlab.application import warmup
 
-    monkeypatch.setenv("NUMBA_CACHE_DIR", str(tmp_path / "numba"))  # keep the dev cache intact
-
+    runs, cleared = [], []
+    monkeypatch.setattr(warmup, "warm_up", lambda *args: runs.append(args))
+    monkeypatch.setattr(preparation, "clear_compiled_code", lambda: cleared.append(True))
+    monkeypatch.setattr(preparation, "compiled_files", lambda: [Path("kernel.nbi")])
     stamp = tmp_path / "prepared-code"
-    process, ready = start_preparation(tmp_path / "preparation.log", stamp)
+    preparation.prepare(stamp)
+    assert len(runs) == 1 and cleared == [True]  # new build: clear old code, then compile
+    assert stamp.read_text(encoding="utf-8") == preparation.code_signature()
+    preparation.prepare(stamp)
+    assert len(runs) == 1  # same build, compiled code present: nothing to do
+    stamp.write_text("an older build", encoding="utf-8")
+    preparation.prepare(stamp)
+    assert len(runs) == 2 and cleared == [True, True]
+
+
+def test_background_preparation_process_succeeds(tmp_path, caplog):
+    from starlab.bootstrap import start_preparation
+
+    process, ready = start_preparation(tmp_path / "preparation.log")
     ready(None)
     assert process.wait(timeout=600) == 0
-    assert stamp.read_text(encoding="utf-8") == code_signature()
     assert "Background preparation" not in caplog.text
-    process, ready = start_preparation(tmp_path / "preparation.log", stamp)
-    assert process.wait(timeout=10) == 0  # already prepared: returns almost at once
 
 
 def test_background_preparation_stops_when_the_app_goes_away(tmp_path, monkeypatch):
