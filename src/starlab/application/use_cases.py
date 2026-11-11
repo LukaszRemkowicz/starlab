@@ -1,6 +1,6 @@
 """Coordinate immutable previews, original-pixel analysis and protected image export."""
 
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -291,11 +291,15 @@ class ImageServices:
     preview: PreviewRenderer | None = None
     sky_mask: SkyMaskProvider | None = None
     read_mask: MaskReader | None = None
+    # Waits for background compilation so a photo opened early does not compile it twice.
+    ready: Callable[[Event | None], None] | None = None
 
     def open_image(
         self, source: Path, cancel: Event | None = None
     ) -> tuple[ImageFrame, SkyMask | None]:
         """Read the image and optional encoded-source mask concurrently under one token."""
+        if self.ready is not None:
+            self.ready(cancel)
         if self.read_mask is None:
             return self.read(source, cancel), None
         token: Event = cancel if cancel is not None else Event()
@@ -319,6 +323,8 @@ class ImageServices:
     ) -> tuple[Star, ...]:
         """Detect and measure sources on the original pixels of the open image."""
         check_cancel(cancel)
+        if self.ready is not None:
+            self.ready(cancel)
         if sky_mask is None and settings.sky_only and self.sky_mask is not None:
             sky_mask = self.sky_mask(frame, source, cancel)
         if settings.sky_only and sky_mask is None:

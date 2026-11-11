@@ -43,8 +43,8 @@ The app is free for everyone under the [MIT License](LICENSE).
 
 You need:
 
-- **A computer with Windows.** That is where the app has been tested. It may
-  run on macOS or Linux, but nobody has checked that yet.
+- **A computer with Windows or macOS.** Both have been tested. Linux may work
+  but has not been checked.
 - **A graphics card that supports OpenGL 3.3.** Almost any graphics card from
   the last ten years does.
 - **Enough memory for your photo.** As a rough guide, plan on at least 12 bytes
@@ -59,15 +59,21 @@ Star Effects Lab does not have an installer yet. You install it with
 version and everything else the app needs. You do not have to install Python
 yourself.
 
-1. **Install uv.** Open PowerShell and run:
+1. **Install uv.** On Windows, open PowerShell and run:
 
    ```powershell
    powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
    ```
 
-   Close PowerShell and open it again so it finds the `uv` command. On macOS or
-   Linux, follow the [uv install guide](https://docs.astral.sh/uv/getting-started/installation/)
-   instead.
+   On macOS, open Terminal and run:
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+   Close the window and open a new one so it finds the `uv` command. The commands
+   below are the same on Windows and macOS. For Linux, see the
+   [uv install guide](https://docs.astral.sh/uv/getting-started/installation/).
 
 2. **Download Star Effects Lab.** If you have Git:
 
@@ -77,13 +83,21 @@ yourself.
    ```
 
    Without Git, switch the branch on the GitHub page to **dev**, click **Code →
-   Download ZIP**, unpack the archive, and open PowerShell in the unpacked
-   folder.
+   Download ZIP**, unpack the archive, and open PowerShell or Terminal in the
+   unpacked folder.
 
 3. **Install what the app needs.** This takes a few minutes the first time:
 
    ```powershell
    uv sync
+   ```
+
+4. **Prepare the app.** This compiles the image code once, which takes about
+   20 seconds. Without this step the app does it in the background the first
+   time you start it:
+
+   ```powershell
+   uv run star-effects-lab --prepare
    ```
 
 ## Start the app
@@ -100,8 +114,11 @@ To open a photo straight away, add its path:
 uv run star-effects-lab 'D:\photos\night-sky.tif'
 ```
 
-The first start, and the first time you analyze an image, can be slow while the
-app prepares its fast image code. Later starts are quicker.
+On macOS, a path looks like `~/Pictures/night-sky.tif`.
+
+If you skipped **Prepare the app**, the first start compiles the image code in
+the background. A photo opened during that time waits for it, about 20 seconds
+once. After that, finding stars usually takes about a second.
 
 ## Your first edit in five steps
 
@@ -258,21 +275,22 @@ done in your photo editor:
 **The window is black or the app closes right after starting.**
 Update your graphics card driver. The preview needs OpenGL 3.3.
 
-**Detection or export is very slow.**
-The first analysis after starting the app is slower than later ones. Large
-panoramas need time and memory; close other memory-hungry programs.
+**Finding stars takes 20 seconds or more.**
+The image code has not been compiled yet. Run `uv run star-effects-lab
+--prepare` once; after that, detection usually takes about a second. Large
+panoramas need more time and memory, so close other memory-hungry programs.
 
 **A star was missed, or something that is not a star got an effect.**
 Use **Add star** or **Hide / show star**, or change the detection threshold in
 **General**.
 
 **The app crashed.**
-The app writes a log you can attach to a bug report. On Windows it is usually
-here:
+The app writes a log you can attach to a bug report. It is usually here:
 
-```text
-%LOCALAPPDATA%\Star Effects Lab\Star Effects Lab\logs\startup.log
-```
+| System | Log file |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\Star Effects Lab\Star Effects Lab\logs\startup.log` |
+| macOS | `~/Library/Application Support/Star Effects Lab/Star Effects Lab/logs/startup.log` |
 
 A separate `native-crash.log` in the same folder records low-level crashes. The
 logs contain no image data and are never sent anywhere.
