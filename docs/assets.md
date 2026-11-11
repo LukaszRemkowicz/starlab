@@ -4,9 +4,9 @@ Runtime data is checked in beside the code that consumes it. These files are not
 
 | Asset | Consumer | Purpose |
 |---|---|---|
-| `src/starlab/domain/detection/analysis_luts.npz` | `domain/detection/proxy.py` | Numeric read/write lookup arrays used by analysis-proxy sample conversion. |
-| `src/starlab/domain/detection/full_lcms_lut.npz` | `domain/detection/proxy.py` | Compressed, lossless lookup data for the RGB8 color transform. |
-| `src/starlab/domain/detection/full_lcms_lut.json` | `domain/detection/proxy.py` | Transform description, dimensions, encoding, library versions and integrity hashes for that archive. |
+| `src/starlab/domain/detection/analysis_luts.npz` | `domain/detection/lookup_assets.py` (used by `proxy.py`) | Numeric read/write lookup arrays used by analysis-proxy sample conversion. |
+| `src/starlab/domain/detection/full_lcms_lut.npz` | `domain/detection/lookup_assets.py` (used by `proxy.py`) | Compressed, lossless lookup data for the RGB8 color transform. |
+| `src/starlab/domain/detection/full_lcms_lut.json` | `domain/detection/lookup_assets.py` | Transform description, dimensions, encoding and library versions for that archive. The integrity hashes are pinned in `lookup_assets.py`. |
 | `src/starlab/infrastructure/models/sky-mask.onnx` | `infrastructure/sky_mask.py` | Trained sky/foreground segmentation network (MIT, part of this project). Its SHA-256, tile size and overlap are pinned in `infrastructure/sky_mask.py`. |
 | `src/starlab/infrastructure/shaders/preview.vert` | `infrastructure/gpu_preview.py` | Positions per-source geometry for OpenGL preview drawing. |
 | `src/starlab/infrastructure/shaders/preview.frag` | `infrastructure/gpu_preview.py` | Evaluates per-pixel rays, glows and source-profile corrections. |

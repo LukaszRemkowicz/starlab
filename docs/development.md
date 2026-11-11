@@ -88,4 +88,15 @@ Local experiments under `tools/`, environments, IDE configuration and generated 
 
 ## Verification scope
 
-Pixel regressions compare numerical output with captured expected images. They establish behavior for those fixtures, not a universal quality claim for every photograph. A full GPU/driver matrix, monitor-profile color management and macOS packaging have not been verified. Startup and interaction timings depend on hardware, source content and compilation state; published documentation makes no universal latency guarantee.
+Pixel regressions compare numerical output with captured expected images. They establish behavior for those fixtures, not a universal quality claim for every photograph. The GPU tests (`--run-gpu`) pass on a Windows GPU and on an Apple-silicon Mac; a full GPU/driver matrix, monitor-profile color management and macOS packaging have not been verified. Startup and interaction timings depend on hardware, source content and compilation state; published documentation makes no universal latency guarantee.
+
+## Numba compiled-code cache
+
+Kernels use `cache=True`, so Numba stores machine code in `__pycache__`. Numba
+checks only the source file of each kernel: after editing a helper or constant
+that a kernel imports from another module (for example `numeric.py` or
+`rays.py`), delete the `__pycache__` folders under `src/starlab` before testing,
+or the old machine code may be reused. The app protects users from this: its
+background preparation stamp (`prepared-code`) includes a hash of every source
+file, and when it changes the app deletes StarLab's compiled code before
+compiling again.

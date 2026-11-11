@@ -25,9 +25,11 @@ def test_open_and_detection_wait_for_background_compilation(tmp_path):
     assert calls == [None, None]
 
 
-def test_background_preparation_runs_once_per_program_build(tmp_path, caplog):
+def test_background_preparation_runs_once_per_program_build(tmp_path, monkeypatch, caplog):
     from starlab.bootstrap import start_preparation
     from starlab.preparation import code_signature
+
+    monkeypatch.setenv("NUMBA_CACHE_DIR", str(tmp_path / "numba"))  # keep the dev cache intact
 
     stamp = tmp_path / "prepared-code"
     process, ready = start_preparation(tmp_path / "preparation.log", stamp)
@@ -68,3 +70,18 @@ def test_unwritable_preparation_log_raises(tmp_path):
     blocked.write_text("x", encoding="utf-8")
     with pytest.raises(OSError):
         start_preparation(blocked / "preparation.log")
+
+
+def test_new_build_clears_stale_compiled_code(tmp_path, monkeypatch):
+    from starlab import preparation
+
+    cache = tmp_path / "cache"
+    stale = cache / "Users" / "starlab" / "domain" / "kernel.f-1.py314.nbi"
+    other = cache / "Users" / "otherapp" / "kernel.f-1.py314.nbi"
+    for path in (stale, other):
+        path.parent.mkdir(parents=True)
+        path.write_bytes(b"old machine code")
+    monkeypatch.setenv("NUMBA_CACHE_DIR", str(cache))
+    preparation.clear_compiled_code()
+    assert not stale.exists()
+    assert other.exists()  # other programs sharing the cache folder are left alone

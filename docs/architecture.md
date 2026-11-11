@@ -27,7 +27,7 @@ Numba compiles hot CPU loops, including source qualification, catalogue joining,
 
 ## Current maintenance boundary
 
-Complexity, annotation and public-documentation rules plus strict type checking now run in CI. Classes represent state or resource ownership; numerical kernels remain functions. Backend agreement is verified for recorded fixtures and one Windows GPU, not every possible image or driver.
+Complexity, annotation and public-documentation rules plus strict type checking now run in CI. Classes represent state or resource ownership; numerical kernels remain functions. Backend agreement is verified for recorded fixtures on one Windows GPU and one Apple-silicon Mac, not every possible image or driver.
 
 ## State ownership and numerical functions
 

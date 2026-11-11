@@ -26,11 +26,26 @@ def code_signature() -> str:
     return digest.hexdigest()
 
 
-def _compiled_code_present() -> bool:
-    """Whether Numba's compiled-code cache exists where this process will look for it."""
+def compiled_files() -> list[Path]:
+    """StarLab's Numba compiled-code files where this process will look for them."""
     configured: str | None = os.environ.get("NUMBA_CACHE_DIR")
     root: Path = Path(configured) if configured else PACKAGE
-    return next(root.rglob("*.nbi"), None) is not None
+    return [
+        path
+        for pattern in ("*.nbi", "*.nbc")
+        for path in root.rglob(pattern)
+        if configured is None or "starlab" in path.as_posix()
+    ]
+
+
+def clear_compiled_code() -> None:
+    """Remove compiled code from an earlier build.
+
+    Numba only checks each kernel's own source file, so a changed helper in another
+    module could otherwise reuse stale machine code.
+    """
+    for path in compiled_files():
+        path.unlink(missing_ok=True)
 
 
 def prepare(stamp: Path | None) -> None:
@@ -40,9 +55,11 @@ def prepare(stamp: Path | None) -> None:
         stamp is not None
         and stamp.is_file()
         and stamp.read_text(encoding="utf-8") == signature
-        and _compiled_code_present()
+        and any(path.suffix == ".nbi" for path in compiled_files())
     ):
         return
+    if stamp is not None:
+        clear_compiled_code()  # new or changed build: never mix old and new machine code
     from .application.warmup import warm_up
     from .bootstrap import create_services
     from .infrastructure.tiff_io import write_samples

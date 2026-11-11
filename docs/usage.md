@@ -12,15 +12,15 @@ The mask button displays sky, foreground and uncertain regions. Mask visibility 
 
 Primary and Secondary have separate controls under Spikes. Primary exposes the point count in addition to quantity, intensity, length, angle, sharpness, spread, saturation, hue and rainbow controls. Secondary uses a fixed angular pattern with its own quantity, intensity, geometry and color controls. Soft Flare and Ring Flare have independent radial-size, brightness, color and edge controls.
 
-Quantity controls an effect's source-brightness cutoff; it is not a detection-count limit. Increasing it can admit fainter measured sources. Intensity changes emitted effect light. Saturation0 leaves the measured source color unchanged before compositing; positive values increase effect saturation. Per-source light brighter than the display range follows a path to white: it keeps its hue and luminance and loses only the saturation it must, so bright cores turn white instead of shifting toward pure primaries.
+Quantity controls an effect's source-brightness cutoff; it is not a detection-count limit. Increasing it can admit fainter measured sources. Intensity changes emitted effect light. Saturation 0 leaves the measured source color unchanged before compositing; positive values increase effect saturation and negative values (down to -100) reduce it. Per-source light brighter than the display range follows a path to white: it keeps its hue and luminance and loses only the saturation it must, so bright cores turn white instead of shifting toward pure primaries.
 
 Soft filter is separate from halo selection. It reduces small source wings and expands larger source profiles on the original image before any effect layers are composited. Halo Quantity, Intensity, Size and color controls do not change this prefilter. It remains active at `Quantity = 0` / `Intensity = 0` while Soft Flare is enabled. The counter beside Enable soft flare reports halo selection, not the number of source corrections. The slider additionally fades Soft Flare halos on small measured sources and strengthens them on large sources, so the halo does not undo the small-star reduction. Unmeasured sources keep their ordinary halo. At 0 both the source correction and this halo bias are neutral.
 
 ## Preview and manual edits
 
-Use Pan, Edit, Add star and Hide/show to inspect or adjust the source catalogue. Undo/Redo tracks catalogue and parameter changes. Moving a measured source discards measurements from its previous position.
+Use Pan image, Edit star, Add star and Hide / show star to inspect or adjust the source catalogue. Undo/Redo tracks catalogue and parameter changes. Moving a measured source discards measurements from its previous position.
 
-Original shows source pixels, Result includes source corrections and effect layers, Effects only shows added layers, and Compare splits the image. Hold Before temporarily restores the original view. 100% reads actual pixels of the visible source region. Fit trades detailed sampling for a bounded preview; it is unsuitable for judging individual-pixel sharpness.
+Original shows source pixels, Result includes source corrections and effect layers, Effects only shows added layers, and Compare splits the image. Hold for Before temporarily restores the original view. 100% reads actual pixels of the visible source region. Fit trades detailed sampling for a bounded preview; it is unsuitable for judging individual-pixel sharpness.
 
 ## Save
 

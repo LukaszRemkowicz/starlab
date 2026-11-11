@@ -6,12 +6,14 @@ This page records the requirements those installers must meet.
 
 ## Requirement: no first-run compilation wait
 
-Star detection itself takes about 0.03 s. The numerical kernels are written with
+The detection computation itself takes about 0.03 s on a 512 × 512 photo; with
+opening, sky mask and photometry a real detection takes about 0.6 s. The numerical kernels are written with
 Numba and are compiled to machine code on first use, which takes about 20 s on a
 current Mac. Numba stores the compiled code next to the package (`__pycache__`),
 so later launches load it in well under a second.
 
-Measured on macOS (Apple silicon), 512 × 512 test image:
+Measured on macOS (Apple silicon) with the 512 × 512 `pano-sky-*` test fixtures,
+before preparation covered every input layout:
 
 | Launch | Window | Star detection | Ready preview |
 | --- | --- | --- | --- |
