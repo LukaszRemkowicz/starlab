@@ -15,6 +15,7 @@ from ..domain.effects.soft_filter import (
     FilterOptions,
     enlargement_records,
     reduction_records,
+    soft_filter_sources,
     star_enlargement,
     star_reduction,
 )
@@ -69,7 +70,7 @@ def preview_source_filter(
     """Build independent reduction/enlargement layers on the preview's source grid."""
     if not settings.soft.enabled or not settings.soft.soft_filter:
         return None, None
-    sources: tuple[Star, ...] = filter_stars(stars, sky_mask)
+    sources: tuple[Star, ...] = soft_filter_sources(filter_stars(stars, sky_mask), settings.soft)
     options: FilterOptions = FilterOptions(
         origin=origin, sampling=sampling, sky_mask=sky_mask, cancel=cancel
     )
@@ -80,7 +81,12 @@ def preview_source_filter(
         **options,
     )
     enlargement: FloatArray = star_enlargement(
-        pixels, enlargement_records(sources), settings.soft.soft_filter, **options
+        pixels,
+        enlargement_records(sources, settings.soft.hue, settings.soft.saturation),
+        settings.soft.soft_filter,
+        size=settings.soft.size,
+        falloff=settings.soft.falloff,
+        **options,
     )
     return reduction, enlargement
 
@@ -245,8 +251,11 @@ def _apply_export_source_filter(
     sky_mask: SkyMask | None,
 ) -> None:
     """Apply original-pixel corrections in bounded strips; ``source`` starts at row ``top``."""
-    records: DoubleArray = reduction_records(filter_stars(stars, sky_mask))
-    large_records: DoubleArray = enlargement_records(filter_stars(stars, sky_mask))
+    sources: tuple[Star, ...] = soft_filter_sources(filter_stars(stars, sky_mask), settings.soft)
+    records: DoubleArray = reduction_records(sources)
+    large_records: DoubleArray = enlargement_records(
+        sources, settings.soft.hue, settings.soft.saturation
+    )
     for start in range(0, source.shape[0], 128):
         check_cancel(cancel)
         reduction: FloatArray = star_reduction(
@@ -261,6 +270,8 @@ def _apply_export_source_filter(
             source[start : start + 128],
             large_records,
             settings.soft.soft_filter,
+            size=settings.soft.size,
+            falloff=settings.soft.falloff,
             origin=(0, top + start),
             sky_mask=sky_mask,
             cancel=cancel,

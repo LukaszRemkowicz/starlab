@@ -186,9 +186,12 @@ to see the main sliders only. Switching between the two keeps your values.
 | **Color saturation**, **Color hue** | Change the effect's color. At saturation 0 each effect keeps its star's natural color. |
 | **Rainbow intensity**, **frequency**, **phase** | Add a rainbow tint along the spikes and control how it repeats. |
 
-**Soft filter** works even when the glow itself is set to zero, so you can use
-it on its own: set **Quantity** or **Intensity** to 0 in **Soft Flare** and
-keep **Soft filter** above 0. Turning off the whole **Soft Flare** tab also
+**Soft filter** follows the other **Soft Flare** controls: **Quantity** picks
+which stars it changes, **Size** and **Edge falloff** set how wide and how soft
+the enlarged halo is, and **Saturation** and **Hue** tint it. **Intensity** only
+changes the glow. So you can use Soft filter on its own: set **Intensity** to 0
+in **Soft Flare** and keep **Soft filter** above 0. With **Quantity** at 0 it
+changes no stars. Turning off the whole **Soft Flare** tab also
 turns Soft filter off.
 
 ## Viewing your image

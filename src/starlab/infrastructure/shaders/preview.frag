@@ -9,7 +9,7 @@ uniform float sampling, scale, cutoff, coefficient, widening, rayLength;
 uniform float rainbow, frequency, phase, softSize, softPower;
 uniform float ringPeak, innerWidth, outerWidth, innerPower, outerPower;
 uniform int kind, gray;
-uniform float softFilter;
+uniform float softFilter, softSizeFactor, softShape;
 uniform sampler2D originalImage;
 flat in vec2 center, integerOrigin, direction;
 flat in vec3 light;
@@ -83,11 +83,11 @@ void main() {
     if(kind>=SOURCE_SHRINK) {
         float sigma=measuredWidth/2.354820045;
         float u=dot(delta,delta)/(sigma*sigma);
-        float spread=1.5+2.5*(2.0*filterWeight-1.0);
-        float limit=kind==SOURCE_SHRINK ? 9.0 : 9.0*spread*spread;
+        float spread=1.0+(0.5+2.5*(2.0*filterWeight-1.0))*softSizeFactor;
+        float limit=kind==SOURCE_SHRINK ? 9.0 : pow(9.0,1.0/softShape)*spread*spread;
         if(measuredWidth<=0.0 || u>=limit) discard;
         if(kind==SOURCE_GROW) {
-            float wings=(exp(-u/(2.0*spread*spread))-exp(-u/2.0))*pow(1.0-u/limit,2.0);
+            float wings=max(exp(-0.5*pow(u/(spread*spread),softShape))-exp(-u/2.0),0.0)*pow(1.0-u/limit,2.0);
             fragColor=vec4(0.8*softFilter*sqrt(2.0*filterWeight-1.0)*sourcePeak*wings,1.0);
             return;
         }

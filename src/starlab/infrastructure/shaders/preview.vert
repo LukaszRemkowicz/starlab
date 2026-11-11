@@ -16,7 +16,7 @@ layout(location=8) in vec3 measuredPeak;
 uniform vec2 outputSize, origin;
 uniform float sampling, cutoff, coefficient, widening;
 uniform float threshold, ceiling, hue, saturation, intensity;
-uniform float softFilter;
+uniform float softFilter, softSizeFactor, softShape;
 uniform int kind, rayCount, gray;
 // Capacity for the fixed Secondary pattern; rayCount is the active count.
 const int MAX_RAYS = 84;
@@ -64,7 +64,7 @@ void main() {
         world=horizontal ? vec2(major,minor) : vec2(minor,major);
     } else {
         float extent=cutoff;
-        if(kind>=SOURCE_SHRINK) { center=position; extent=(kind==SOURCE_SHRINK ? 3.0 : 3.0*(1.5+2.5*(2.0*sizeWeight-1.0)))*profileWidth/2.354820045; }
+        if(kind>=SOURCE_SHRINK) { center=position; extent=(kind==SOURCE_SHRINK ? 3.0 : sqrt(pow(9.0,1.0/softShape))*(1.0+(0.5+2.5*(2.0*sizeWeight-1.0))*softSizeFactor))*profileWidth/2.354820045; }
         world=center+vec2(corner.x*2.0-1.0,corner.y)*(extent+sampling);
     }
     // Half-pixel offset maps image centers to OpenGL fragment centers.

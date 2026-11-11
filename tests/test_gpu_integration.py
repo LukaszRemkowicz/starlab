@@ -189,12 +189,12 @@ def test_groups_compose_with_both_source_corrections(gpu, channels):
 
 
 @pytest.mark.parametrize("channels", [1, 3], ids=["gray", "rgb"])
-def test_source_corrections_are_independent_of_halo_quantity_and_intensity(gpu, channels):
+def test_source_corrections_are_independent_of_halo_intensity(gpu, channels):
     render, _ = gpu
     frame, stars = _scene(channels)
     base = EffectSettings.disabled()
     settings = replace(
-        base, soft=replace(base.soft, enabled=True, soft_filter=65, quantity=0, intensity=0)
+        base, soft=replace(base.soft, enabled=True, soft_filter=65, quantity=100, intensity=0)
     )
     expected = render_preview(frame, stars, settings, full_resolution=True)
     actual = render(frame, stars, settings, full_resolution=True)
@@ -209,6 +209,35 @@ def test_source_corrections_are_independent_of_halo_quantity_and_intensity(gpu, 
         full_resolution=True,
     )
     assert disabled.reduction is None and disabled.enlargement is None
+
+
+@pytest.mark.parametrize("channels", [1, 3], ids=["gray", "rgb"])
+@pytest.mark.parametrize(
+    "soft",
+    [
+        {"quantity": 0},
+        {"quantity": 40, "size": 40, "falloff": 15, "hue": 30, "saturation": 40},
+        {"quantity": 100, "size": 100, "falloff": 100, "saturation": -50},
+    ],
+    ids=["none", "shaped", "wide"],
+)
+def test_soft_flare_controls_shape_source_filter_like_cpu(gpu, channels, soft):
+    render, _ = gpu
+    frame, stars = _scene(channels)
+    base = EffectSettings.disabled()
+    settings = replace(base, soft=replace(base.soft, enabled=True, soft_filter=80, **soft))
+    expected = render_preview(frame, stars, settings, full_resolution=True)
+    actual = render(frame, stars, settings, full_resolution=True)
+    np.testing.assert_allclose(actual.reduction, expected.reduction, rtol=1e-4, atol=1e-6)
+    np.testing.assert_allclose(actual.enlargement, expected.enlargement, rtol=1e-4, atol=1e-6)
+    # Changing Quantity or color must not leave stale cached instances.
+    again = replace(settings, soft=replace(settings.soft, quantity=100, saturation=20, hue=-20))
+    np.testing.assert_allclose(
+        render(frame, stars, again, full_resolution=True).enlargement,
+        render_preview(frame, stars, again, full_resolution=True).enlargement,
+        rtol=1e-4,
+        atol=1e-6,
+    )
 
 
 @pytest.mark.parametrize("channels", [1, 3], ids=["gray", "rgb"])
