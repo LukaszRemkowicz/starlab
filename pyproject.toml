@@ -1,0 +1,75 @@
+[project]
+name = "star-effects-lab"
+version = "0.1.0"
+description = "Standalone star diffraction effects research application"
+requires-python = ">=3.14,<3.15"
+dependencies = [
+    "PySide6>=6.8,<7",
+    "numpy>=2.2,<3",
+    "scipy>=1.15,<2",
+    "tifffile>=2025.1",
+    "imagecodecs>=2025.3",
+    "Pillow>=11,<13",
+    "opencv-python-headless>=4.13,<6",
+    "numba>=0.68,<0.69",
+]
+
+[project.scripts]
+star-effects-lab = "starlab.__main__:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/starlab"]
+
+[dependency-groups]
+dev = [
+    "mypy>=2.4,<3",
+    "pylint>=4.1,<5",
+    "pytest>=8,<10",
+    "pytest-qt>=4.4,<5",
+    "ruff>=0.11",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+qt_api = "pyside6"
+
+[tool.ruff]
+line-length = 100
+target-version = "py314"
+
+[tool.ruff.lint]
+select = ["E4", "E7", "E9", "F", "I", "C90", "PLR0915", "RUF100", "ANN", "D100", "D101", "D102", "D103", "D104", "D105", "D107"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/*" = ["ANN", "D"]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-statements = 50
+
+[tool.mypy]
+files = ["src/starlab"]
+python_version = "3.14"
+strict = true
+ignore_missing_imports = true
+
+[tool.pylint.messages_control]
+disable = ["all"]
+enable = ["duplicate-code"]
+
+[tool.pylint.similarities]
+min-similarity-lines = 5
+ignore-comments = true
+ignore-docstrings = true
+ignore-imports = true
+ignore-signatures = true
+
+[tool.pylint.reports]
+reports = false
+score = false

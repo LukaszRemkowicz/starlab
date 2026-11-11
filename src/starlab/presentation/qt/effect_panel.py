@@ -1,0 +1,246 @@
+"""Qt parameter widgets translating gestures into immutable effect settings."""
+
+from dataclasses import replace
+
+from PySide6.QtCore import QSignalBlocker, Qt, Signal
+from PySide6.QtWidgets import (
+    QCheckBox,
+    QDoubleSpinBox,
+    QHBoxLayout,
+    QLabel,
+    QPushButton,
+    QRadioButton,
+    QScrollArea,
+    QSlider,
+    QTabWidget,
+    QVBoxLayout,
+    QWidget,
+)
+
+from ...domain.effects.settings import KINDS, PARAMETERS, RANGES, EffectParameters, EffectSettings
+
+LABELS = {
+    "quantity": "Quantity",
+    "intensity": "Intensity",
+    "length": "Length",
+    "angle": "Angle",
+    "points": "Number of points",
+    "sharpness": "Spike sharpness",
+    "spread": "Spike spread",
+    "saturation": "Color saturation",
+    "hue": "Color hue",
+    "rainbow": "Rainbow intensity",
+    "frequency": "Rainbow frequency",
+    "phase": "Rainbow phase",
+    "size": "Size",
+    "soft_filter": "Soft filter",
+    "falloff": "Edge falloff",
+    "inner_width": "Inner edge width",
+    "inner_falloff": "Inner edge falloff",
+    "outer_width": "Outer edge width",
+    "outer_falloff": "Outer edge falloff",
+}
+TITLES = {
+    "primary": "Primary",
+    "secondary": "Secondary",
+    "soft": "Soft flare",
+    "ring": "Ring flare",
+}
+BASIC = {"quantity", "intensity", "length", "angle", "points", "size", "soft_filter"}
+
+
+class ParameterControl(QWidget):
+    """Keep one numeric spin box and slider synchronized without recursive signals."""
+
+    changed = Signal(float)
+    edit_started = Signal()
+    edit_finished = Signal()
+
+    def __init__(self, key: str, parent: QWidget | None = None) -> None:
+        """Build a control using the shared parameter range and display precision."""
+        super().__init__(parent)
+        self.key = key
+        tips: dict[str, str] = {
+            "quantity": "Brightness threshold for this effect. Higher values include fainter detected sources across the image.",
+            "saturation": "0 preserves the source color. Positive values add saturation to this effect.",
+            "rainbow": "0 adds no rainbow modulation. Increase to color the rays.",
+            "soft_filter": "Shrink small stars and enlarge large stars in the original image before effects. Also fade Soft Flare halos on small measured stars and strengthen them on large stars. The source correction is independent of halo Quantity, Intensity and Size; 0 disables both filter operations.",
+        }
+        if key in tips:
+            self.setToolTip(tips[key])
+        self.factor = 10 if key == "angle" else 1
+        layout: QVBoxLayout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(2)
+        row: QHBoxLayout = QHBoxLayout()
+        label: QLabel = QLabel(LABELS[key])
+        self.spin = QDoubleSpinBox()
+        self.spin.setRange(*RANGES[key])
+        self.spin.setDecimals(1 if key == "angle" else 0)
+        self.spin.setKeyboardTracking(False)
+        self.spin.setFixedWidth(64)
+        self.spin.setAlignment(Qt.AlignmentFlag.AlignRight)
+        self.spin.setAccessibleName(LABELS[key])
+        if key == "angle":
+            self.spin.setSuffix("°")
+        label.setBuddy(self.spin)
+        row.addWidget(label)
+        row.addStretch()
+        row.addWidget(self.spin)
+        layout.addLayout(row)
+        self.slider = QSlider(Qt.Orientation.Horizontal)
+        self.slider.setTracking(True)
+        self.slider.setRange(*(int(boundary * self.factor) for boundary in RANGES[key]))
+        self.slider.setAccessibleName(LABELS[key])
+        layout.addWidget(self.slider)
+        self.spin.valueChanged.connect(self._spin_changed)
+        self.slider.valueChanged.connect(self._slider_changed)
+        self.slider.sliderPressed.connect(self.edit_started)
+        self.slider.sliderReleased.connect(self.edit_finished)
+
+    def set_value(self, value: float) -> None:
+        """Update both controls without emitting an edit or value-change signal."""
+        with QSignalBlocker(self.spin), QSignalBlocker(self.slider):
+            self.spin.setValue(value)
+            self.slider.setValue(round(value * self.factor))
+
+    def _spin_changed(self, value: float) -> None:
+        """Mirror a numeric edit to the slider and emit its value once."""
+        with QSignalBlocker(self.slider):
+            self.slider.setValue(round(value * self.factor))
+        self.changed.emit(value)
+
+    def _slider_changed(self, value: int) -> None:
+        """Mirror a slider position in parameter units and emit its value once."""
+        numeric: float = value / self.factor
+        with QSignalBlocker(self.spin):
+            self.spin.setValue(numeric)
+        self.changed.emit(numeric)
+
+
+class EffectPanel(QWidget):
+    """Present grouped effect settings and propagate slider edit boundaries."""
+
+    settings_changed = Signal(object)
+    edit_started = Signal()
+    edit_finished = Signal()
+
+    def __init__(self, parent: QWidget | None = None) -> None:
+        """Build the general tab and all effect groups from shared parameter metadata."""
+        super().__init__(parent)
+        self.settings = EffectSettings()
+        self.controls: dict[str, dict[str, ParameterControl]] = {}
+        self.enabled: dict[str, QCheckBox] = {}
+        self.source_counts: dict[str, QLabel] = {}
+        layout: QVBoxLayout = QVBoxLayout(self)
+        layout.setContentsMargins(0, 0, 0, 0)
+        self.general = QWidget()
+        self.general_box = QVBoxLayout(self.general)
+        self.general_box.setContentsMargins(14, 16, 14, 14)
+        self.general_box.setSpacing(16)
+        modes: QHBoxLayout = QHBoxLayout()
+        modes.setContentsMargins(14, 6, 14, 6)
+        self.basic, self.advanced = QRadioButton("Basic"), QRadioButton("Advanced")
+        self.advanced.setChecked(True)
+        modes.addWidget(self.basic)
+        modes.addWidget(self.advanced)
+        modes.addStretch()
+        layout.addLayout(modes)
+        self.tabs = QTabWidget()
+        self.tabs.setDocumentMode(True)
+        self.tabs.tabBar().setDrawBase(False)
+        layout.addWidget(self.tabs)
+        self.tabs.addTab(self.general, "General")
+        spikes: QWidget = QWidget()
+        spike_box: QVBoxLayout = QVBoxLayout(spikes)
+        spike_box.setContentsMargins(0, 0, 0, 0)
+        self.spike_selector = QTabWidget()
+        self.spike_selector.setDocumentMode(True)
+        self.spike_selector.tabBar().setDrawBase(False)
+        spike_box.addWidget(self.spike_selector)
+        self.tabs.addTab(spikes, "Spikes")
+        for kind in KINDS:
+            scroll: QScrollArea = self._effect_group(kind)
+            if kind in ("primary", "secondary"):
+                self.spike_selector.addTab(scroll, TITLES[kind])
+            else:
+                self.tabs.addTab(scroll, TITLES[kind].title())
+        self.basic.toggled.connect(self._mode)
+        self.set_settings(self.settings)
+
+    def _effect_group(self, kind: str) -> QScrollArea:
+        """Build one effect group's toggle, source count, parameter controls and reset."""
+        scroll: QScrollArea = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QScrollArea.Shape.NoFrame)
+        body: QWidget = QWidget()
+        body.setObjectName("parameterBody")
+        box: QVBoxLayout = QVBoxLayout(body)
+        box.setContentsMargins(14, 10, 14, 10)
+        box.setSpacing(8)
+        toggle: QCheckBox = QCheckBox(f"Enable {TITLES[kind].lower()}")
+        toggle.toggled.connect(
+            lambda checked, effect_kind=kind: self._change(effect_kind, "enabled", checked)
+        )
+        header: QHBoxLayout = QHBoxLayout()
+        header.addWidget(toggle)
+        header.addStretch()
+        count: QLabel = QLabel("0 sources")
+        count.setObjectName("muted")
+        count.setToolTip(
+            "Sources receiving this effect / total detected sources. Quantity changes the brightness cutoff."
+            + (
+                " Soft filter processes measured source stars independently of this halo count."
+                if kind == "soft"
+                else ""
+            )
+        )
+        header.addWidget(count)
+        self.source_counts[kind] = count
+        box.addLayout(header)
+        self.enabled[kind] = toggle
+        self.controls[kind] = {}
+        for key in PARAMETERS[kind]:
+            control: ParameterControl = ParameterControl(key)
+            control.changed.connect(
+                lambda value, effect_kind=kind, parameter_key=key: self._change(
+                    effect_kind, parameter_key, int(value) if parameter_key == "points" else value
+                )
+            )
+            control.edit_started.connect(self.edit_started)
+            control.edit_finished.connect(self.edit_finished)
+            box.addWidget(control)
+            self.controls[kind][key] = control
+        reset: QPushButton = QPushButton("Reset this group")
+        reset.clicked.connect(lambda checked=False, effect_kind=kind: self._reset(effect_kind))
+        box.addWidget(reset)
+        box.addStretch()
+        scroll.setWidget(body)
+        return scroll
+
+    def _change(self, kind: str, key: str, value: float | bool) -> None:
+        """Replace one immutable parameter group and emit the updated settings snapshot."""
+        group: EffectParameters = replace(getattr(self.settings, kind), **{key: value})
+        self.settings = replace(self.settings, **{kind: group})
+        self.settings_changed.emit(self.settings)
+
+    def _reset(self, kind: str) -> None:
+        """Restore one group to defaults while retaining all other group settings."""
+        self.set_settings(replace(self.settings, **{kind: getattr(EffectSettings(), kind)}))
+        self.settings_changed.emit(self.settings)
+
+    def set_settings(self, settings: EffectSettings) -> None:
+        """Reflect a settings snapshot without creating another user edit."""
+        self.settings = settings
+        for kind in KINDS:
+            group: EffectParameters = getattr(settings, kind)
+            with QSignalBlocker(self.enabled[kind]):
+                self.enabled[kind].setChecked(group.enabled)
+            for key, control in self.controls[kind].items():
+                control.set_value(getattr(group, key))
+
+    def _mode(self, basic: bool) -> None:
+        """Hide advanced-only controls while preserving their stored parameter values."""
+        for kind in KINDS:
+            for key, control in self.controls[kind].items():
+                control.setVisible(not basic or key in BASIC)
