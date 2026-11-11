@@ -270,7 +270,8 @@ def test_preview_accepts_thin_valid_images(tmp_path, shape):
     assert max(frame.pixels.shape[:2]) <= 24
     from starlab.domain.imaging import srgb_to_linear
 
-    np.testing.assert_array_equal(frame.pixels, srgb_to_linear(np.float32(8192 / 65535)))
+    # float32 pow differs by an ulp between platforms' math libraries
+    np.testing.assert_allclose(frame.pixels, srgb_to_linear(np.float32(8192 / 65535)), rtol=1e-6)
 
 
 def test_reader_owned_buffer_transfer_does_not_weaken_public_copy_contract():
