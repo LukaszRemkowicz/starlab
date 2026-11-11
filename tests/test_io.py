@@ -167,7 +167,9 @@ def test_tiff_above_40_megapixels_loads_without_resizing(tmp_path):
     del mapped
     frame = read_tiff(source)
     assert frame.pixels.shape == (6400, 6400, 1)
-    assert frame.pixels[6399, 6398, 0] == pytest.approx(32768 / 65535)
+    from starlab.domain.imaging import srgb_to_linear
+
+    assert frame.pixels[6399, 6398, 0] == pytest.approx(float(srgb_to_linear(32768 / 65535)))
 
 
 @pytest.mark.parametrize("delta, accepted", [(20, True), (2000, False)])
@@ -212,7 +214,7 @@ def test_integer_import_matches_existing_transfer_for_every_code(tmp_path, dtype
     tifffile.imwrite(path, data, photometric="rgb" if rgb else "minisblack")
     frame = read_tiff(path)
     expected = data.astype(np.float32) / maximum
-    expected = srgb_to_linear(expected) if rgb else expected[..., None]
+    expected = srgb_to_linear(expected if rgb else expected[..., None])  # gray: same sRGB curve
     np.testing.assert_array_equal(frame.pixels, expected)
     assert frame.pixels.flags.owndata and not frame.pixels.flags.writeable
 
@@ -266,7 +268,9 @@ def test_preview_accepts_thin_valid_images(tmp_path, shape):
     assert (height, width) == shape
     assert min(frame.pixels.shape[:2]) >= 2
     assert max(frame.pixels.shape[:2]) <= 24
-    np.testing.assert_array_equal(frame.pixels, np.float32(8192 / 65535))
+    from starlab.domain.imaging import srgb_to_linear
+
+    np.testing.assert_array_equal(frame.pixels, srgb_to_linear(np.float32(8192 / 65535)))
 
 
 def test_reader_owned_buffer_transfer_does_not_weaken_public_copy_contract():

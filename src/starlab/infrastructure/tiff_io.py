@@ -146,7 +146,7 @@ def _check_profile(profile: bytes | None, rgb: bool) -> str:
     """Validate color interpretation and return the import note or raise ValueError."""
     if not profile:
         return (
-            "Untagged image: sRGB assumed." if rgb else "Untagged grayscale: linear gray assumed."
+            "Untagged image: sRGB assumed." if rgb else "Untagged grayscale: sRGB tone curve assumed."
         )
     try:
         parsed: ImageCmsProfile = ImageCms.ImageCmsProfile(io.BytesIO(profile))
@@ -211,10 +211,14 @@ def _mapped_pixels(page: tifffile.TiffPage) -> EncodedPixels:
 
 
 @lru_cache(maxsize=4)
-def _integer_transfer(maximum: int, rgb: bool) -> Pixels:
-    """Build an immutable scalar conversion table for uint8/uint16 input codes."""
+def _integer_transfer(maximum: int) -> Pixels:
+    """Build an immutable sRGB-decoding table for uint8/uint16 input codes.
+
+    Grayscale uses the same tone curve as RGB, like most editors treat untagged gray,
+    so effects blend in linear light for both.
+    """
     codes: Pixels | DoubleArray = np.arange(maximum + 1, dtype=np.float32) / maximum
-    values: Pixels | DoubleArray = srgb_to_linear(codes) if rgb else codes
+    values: Pixels | DoubleArray = srgb_to_linear(codes)
     values.flags.writeable = False
     # Weak-scalar division preserves float32; NumPy stubs conservatively include float64.
     return cast(Pixels, values)
@@ -233,9 +237,8 @@ def _convert_integer_image(
     data: EncodedPixels, path: Path, note: str, cancel: Event | None
 ) -> ImageFrame:
     """Convert validated samples in cancellable strips, then transfer buffer ownership."""
-    rgb: bool = data.shape[2] == 3
     normalized: FloatArray = np.empty(data.shape, np.float32)
-    table: FloatArray = _integer_transfer(np.iinfo(data.dtype).max, rgb)
+    table: FloatArray = _integer_transfer(np.iinfo(data.dtype).max)
     for row in range(0, data.shape[0], ROWS_PER_BLOCK):
         check_cancel(cancel)
         source: EncodedPixels = np.asarray(
@@ -246,7 +249,7 @@ def _convert_integer_image(
     return ImageFrame._from_owned_validated(
         normalized,
         path.name,
-        "linear-srgb" if rgb else "linear-gray",
+        "linear-srgb",
         note,
     )
 
@@ -311,7 +314,7 @@ def write_tiff(
         # Checked per block so a huge export needs no extra full-image boolean buffer.
         if not np.isfinite(block).all() or block.min() < 0:
             raise ValueError("Invalid output pixels.")
-        encoded: FloatArray = linear_to_srgb(block) if rgb else block
+        encoded: FloatArray = linear_to_srgb(block)
         output[row : row + ROWS_PER_BLOCK] = np.rint(np.clip(encoded, 0, 1) * 65535).astype(
             np.uint16
         )
