@@ -17,6 +17,14 @@ flat in float filterWeight, measuredWidth;
 flat in vec3 sourceBackground, sourceGradientX, sourceGradientY;
 flat in vec3 sourcePeak;
 out vec4 fragColor;
+// Same path to white as render.fit_to_white: keep hue and luminance, shed saturation.
+vec3 fitToWhite(vec3 c) {
+    float peak=max(c.r,max(c.g,c.b));
+    if(peak<=1.0) return max(c,0.0);
+    float y=dot(c,vec3(0.212639004,0.715168655,0.072192311));
+    float t=peak>y ? clamp((1.0-y)/(peak-y),0.0,1.0) : 0.0;
+    return clamp(vec3(y)+t*(c-vec3(y)),0.0,1.0);
+}
 float point(float x,float a) { return pow(max(1.0-abs(x)*a,0.0),3.0); }
 float fifteen(float x,float a) {
     if (x>1.5) return point(x,a);
@@ -70,7 +78,7 @@ void main() {
         vec3 sum=vec3(0);
         for(int y=0;y<8;y++) for(int x=0;x<8;x++) {
             vec2 offset=(vec2(x,y)+0.5)/8.0-0.5;
-            sum+=clamp(light*radialFlare(length(delta+offset*sampling)),0.0,1.0);
+            sum+=fitToWhite(light*radialFlare(length(delta+offset*sampling)));
         }
         fragColor=vec4(sum/64.0,1.0);
         return;
@@ -95,7 +103,7 @@ void main() {
     } else {
         value=radialFlare(radius);
     }
-    // Per-source light is clamped before the renderer blends overlapping quads.
+    // Per-source light is limited before the renderer blends overlapping quads.
     vec3 result=light*value;
     if(kind<SOFT && rainbow>0.0) {
         float u=radius*scale*125000.0/pow(107.0-frequency,2.0);
@@ -103,5 +111,5 @@ void main() {
         vec3 modulation=gray!=0 ? vec3(sin(theta)) : vec3(sin(theta),cos(theta),-sin(theta));
         result*=max(vec3(1.0)+0.017*rainbow*min(u/3000.0,1.0)*modulation,0.0);
     }
-    fragColor=vec4(clamp(result,0.0,1.0),1.0);
+    fragColor=vec4(fitToWhite(result),1.0);
 }

@@ -248,8 +248,10 @@ done in your photo editor:
 - **Effects on the landscape?** Look at the **Sky mask** view. Areas marked red
   are protected; if the mask is wrong in a spot, hide the affected stars by hand.
 - **Judge sharpness at 100%,** not in Fit view.
-- **Very bright stars can clip** to pure white in the result. Lower
-  **Intensity** if highlights look burnt out.
+- **Very bright spikes fade to white.** Where an effect is brighter than the
+  image can show, its color thins out toward white, like an overexposed star,
+  while the edges keep their color. Lower **Intensity** if you want more color
+  in the brightest parts.
 
 ## Troubleshooting
 
