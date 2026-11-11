@@ -38,7 +38,7 @@ def test_gray_round_trip_and_source_protection(tmp_path):
     np.testing.assert_array_equal(tifffile.imread(tmp_path / "out.tif"), data)
 
 
-@pytest.mark.parametrize("data", [np.zeros((8, 9, 4), np.uint8), np.zeros((8, 9), np.float32)])
+@pytest.mark.parametrize("data", [np.zeros((8, 9, 5), np.uint8), np.zeros((8, 9), np.float32)])
 def test_unsupported_image_is_rejected(tmp_path, data):
     from starlab.infrastructure.tiff_io import read_tiff
 

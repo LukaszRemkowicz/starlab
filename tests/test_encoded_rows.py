@@ -167,3 +167,44 @@ def test_only_segments_with_requested_rows_are_decoded(tmp_path):
         decoded.clear()
         reader.rows(0, 53, 21)  # sampled rows 0, 21, 42 live in strips 0, 3, 6
         assert sorted(decoded) == [0, 3, 6]
+
+
+ALPHA_LAYOUTS = ["plain", "zlib-strips", "planar-zlib", "planar-plain", "zlib-tiled"]
+
+
+@pytest.mark.parametrize("name", ALPHA_LAYOUTS)
+@pytest.mark.parametrize("colors", [1, 3])
+def test_unassociated_alpha_is_ignored(tmp_path, name, colors):
+    rng = np.random.default_rng(3)
+    data = rng.integers(0, 65535, (H, W, colors + 1), dtype=np.uint16, endpoint=True)
+    kwargs = dict(LAYOUTS[name])
+    if colors == 1:
+        kwargs.pop("planarconfig", None)
+    stored = np.moveaxis(data, -1, 0) if kwargs.get("planarconfig") else data
+    path = tmp_path / "alpha.tif"
+    tifffile.imwrite(
+        path,
+        stored,
+        photometric="rgb" if colors == 3 else "minisblack",
+        extrasamples=["unassalpha"],
+        metadata=None,
+        **kwargs,
+    )
+    frame = read_tiff(path)
+    assert frame.pixels.shape == (H, W, colors)
+    assert np.array_equal(frame.pixels, _linear(data[..., :colors]))
+    assert frame.note.endswith("Alpha channel ignored; export has no alpha.")
+    preview = read_tiff_preview(path, max_edge=20)[0]
+    assert preview.pixels.shape[2] == colors
+    with tifffile.TiffFile(path) as tiff_file, EncodedRows(tiff_file.pages[0]) as reader:
+        for top, bottom, step in [(0, 10, 1), (28, 53, 1), (3, 40, 4)]:
+            assert np.array_equal(reader.rows(top, bottom, step), data[top:bottom:step, :, :colors])
+
+
+def test_associated_alpha_is_read_as_stored_color(tmp_path):
+    data = np.random.default_rng(4).integers(0, 65535, (4, 4, 4), dtype=np.uint16)
+    path = tmp_path / "premultiplied.tif"
+    tifffile.imwrite(path, data, photometric="rgb", extrasamples=["assocalpha"], metadata=None)
+    frame = read_tiff(path)
+    assert np.array_equal(frame.pixels, _linear(data[..., :3]))
+    assert "premultiplied: transparent areas appear black" in frame.note

@@ -98,7 +98,7 @@ def _matches_srgb_curve(value: bytes, expected: bytes) -> bool:
 
 
 def _matches_optional_tags(tags: dict[bytes, bytes], reference_tags: dict[bytes, bytes]) -> bool:
-    """Validate optional adaptation/chromaticity and a zero black point."""
+    """Validate optional adaptation/chromaticity; the black point is ignored."""
     for signature in (b"chad", b"chrm"):
         if signature in tags:
             if signature == b"chrm":
@@ -106,8 +106,7 @@ def _matches_optional_tags(tags: dict[bytes, bytes], reference_tags: dict[bytes,
                     return False
             elif not _matches_fixed_tag(tags[signature], reference_tags[signature]):
                 return False
-    if b"bkpt" in tags and tags[b"bkpt"] != b"XYZ \0\0\0\0" + bytes(12):
-        return False
+    # bkpt is informational: a matrix/TRC decode without black point compensation never uses it.
     return True
 
 
@@ -194,12 +193,25 @@ def _validated_page(tiff_file: tifffile.TiffFile) -> tuple[tifffile.TiffPage, st
         raise ValueError("Supported input: unsigned 8/16-bit TIFF. HDR is a later milestone.")
     if page.imagedepth > 1:
         raise ValueError("Use a single-page, flattened TIFF (no image stacks).")
-    if page.photometric not in (1, 2) or page.samplesperpixel not in (1, 3) or page.extrasamples:
-        raise ValueError("Use RGB or grayscale TIFF without alpha, palette or CMYK.")
+    colors: int = 3 if page.photometric == 2 else 1
+    if page.photometric not in (1, 2) or page.samplesperpixel < colors:
+        raise ValueError("Use RGB or grayscale TIFF; palette and CMYK are not supported.")
+    extras = tuple(int(extra) for extra in page.extrasamples)
+    if page.samplesperpixel != colors + len(extras) or any(
+        extra not in (0, 1, 2) for extra in extras
+    ):
+        raise ValueError("Use RGB or grayscale TIFF with only alpha extras.")
     if min(page.imagelength, page.imagewidth) < 2:
         raise ValueError("Expected an image of at least 2 × 2 pixels.")
     tag: TiffTag | None = page.tags.get(34675)
-    return page, _check_profile(tag.value if tag else None, page.photometric == 2)
+    note: str = _check_profile(tag.value if tag else None, page.photometric == 2)
+    if 1 in extras:  # Premultiplied color is the image composited over black: a valid flattening.
+        return (
+            page,
+            note
+            + " Alpha channel ignored (premultiplied: transparent areas appear black); export has no alpha.",
+        )
+    return page, note + (" Alpha channel ignored; export has no alpha." if extras else "")
 
 
 class EncodedRows:
@@ -217,7 +229,8 @@ class EncodedRows:
         """Describe the segment grid of a validated page."""
         self.page = page
         self.height, self.width = page.imagelength, page.imagewidth
-        self.channels: int = page.samplesperpixel
+        self.samples: int = page.samplesperpixel  # stored per pixel, including ignored extras
+        self.channels: int = 3 if page.photometric == 2 else 1  # color channels returned
         self.dtype = cast(
             np.dtype[np.uint8] | np.dtype[np.uint16], np.dtype(page.dtype).newbyteorder("=")
         )
@@ -227,8 +240,10 @@ class EncodedRows:
             mapped: EncodedPixels = page.asarray(out="memmap")
             if page.planarconfig == 2 and mapped.ndim == 3:
                 mapped = np.moveaxis(mapped, 0, -1)
-            self.mapped = mapped.reshape(self.height, self.width, self.channels)
-        self.planar: bool = page.planarconfig == 2 and self.channels > 1
+            self.mapped = mapped.reshape(self.height, self.width, self.samples)
+        self.planar: bool = page.planarconfig == 2 and self.samples > 1
+        # Planar reads skip the extra planes; interleaved ones keep them until the final slice.
+        self.stored: int = self.channels if self.planar else self.samples
         # Segment height/width: tile, or strip rows (clipped, a lone strip is rowsperstrip=2**32-1).
         self.seg_rows: int = page.tile[0] if page.tile else min(page.rowsperstrip, self.height)
         self.seg_cols: int = page.tile[1] if page.tile else self.width
@@ -291,8 +306,8 @@ class EncodedRows:
     def rows(self, top: int, bottom: int, step: int = 1) -> EncodedPixels:
         """Return rows top, top+step, ... below `bottom`; only those are read or decoded."""
         if self.mapped is not None:
-            return np.asarray(self.mapped[top:bottom:step], dtype=self.dtype)
-        out: EncodedPixels = np.zeros((bottom - top, self.width, self.channels), self.dtype)
+            return np.asarray(self.mapped[top:bottom:step, :, : self.channels], dtype=self.dtype)
+        out: EncodedPixels = np.zeros((bottom - top, self.width, self.stored), self.dtype)
         kept, self.kept = self.kept, None
         last: int = (bottom - 1) // self.seg_rows
         partial: bool = (last + 1) * self.seg_rows > bottom
@@ -320,7 +335,7 @@ class EncodedRows:
                 retained = self._extend(retained, plane, col, data)
         if retained is not None:
             self.kept = (last, retained)
-        return out[::step]
+        return out[::step, :, : self.channels]
 
     def _extend(
         self, band: EncodedPixels | None, plane: int, col: int, data: EncodedPixels
@@ -329,7 +344,7 @@ class EncodedRows:
         if band is None and not self.planar and self.grid_cols == 1:
             return np.asarray(data[0, :, : self.width], dtype=self.dtype)
         if band is None:
-            band = np.zeros((data.shape[1], self.width, self.channels), self.dtype)
+            band = np.zeros((data.shape[1], self.width, self.stored), self.dtype)
         left: int = col * self.seg_cols
         width: int = min(data.shape[2], self.width - left)
         rows: int = min(data.shape[1], band.shape[0])
