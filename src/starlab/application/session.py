@@ -50,6 +50,7 @@ class Session:
         self.detection_settings: DetectionSettings | None = None
         self._undo: list[EditState] = []
         self._redo: list[EditState] = []
+        self._gesture_start: EditState | None = None
 
     def _state(self) -> EditState:
         """Snapshot editable records while sharing immutable image-sized data."""
@@ -62,9 +63,10 @@ class Session:
         self.revision += 1
         self.preview = None
 
-    def _remember(self) -> None:
+    def _remember(self, state: EditState | None = None) -> None:
         """Append a bounded undo snapshot and discard obsolete redo states."""
-        self._undo.append(self._state())
+        self._gesture_start = None
+        self._undo.append(state or self._state())
         self._undo = self._undo[-60:]
         self._redo.clear()
 
@@ -75,6 +77,7 @@ class Session:
         self.sky_mask = None
         self.detection_settings = None
         self.edited = False
+        self._gesture_start = None
         self._undo.clear()
         self._redo.clear()
         self._changed()
@@ -83,14 +86,16 @@ class Session:
         """Apply controls, optionally recording one undo snapshot."""
         if settings == self.settings:
             return
-        if remember:
+        if self._gesture_start is not None:
+            self._remember(self._gesture_start)
+        elif remember:
             self._remember()
         self.settings = settings
         self._changed()
 
     def begin_edit(self) -> None:
-        """Save one snapshot before a continuous slider gesture."""
-        self._remember()
+        """Hold the pre-gesture state; it enters history only once the gesture changes settings."""
+        self._gesture_start = self._state()
 
     def set_catalog(
         self,
