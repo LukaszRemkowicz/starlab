@@ -11,14 +11,12 @@ concurrency:
   cancel-in-progress: true
 jobs:
   checks:
-    runs-on: ubuntu-latest
+    # 24.04 ships the Qt runtime libraries (libEGL) PySide6 needs, so no apt step
+    # depends on Ubuntu's package mirrors.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v5
-      - name: Install Qt runtime libraries
-        # PySide6 needs libEGL; the rest of Qt's runtime is already on the runner image.
-        run: |
-          install="sudo apt-get install -y --no-install-recommends -o Acquire::Retries=5 libegl1"
-          $install || (sudo apt-get update -o Acquire::Retries=5 && $install)
       - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
         with:
           python-version: '3.14'
