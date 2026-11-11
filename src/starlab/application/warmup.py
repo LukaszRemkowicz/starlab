@@ -41,6 +41,8 @@ def warm_up(services: ImageServices) -> int:
         source: Path = Path(directory) / "warm-up.tif"
         synthetic: ImageFrame = _synthetic_sky()
         services.write(source, synthetic, synthetic.pixels)
+        if services.read_preview is not None:
+            services.read_preview(source, max_edge=64)  # strided thumbnail read variant
         frame, sky_mask = services.open_image(source)
         stars: tuple[Star, ...] = ()
         for method in ("multiscale", "native"):

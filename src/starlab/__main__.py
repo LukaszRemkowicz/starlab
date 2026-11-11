@@ -33,7 +33,7 @@ def main() -> int:
         app.lastWindowClosed.connect(lambda: logger.info("Qt lastWindowClosed"))
         app.aboutToQuit.connect(lambda: logger.info("Qt aboutToQuit"))
         window: MainWindow = create_window()
-        preparation, ready = start_preparation()
+        preparation, ready = start_preparation(log_directory / "preparation.log")
         logger.info("Compiling image code in background: PID %d", preparation.pid)
         app.aboutToQuit.connect(preparation.terminate)
         if window.controller is not None:

@@ -267,7 +267,7 @@ def read_tiff_preview(
     """Return a quick strided preview, scale, original width and original height.
 
     Compatible uncompressed files are sampled directly from their map before
-    float conversion. Compressed TIFFs must first decode into a temporary map.
+    float conversion. Compressed TIFFs are decoded in memory first.
     This is an opening preview, not an antialiased export or detection input.
     """
     check_cancel(cancel)
