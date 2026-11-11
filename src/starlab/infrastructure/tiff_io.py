@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import os
 import struct
-import tempfile
 from functools import lru_cache
 from pathlib import Path
 from threading import Event
@@ -313,10 +312,9 @@ def write_tiff(
     tags: list[tuple[int, str, int, bytes, bool]] = (
         [(34675, "B", len(profile), profile, False)] if profile else []
     )
-    file_descriptor, temporary = tempfile.mkstemp(
-        prefix=f".{path.stem}-", suffix=".tif", dir=path.parent
-    )
-    os.close(file_descriptor)
+    # Unlike mkstemp (0600), touch honours the umask so exports stay readable like other files.
+    temporary: Path = path.parent / f".{path.stem}-{os.urandom(8).hex()}.tif"
+    temporary.touch(exist_ok=False)
     try:
         tifffile.imwrite(
             temporary,

@@ -2,7 +2,6 @@
 
 import json
 import os
-import tempfile
 from pathlib import Path
 
 from ..domain.effects.settings import EffectSettings
@@ -25,12 +24,11 @@ def save_preset(path: Path | str, settings: EffectSettings) -> None:
     """Serialize validated settings, replacing the destination atomically."""
     path = Path(path)
     text: str = json.dumps(preset_data(settings), indent=2, allow_nan=False)
-    file_descriptor, temporary_path = tempfile.mkstemp(
-        prefix=".preset-", suffix=".json", dir=path.parent
-    )
+    # Exclusive creation honours the umask, unlike mkstemp's private 0600 mode.
+    temporary_path: Path = path.parent / f".preset-{os.urandom(8).hex()}.json"
     try:
-        with os.fdopen(file_descriptor, "w", encoding="utf-8") as stream:
+        with temporary_path.open("x", encoding="utf-8") as stream:
             stream.write(text + "\n")
         os.replace(temporary_path, path)
     finally:
-        Path(temporary_path).unlink(missing_ok=True)
+        temporary_path.unlink(missing_ok=True)

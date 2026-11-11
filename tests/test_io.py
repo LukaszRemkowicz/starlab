@@ -1,3 +1,4 @@
+import os
 from dataclasses import replace
 
 import numpy as np
@@ -279,3 +280,23 @@ def test_reader_owned_buffer_transfer_does_not_weaken_public_copy_contract():
     assert trusted.pixels is data and not data.flags.writeable
     with pytest.raises(ValueError, match="owned"):
         ImageFrame._from_owned_validated(data[::2], "view", "linear-srgb", "")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_export_and_preset_files_follow_umask(tmp_path):
+    from starlab.domain.effects.settings import EffectSettings
+    from starlab.infrastructure.preset_json import save_preset
+    from starlab.infrastructure.tiff_io import read_tiff, write_tiff
+
+    source = tmp_path / "in.tif"
+    tifffile.imwrite(source, np.zeros((4, 4, 3), np.uint16), photometric="rgb")
+    frame = read_tiff(source)
+    umask = os.umask(0o022)
+    try:
+        write_tiff(tmp_path / "out.tif", frame, frame.pixels, source_path=source)
+        save_preset(tmp_path / "preset.json", EffectSettings())
+    finally:
+        os.umask(umask)
+    assert (tmp_path / "out.tif").stat().st_mode & 0o777 == 0o644
+    assert (tmp_path / "preset.json").stat().st_mode & 0o777 == 0o644
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["in.tif", "out.tif", "preset.json"]
