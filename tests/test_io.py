@@ -300,3 +300,20 @@ def test_export_and_preset_files_follow_umask(tmp_path):
     assert (tmp_path / "out.tif").stat().st_mode & 0o777 == 0o644
     assert (tmp_path / "preset.json").stat().st_mode & 0o777 == 0o644
     assert sorted(p.name for p in tmp_path.iterdir()) == ["in.tif", "out.tif", "preset.json"]
+
+
+def test_compressed_tiff_decodes_in_memory_without_temp_files(tmp_path, monkeypatch):
+    import tempfile as tempfile_module
+
+    from starlab.infrastructure.tiff_io import read_tiff
+
+    source = tmp_path / "compressed.tif"
+    data = np.arange(32 * 40 * 3, dtype=np.uint16).reshape(32, 40, 3)
+    tifffile.imwrite(source, data, photometric="rgb", compression="zlib")
+
+    def no_temp_files(*args, **kwargs):
+        raise AssertionError("photo data must not be written to a temporary file")
+
+    monkeypatch.setattr(tempfile_module, "NamedTemporaryFile", no_temp_files)
+    frame = read_tiff(source)
+    assert frame.pixels.shape == (32, 40, 3)

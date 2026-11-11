@@ -182,8 +182,14 @@ def _validated_page(tiff_file: tifffile.TiffFile) -> tuple[tifffile.TiffPage, st
         raise ValueError(
             "Unsupported TIFF orientation. Normalize rotation/mirroring in your editor."
         )
-    if page.dtype not in (np.dtype("uint8"), np.dtype("uint16")):
+    # 12-bit or 4-bit samples sit in 16/8-bit containers and would load far too dark.
+    if page.dtype not in (np.dtype("uint8"), np.dtype("uint16")) or page.bitspersample not in (
+        8,
+        16,
+    ):
         raise ValueError("Supported input: unsigned 8/16-bit TIFF. HDR is a later milestone.")
+    if page.imagedepth > 1:
+        raise ValueError("Use a single-page, flattened TIFF (no image stacks).")
     if page.photometric not in (1, 2) or page.samplesperpixel not in (1, 3) or page.extrasamples:
         raise ValueError("Use RGB or grayscale TIFF without alpha, palette or CMYK.")
     if min(page.imagelength, page.imagewidth) < 2:
@@ -194,9 +200,9 @@ def _validated_page(tiff_file: tifffile.TiffFile) -> tuple[tifffile.TiffPage, st
 
 def _mapped_pixels(page: tifffile.TiffPage) -> EncodedPixels:
     """Expose validated unsigned samples as H×W×C, mapping/decoding only as needed."""
-    # Direct mapping for compatible uncompressed TIFFs; other layouts and
-    # compressed files decode into tifffile's temporary map before sampling.
-    data: EncodedPixels = page.asarray(out="memmap")
+    # Uncompressed contiguous TIFFs map the source file directly. Everything else decodes
+    # in RAM: tifffile's "memmap" fallback would write the photo to a temporary file.
+    data: EncodedPixels = page.asarray(out="memmap" if page.is_memmappable else None)
     if page.planarconfig == 2 and data.ndim == 3:
         data = np.moveaxis(data, 0, -1)
     if data.ndim == 2:
@@ -294,7 +300,7 @@ def write_tiff(
             path.exists() and source.exists() and path.samefile(source)
         ):
             raise ValueError("Choose a new output file; the original image is protected.")
-    if pixels.shape != frame.pixels.shape or not np.isfinite(pixels).all() or pixels.min() < 0:
+    if pixels.shape != frame.pixels.shape:
         raise ValueError("Invalid output pixels.")
     check_cancel(cancel)
     rgb: bool = pixels.shape[2] == 3
@@ -302,6 +308,9 @@ def write_tiff(
     for row in range(0, pixels.shape[0], ROWS_PER_BLOCK):
         check_cancel(cancel)
         block: FloatArray = pixels[row : row + ROWS_PER_BLOCK]
+        # Checked per block so a huge export needs no extra full-image boolean buffer.
+        if not np.isfinite(block).all() or block.min() < 0:
+            raise ValueError("Invalid output pixels.")
         encoded: FloatArray = linear_to_srgb(block) if rgb else block
         output[row : row + ROWS_PER_BLOCK] = np.rint(np.clip(encoded, 0, 1) * 65535).astype(
             np.uint16
@@ -323,6 +332,10 @@ def write_tiff(
             metadata=None,
             extratags=tags,
         )
+        with temporary.open("rb+") as written:
+            os.fsync(written.fileno())  # a power cut must not leave a truncated export
+        if path.exists():
+            os.chmod(temporary, path.stat().st_mode & 0o7777)  # replacing keeps its permissions
         check_cancel(cancel)
         os.replace(temporary, path)
     finally:
