@@ -20,6 +20,7 @@ from ..array_types import BoolArray, ByteArray, FloatArray, IntArray
 from ..imaging import check_cancel, linear_to_srgb
 from ..jit import njit
 from ..sky_mask import SkyMask
+from .buffers import anonymous_array
 from .lookup_assets import ColorTransform, load_analysis_tables
 from .numeric import LUMA
 from .records import BitsArray, CodesArray, IndexArray
@@ -312,11 +313,15 @@ def _full_lcms() -> ByteArray:
 
 @njit(cache=True, nogil=True)
 def _full_proxy_bits(
-    bits: BitsArray, boundaries: BitsArray, buckets: ByteArray, cube: ByteArray, levels: FloatArray
+    bits: BitsArray,
+    boundaries: BitsArray,
+    buckets: ByteArray,
+    cube: ByteArray,
+    levels: FloatArray,
+    result: FloatArray,
 ) -> FloatArray:
-    """Fuse RGB encoding, universal CMM lookup, and normalized analysis levels for one tile."""
+    """Fuse RGB encoding, universal CMM lookup, and normalized analysis levels into `result`."""
     height, width, channels = bits.shape
-    result: FloatArray = np.empty((height, width, 3), np.float32)
     for row in range(height):
         for column in range(width):
             red: int | np.int64 = _encoded_value(bits[row, column, 0], boundaries, buckets, 12, 255)
@@ -339,4 +344,7 @@ def full_proxy(linear: FloatArray, denominator: float) -> FloatArray:
     # preserves its float32 division/multiplication and ties-to-even exactly.
     levels: FloatArray = decode(np.arange(256, dtype=np.uint8), denominator)
     values: FloatArray = np.asarray(linear, dtype=np.float32)
-    return _full_proxy_bits(values.view(np.uint32), boundaries, buckets, _full_lcms(), levels)
+    result: FloatArray = anonymous_array((*values.shape[:2], 3), np.float32)
+    return _full_proxy_bits(
+        values.view(np.uint32), boundaries, buckets, _full_lcms(), levels, result
+    )

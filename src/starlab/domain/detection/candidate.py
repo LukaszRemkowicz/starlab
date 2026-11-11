@@ -20,6 +20,7 @@ from ..array_types import (
     Position,
 )
 from ..jit import njit
+from .buffers import anonymous_array
 from .catalog import blend_record
 from .numeric import (
     LUMA,
@@ -42,9 +43,8 @@ type KernelKind = Literal["disk", "ring"]
 
 
 @njit(cache=True, nogil=True)
-def _luminance(rgb: FloatArray) -> FloatArray:
-    """Return H×W float32 luminance from an H×W×3 decoded detector tile."""
-    luminance: FloatArray = np.empty(rgb.shape[:2], np.float32)
+def _luminance(rgb: FloatArray, luminance: FloatArray) -> FloatArray:
+    """Fill H×W float32 luminance from an H×W×3 decoded detector tile."""
     for y in range(rgb.shape[0]):
         for x in range(rgb.shape[1]):
             luminance[y, x] = (
@@ -74,7 +74,7 @@ class Image:
         )
         self._stats_cached = lru_cache(maxsize=8192)(self._stats)
         self._color_cached = lru_cache(maxsize=4096)(self._color)
-        self.luminance = _luminance(self.rgb)
+        self.luminance = _luminance(self.rgb, anonymous_array(self.rgb.shape[:2], np.float32))
 
     def inside(self, x: float, y: float) -> bool:
         """Test global coordinates against this tile’s half-open bounds."""
