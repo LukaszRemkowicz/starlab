@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import os
 import struct
+from collections.abc import Iterable, Iterator
 from functools import lru_cache
 from pathlib import Path
 from threading import Event
@@ -290,14 +291,43 @@ def read_tiff_preview(
         return _convert_integer_image(data, path, note, cancel), 1 / stride, width, height
 
 
+def _encoded_rows(
+    pixels: Pixels | Iterable[Pixels], shape: tuple[int, ...], cancel: Event | None
+) -> Iterator[NDArray[np.uint16]]:
+    """Validate and encode float bands, yielding one uint16 row at a time."""
+    bands: Iterable[Pixels] = (
+        (pixels[row : row + ROWS_PER_BLOCK] for row in range(0, shape[0], ROWS_PER_BLOCK))
+        if isinstance(pixels, np.ndarray)
+        else pixels
+    )
+    written: int = 0
+    for band in bands:
+        check_cancel(cancel)
+        if band.ndim != 3 or band.shape[1:] != shape[1:] or written + band.shape[0] > shape[0]:
+            raise ValueError("Invalid output pixels.")
+        # Checked per band so a huge export needs no extra full-image boolean buffer.
+        if not np.isfinite(band).all() or band.min() < 0:
+            raise ValueError("Invalid output pixels.")
+        for start in range(0, band.shape[0], ROWS_PER_BLOCK):
+            encoded: FloatArray = linear_to_srgb(band[start : start + ROWS_PER_BLOCK])
+            block: NDArray[np.uint16] = np.rint(np.clip(encoded, 0, 1) * 65535).astype(np.uint16)
+            yield from (block if shape[2] == 3 else block[..., 0])
+        written += band.shape[0]
+    if written != shape[0]:
+        raise ValueError("Invalid output pixels.")
+
+
 def write_tiff(
     path: Path | str,
     frame: ImageFrame,
-    pixels: Pixels,
+    pixels: Pixels | Iterable[Pixels],
     source_path: Path | str | None = None,
     cancel: Event | None = None,
 ) -> None:
-    """Write atomically. A cancellation before replacement preserves the existing destination."""
+    """Write atomically from an array or full-width float row bands, top to bottom.
+
+    A cancellation before replacement preserves the existing destination.
+    """
     path = Path(path)
     if source_path is not None:
         source: Path = Path(source_path)
@@ -305,21 +335,11 @@ def write_tiff(
             path.exists() and source.exists() and path.samefile(source)
         ):
             raise ValueError("Choose a new output file; the original image is protected.")
-    if pixels.shape != frame.pixels.shape:
+    shape: tuple[int, ...] = frame.pixels.shape
+    if isinstance(pixels, np.ndarray) and pixels.shape != shape:
         raise ValueError("Invalid output pixels.")
     check_cancel(cancel)
-    rgb: bool = pixels.shape[2] == 3
-    output: NDArray[np.uint16] = np.empty(pixels.shape, np.uint16)
-    for row in range(0, pixels.shape[0], ROWS_PER_BLOCK):
-        check_cancel(cancel)
-        block: FloatArray = pixels[row : row + ROWS_PER_BLOCK]
-        # Checked per block so a huge export needs no extra full-image boolean buffer.
-        if not np.isfinite(block).all() or block.min() < 0:
-            raise ValueError("Invalid output pixels.")
-        encoded: FloatArray = linear_to_srgb(block)
-        output[row : row + ROWS_PER_BLOCK] = np.rint(np.clip(encoded, 0, 1) * 65535).astype(
-            np.uint16
-        )
+    rgb: bool = shape[2] == 3
     profile: bytes | None = (
         ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes() if rgb else None
     )
@@ -332,7 +352,9 @@ def write_tiff(
     try:
         tifffile.imwrite(
             temporary,
-            output if rgb else output[..., 0],
+            _encoded_rows(pixels, shape, cancel),
+            shape=shape if rgb else shape[:2],
+            dtype=np.uint16,
             photometric="rgb" if rgb else "minisblack",
             metadata=None,
             extratags=tags,

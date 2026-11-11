@@ -9,7 +9,7 @@ from typing import TypedDict
 
 from ..domain.array_types import Bounds, DoubleArray, FloatArray
 from ..domain.effects.profiles import image_diagonal, radial_extent
-from ..domain.effects.render import composite, render_effects
+from ..domain.effects.render import render_effects
 from ..domain.effects.settings import KINDS, EffectKind, EffectParameters, EffectSettings
 from ..domain.effects.soft_filter import (
     FilterOptions,
@@ -30,6 +30,9 @@ from .ports import (
     PreviewRenderer,
     SkyMaskProvider,
 )
+
+# Rows rendered, corrected and encoded at once during export.
+EXPORT_BAND_ROWS = 256
 
 
 @dataclass(frozen=True)
@@ -234,34 +237,71 @@ def render_preview(
 def _apply_export_source_filter(
     output: Pixels,
     effects: Pixels,
-    frame: ImageFrame,
+    source: Pixels,
+    top: int,
     stars: tuple[Star, ...],
     settings: EffectSettings,
     cancel: Event | None,
     sky_mask: SkyMask | None,
 ) -> None:
-    """Apply original-pixel corrections in bounded strips before effect composition."""
+    """Apply original-pixel corrections in bounded strips; ``source`` starts at row ``top``."""
     records: DoubleArray = reduction_records(filter_stars(stars, sky_mask))
     large_records: DoubleArray = enlargement_records(filter_stars(stars, sky_mask))
-    for top in range(0, frame.height, 128):
+    for start in range(0, source.shape[0], 128):
         check_cancel(cancel)
         reduction: FloatArray = star_reduction(
-            frame.pixels[top : top + 128],
+            source[start : start + 128],
             records,
             settings.soft.soft_filter,
-            origin=(0, top),
+            origin=(0, top + start),
             sky_mask=sky_mask,
             cancel=cancel,
         )
         enlargement: FloatArray = star_enlargement(
-            frame.pixels[top : top + 128],
+            source[start : start + 128],
             large_records,
             settings.soft.soft_filter,
-            origin=(0, top),
+            origin=(0, top + start),
             sky_mask=sky_mask,
             cancel=cancel,
         )
-        output[top : top + 128] += (enlargement - reduction) * (1 - effects[top : top + 128])
+        output[start : start + 128] += (enlargement - reduction) * (
+            1 - effects[start : start + 128]
+        )
+
+
+def _export_bands(
+    frame: ImageFrame,
+    stars: tuple[Star, ...],
+    settings: EffectSettings,
+    effects_only: bool,
+    cancel: Event | None,
+    sky_mask: SkyMask | None,
+) -> Iterator[Pixels]:
+    """Yield the final linear pixels one full-width band at a time."""
+    diagonal: int = image_diagonal(frame.width, frame.height)
+    visible: tuple[Star, ...] = filter_stars(stars, sky_mask)
+    for top in range(0, frame.height, EXPORT_BAND_ROWS):
+        check_cancel(cancel)
+        bottom: int = min(top + EXPORT_BAND_ROWS, frame.height)
+        source: Pixels = frame.pixels[top:bottom]
+        translated: tuple[Star, ...] = _region_sources(
+            visible, settings, (0, top, frame.width, bottom), diagonal
+        )
+        effects: FloatArray = render_effects(
+            _RegionView(source), translated, settings, cancel, diagonal=diagonal, export=True
+        )
+        if sky_mask is not None:
+            effects *= sky_mask.region((0, top, frame.width, bottom), 1)[..., None]
+        if effects_only:
+            yield effects
+            continue
+        output: FloatArray = source + (1 - source) * effects
+        if settings.soft.enabled and settings.soft.soft_filter:
+            _apply_export_source_filter(
+                output, effects, source, top, stars, settings, cancel, sky_mask
+            )
+        yield output
 
 
 @dataclass
@@ -332,10 +372,8 @@ class ImageServices:
         cancel: Event | None = None,
         sky_mask: SkyMask | None = None,
     ) -> None:
-        """Render full-resolution layers and pass the final pixels to the protected writer."""
-        effects: FloatArray = render_effects(frame, stars, settings, cancel, sky_mask=sky_mask)
-        output: FloatArray = effects if effects_only else composite(frame, effects)
-        if not effects_only and settings.soft.enabled and settings.soft.soft_filter:
-            _apply_export_source_filter(output, effects, frame, stars, settings, cancel, sky_mask)
-        check_cancel(cancel)
-        self.write(path, frame, output, source_path=source, cancel=cancel)
+        """Stream full-resolution row bands to the protected writer; no full-size layer exists."""
+        bands: Iterator[Pixels] = _export_bands(
+            frame, stars, settings, effects_only, cancel, sky_mask
+        )
+        self.write(path, frame, bands, source_path=source, cancel=cancel)

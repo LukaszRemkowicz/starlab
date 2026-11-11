@@ -33,6 +33,8 @@ type LitArrays = tuple[IndexArray, Pixels]
 SCENE_CACHE = ArrayCache[SceneArrays](128)
 GROUP_CACHE = ArrayCache[Pixels](32)
 LIGHT_CACHE = ArrayCache[LitArrays](64)
+# Sources per batch in an export band: bounds the transient ray arrays of long Secondary rays.
+EXPORT_BATCH = 4
 LUMA = np.array([0.212639004, 0.715168655, 0.072192311], np.float32)
 
 
@@ -60,9 +62,12 @@ def fit_to_white(light: Pixels) -> Pixels:
     return result
 
 
-def _grouped_ray_scene(kind: EffectKind, sampling: int, source_count: int, region: bool) -> bool:
+def _grouped_ray_scene(
+    kind: EffectKind, sampling: int, source_count: int, region: bool, export: bool = False
+) -> bool:
     """Select the ray path whose contributions are sorted for grouped reduction."""
-    return ((sampling > 1 and source_count > 8) or region) and kind in (
+    # Export bands are full resolution; the sparse path is faster there.
+    return ((sampling > 1 and source_count > 8) or (region and not export)) and kind in (
         "primary",
         "secondary",
     )
@@ -145,6 +150,16 @@ def _sparse_scene(
                 if region
                 else None,
             )
+            if kind in ("primary", "secondary"):  # rows ascend: keep only the image's rows
+                if (
+                    not len(offset_y)
+                    or offset_y[0] >= height - origin_y
+                    or offset_y[-1] < -origin_y
+                ):
+                    continue
+                first, last = np.searchsorted(offset_y, (-origin_y, height - origin_y))
+                offset_x, offset_y = offset_x[first:last], offset_y[first:last]
+                values, radius = values[first:last], radius[first:last]
             world_x: IndexArray
             world_y: IndexArray
             world_x, world_y = offset_x + origin_x, offset_y + origin_y
@@ -178,6 +193,7 @@ def _scene(
     sampling: int,
     cancel: Event | None,
     diagonal: int | None = None,
+    export: bool = False,
 ) -> SceneArrays:
     """Cache integer pixel indices, transverse profiles, radii and source indices."""
     region: bool = diagonal is not None
@@ -192,11 +208,11 @@ def _scene(
         diagonal,
         region,
     )
-    cached: SceneArrays | None = SCENE_CACHE.get(key)
+    cached: SceneArrays | None = None if export else SCENE_CACHE.get(key)
     if cached is not None:
         return cached
     arrays: SceneArrays | None
-    if _grouped_ray_scene(kind, sampling, len(stars), region):
+    if _grouped_ray_scene(kind, sampling, len(stars), region, export):
         arrays = _sampled_scene(
             width,
             height,
@@ -217,7 +233,7 @@ def _scene(
                 tuple(np.empty(0, dtype) for dtype in (np.int32, np.float32, np.float32, np.int32)),
             )
     check_cancel(cancel)
-    return SCENE_CACHE.put(key, arrays)
+    return arrays if export else SCENE_CACHE.put(key, arrays)
 
 
 def _lit_scene(
@@ -229,6 +245,7 @@ def _lit_scene(
     sampling: int,
     cancel: Event | None,
     diagonal: int | None = None,
+    export: bool = False,
 ) -> LitArrays:
     """Cache source-colored ray light independently of the intensity slider."""
     channels: int = frame.pixels.shape[2]
@@ -245,12 +262,12 @@ def _lit_scene(
         sampling,
         diagonal,
     )
-    cached: LitArrays | None = LIGHT_CACHE.get(key)
+    cached: LitArrays | None = None if export else LIGHT_CACHE.get(key)
     if cached is not None:
         return cached
     radius: FloatArray
     indices, profile, radius, source = _scene(
-        frame.width, frame.height, stars, kind, parameters, sampling, cancel, diagonal
+        frame.width, frame.height, stars, kind, parameters, sampling, cancel, diagonal, export
     )
     brightness: FloatArray = np.array([star.brightness for star in stars], np.float32)
     threshold: float = (1 - parameters.quantity / 100) ** 2 * maximum
@@ -302,7 +319,8 @@ def _lit_scene(
         )
         light *= np.maximum(1 + amount[:, None] * modulation, 0)
     check_cancel(cancel)
-    return LIGHT_CACHE.put(key, (indices[selected], light.astype(np.float32)))
+    lit: LitArrays = indices[selected], light.astype(np.float32)
+    return lit if export else LIGHT_CACHE.put(key, lit)
 
 
 def _group(
@@ -314,6 +332,7 @@ def _group(
     sampling: int,
     cancel: Event | None,
     diagonal: int | None = None,
+    export: bool = False,
 ) -> Pixels:
     """Screen-compose one emission group into an immutable sampled layer."""
     output_height: int
@@ -334,7 +353,7 @@ def _group(
         sampling,
         diagonal,
     )
-    cached: Pixels | None = GROUP_CACHE.get(key)
+    cached: Pixels | None = None if export else GROUP_CACHE.get(key)
     if cached is not None:
         return cached
     threshold: float = (1 - parameters.quantity / 100) ** 2 * maximum
@@ -346,16 +365,18 @@ def _group(
     )
     if diagonal is not None:
         batch = min(64, max(1, 1048576 // (4 * (frame.width + frame.height))))
+    if export:
+        batch = EXPORT_BATCH
     for base in range(0, len(stars), batch):
         subset: tuple[Star, ...] = stars[base : base + batch]
         indices, light = _lit_scene(
-            frame, subset, maximum, kind, parameters, sampling, cancel, diagonal
+            frame, subset, maximum, kind, parameters, sampling, cancel, diagonal, export
         )
         for start in range(0, len(indices), 131072):
             check_cancel(cancel)
             pixels: IndexArray = indices[start : start + 131072]
             factors: Pixels = 1 - fit_to_white(light[start : start + 131072] * intensity)
-            if _grouped_ray_scene(kind, sampling, len(subset), diagonal is not None):
+            if _grouped_ray_scene(kind, sampling, len(subset), diagonal is not None, export):
                 boundaries: IntArray = np.r_[0, np.flatnonzero(np.diff(pixels)) + 1]
                 transmission[pixels[boundaries]] *= np.multiply.reduceat(
                     factors, boundaries, axis=0
@@ -364,7 +385,7 @@ def _group(
                 np.multiply.at(transmission, pixels, factors)
     result: Pixels = (1 - transmission).reshape(output_height, output_width, channels)
     check_cancel(cancel)
-    return GROUP_CACHE.put(key, result)
+    return result if export else GROUP_CACHE.put(key, result)
 
 
 def render_effects(
@@ -376,8 +397,13 @@ def render_effects(
     sampling: int = 1,
     diagonal: int | None = None,
     sky_mask: SkyMask | None = None,
+    export: bool = False,
 ) -> Pixels:
-    """Render Screen-composed linear emission without modifying the source pixels."""
+    """Render Screen-composed linear emission without modifying the source pixels.
+
+    ``export`` marks a full-resolution band: layers bypass the shared caches (their keys
+    never repeat) and rays use the faster sparse path.
+    """
     check_cancel(cancel)
     stars = filter_stars(stars, sky_mask)
     if sampling < 1:
@@ -392,7 +418,7 @@ def render_effects(
         if not parameters.enabled or parameters.intensity == 0 or parameters.quantity == 0:
             continue
         group: Pixels = _group(
-            frame, visible, maximum, kind, parameters, sampling, cancel, diagonal
+            frame, visible, maximum, kind, parameters, sampling, cancel, diagonal, export
         )
         result += (1 - result) * group
     check_cancel(cancel)
