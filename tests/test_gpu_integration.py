@@ -145,6 +145,19 @@ def test_full_resolution_groups_match_cpu(gpu, channels, kind, record_property):
     _assert_parity(actual.effects, expected.effects, secondary=kind == "secondary")
 
 
+@pytest.mark.parametrize("kind", ["primary", "soft"])
+def test_brightness_above_one_matches_cpu(gpu, kind):
+    render, _ = gpu
+    frame, stars = _scene(3)
+    stars = (replace(stars[0], brightness=10.0), stars[1])
+    base = _settings(kind)
+    settings = replace(base, **{kind: replace(getattr(base, kind), quantity=50)})
+    expected = render_preview(frame, stars, settings, full_resolution=True)
+    actual = render(frame, stars, settings, full_resolution=True)
+    assert np.isfinite(actual.effects).all() and actual.effects.max() > 0
+    _assert_parity(actual.effects, expected.effects, secondary=False)
+
+
 @pytest.mark.parametrize("channels", [1, 3], ids=["gray", "rgb"])
 def test_groups_compose_with_both_source_corrections(gpu, channels):
     render, _ = gpu

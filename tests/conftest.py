@@ -16,7 +16,9 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers", "slow: numerical correctness checks allowing cold JIT compilation"
     )
     if config.getoption("--run-gpu") and os.environ["QT_QPA_PLATFORM"] == "offscreen":
-        os.environ["QT_QPA_PLATFORM"] = "windows" if sys.platform == "win32" else "xcb"
+        os.environ["QT_QPA_PLATFORM"] = {"win32": "windows", "darwin": "cocoa"}.get(
+            sys.platform, "xcb"
+        )
 
 
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
