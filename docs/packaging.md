@@ -91,4 +91,5 @@ cache files.
 
 On a clean machine, install, start the app, open a photo straight away, and read
 `startup.log`: the time from `Job started: analyze` to `Worker idle` must be about
-a second, not tens of seconds. The log location is listed in the README.
+a second, not tens of seconds. The log location is listed in the README. Force Quit, Activity Monitor and
+Task Manager must show `Star Effects Lab` with its icon.
