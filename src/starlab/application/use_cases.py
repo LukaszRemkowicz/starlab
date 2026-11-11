@@ -18,7 +18,7 @@ from ..domain.effects.soft_filter import (
     star_enlargement,
     star_reduction,
 )
-from ..domain.imaging import ImageFrame, Pixels, check_cancel
+from ..domain.imaging import ImageFrame, Pixels, check_cancel, preview_region_bounds
 from ..domain.photometry import calibrate_sources
 from ..domain.sky_mask import SkyMask
 from ..domain.stars import DetectionSettings, Star, detect_stars, filter_stars
@@ -99,23 +99,6 @@ class _RegionView:
         return int(self.pixels.shape[0])
 
 
-def _preview_region_bounds(
-    frame: ImageFrame, region: tuple[int, int, int, int], sampling: int
-) -> tuple[int, int, int, int]:
-    """Clip a requested ROI and require two sampled pixels along each image axis."""
-    left, top, right, bottom = region
-    left, top = max(0, int(left)), max(0, int(top))
-    right, bottom = min(frame.width, int(right)), min(frame.height, int(bottom))
-    if (
-        type(sampling) is not int
-        or sampling < 1
-        or (right - left + sampling - 1) // sampling < 2
-        or (bottom - top + sampling - 1) // sampling < 2
-    ):
-        raise ValueError("Preview region must contain at least two sampled pixels on each axis.")
-    return left, top, right, bottom
-
-
 def _region_sources(
     stars: tuple[Star, ...],
     settings: EffectSettings,
@@ -172,7 +155,7 @@ def _render_region(
 ) -> Preview:
     """Render a source-aligned crop while retaining full-image effect scaling."""
     check_cancel(cancel)
-    left, top, right, bottom = _preview_region_bounds(frame, region, sampling)
+    left, top, right, bottom = preview_region_bounds(frame, region, sampling)
     diagonal: int = image_diagonal(frame.width, frame.height)
     translated: tuple[Star, ...] = _region_sources(
         stars, settings, (left, top, right, bottom), diagonal
@@ -287,17 +270,19 @@ class ImageServices:
 
     read: ImageReader
     write: ImageWriter
-    load_catalog: Callable[[Path, DetectionSettings], tuple[Star, ...] | None] | None = None
-    save_catalog: Callable[[Path, DetectionSettings, tuple[Star, ...]], None] | None = None
     read_preview: PreviewReader | None = None
     preview: PreviewRenderer | None = None
     sky_mask: SkyMaskProvider | None = None
     read_mask: MaskReader | None = None
+    # Waits for background compilation so a photo opened early does not compile it twice.
+    ready: Callable[[Event | None], None] | None = None
 
     def open_image(
         self, source: Path, cancel: Event | None = None
     ) -> tuple[ImageFrame, SkyMask | None]:
         """Read the image and optional encoded-source mask concurrently under one token."""
+        if self.ready is not None:
+            self.ready(cancel)
         if self.read_mask is None:
             return self.read(source, cancel), None
         token: Event = cancel if cancel is not None else Event()
@@ -317,20 +302,16 @@ class ImageServices:
         settings: DetectionSettings = DetectionSettings(),
         cancel: Event | None = None,
         *,
-        force: bool = False,
         sky_mask: SkyMask | None = None,
     ) -> tuple[Star, ...]:
-        """Reuse an authorized catalogue cache or detect and measure original source pixels."""
+        """Detect and measure sources on the original pixels of the open image."""
         check_cancel(cancel)
+        if self.ready is not None:
+            self.ready(cancel)
         if sky_mask is None and settings.sky_only and self.sky_mask is not None:
             sky_mask = self.sky_mask(frame, source, cancel)
         if settings.sky_only and sky_mask is None:
             raise ValueError("Sky mask is unavailable. Disable Sky only to analyze without it.")
-        if source is not None and self.load_catalog is not None and not force:
-            cached: tuple[Star, ...] | None = self.load_catalog(source, settings)
-            if cached is not None:
-                check_cancel(cancel)
-                return cached
         stars: tuple[Star, ...] = (
             detect_stars(frame, settings, cancel, sky_mask=sky_mask)
             if sky_mask is not None
@@ -338,8 +319,6 @@ class ImageServices:
         )
         stars = calibrate_sources(frame, stars, sky_mask=sky_mask, cancel=cancel)
         check_cancel(cancel)
-        if source is not None and self.save_catalog is not None:
-            self.save_catalog(source, settings, stars)
         return stars
 
     def export(

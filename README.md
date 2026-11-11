@@ -1,49 +1,324 @@
-# StarLab
+# Star Effects Lab
 
-StarLab is a standalone desktop editor for star diffraction and glow effects on TIFF photographs. It uses Python, Qt, Numba and OpenGL. The application currently opens as **Star Effects Lab** and runs through the `star-effects-lab` command.
+Star Effects Lab adds diffraction spikes, soft glow and halo rings to the stars
+in your night-sky photos. Open a TIFF and the app finds the stars for you. You
+then shape the effects with sliders and export a new 16-bit TIFF. Your original
+file is never changed.
 
-## Run
+The app is free for everyone under the [MIT License](LICENSE).
 
-Install [uv](https://docs.astral.sh/uv/), then run from the checkout:
+- [What it does](#what-it-does)
+- [Before you start](#before-you-start)
+- [Install](#install)
+- [Start the app](#start-the-app)
+- [Update or remove the app](#update-or-remove-the-app)
+- [Your first edit in five steps](#your-first-edit-in-five-steps)
+- [The controls](#the-controls)
+- [Viewing your image](#viewing-your-image)
+- [Fixing individual stars](#fixing-individual-stars)
+- [Presets](#presets)
+- [Exporting](#exporting)
+- [Which images work](#which-images-work)
+- [Tips](#tips)
+- [Troubleshooting](#troubleshooting)
+- [For developers](#for-developers)
+
+## What it does
+
+- **Finds stars automatically.** A built-in neural network separates the sky
+  from trees, mountains and buildings. Effects are added only to stars in the
+  sky, never to the landscape.
+- **Diffraction spikes.** Choose the number of spikes, their length and angle,
+  and add a second, finer set of spikes if you want one.
+- **Soft glow and halo rings.** Add the look of a softening filter or a lens
+  ring around bright stars.
+- **Soft filter.** Small stars get slightly smaller and big stars slightly
+  larger, much like a diffusion filter on the lens.
+- **Color.** Keep each star's natural color, change the hue and saturation, or
+  add a rainbow tint to the spikes.
+- **Live preview.** See every change straight away, compare it with the
+  original, and zoom in to check single pixels.
+- **Fix the detection by hand.** Move, add, hide or recolor individual stars.
+
+## Before you start
+
+You need:
+
+- **A computer with Windows or macOS.** Both have been tested. Linux may work
+  but has not been checked.
+- **A graphics card that supports OpenGL 3.3.** Almost any graphics card from
+  the last ten years does.
+- **Enough memory for your photo.** The app keeps the whole photo in memory.
+  Measured on a 48-megapixel photo, it needs about 2.5 GB at its peak, or about
+  4 GB if the TIFF is compressed (LZW/ZIP). That is roughly 50-85 bytes per
+  pixel, so a 200-megapixel panorama needs 10-17 GB. Very large panoramas may
+  not fit on a computer with 16 GB of RAM.
+- **An internet connection** for the first install.
+
+## Install
+
+Star Effects Lab does not have an installer yet. You install it with
+[uv](https://docs.astral.sh/uv/), a small tool that downloads the right Python
+version and everything else the app needs. You do not have to install Python
+yourself.
+
+1. **Install uv.** On Windows, open PowerShell and run:
+
+   ```powershell
+   powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+   ```
+
+   On macOS, open Terminal and run:
+
+   ```bash
+   curl -LsSf https://astral.sh/uv/install.sh | sh
+   ```
+
+   Close the window and open a new one so it finds the `uv` command. The commands
+   below are the same on Windows and macOS. For Linux, see the
+   [uv install guide](https://docs.astral.sh/uv/getting-started/installation/).
+
+2. **Download Star Effects Lab.** If you have Git:
+
+   ```powershell
+   git clone --branch dev https://github.com/LukaszRemkowicz/starlab.git
+   cd starlab
+   ```
+
+   Without Git, switch the branch on the GitHub page to **dev**, click **Code →
+   Download ZIP**, unpack the archive, and open PowerShell or Terminal in the
+   unpacked folder.
+
+3. **Install what the app needs.** This takes a few minutes the first time:
+
+   ```powershell
+   uv sync
+   ```
+
+## Start the app
+
+From the `starlab` folder, run:
 
 ```powershell
-uv sync
 uv run star-effects-lab
+```
+
+To open a photo straight away, add its path:
+
+```powershell
 uv run star-effects-lab 'D:\photos\night-sky.tif'
 ```
 
-An optional image argument opens that file at startup. Without it, use the folder button. The file dialog remembers its last directory. Python 3.14 is required; uv selects an appropriate interpreter.
+On macOS, a path looks like `~/Pictures/night-sky.tif`.
 
-The current desktop preview requires OpenGL 3.3. This checkout has been exercised on Windows. macOS packaging and runtime verification are still pending.
+The first start after installing or updating prepares the app's image code in
+the background, which takes up to about a minute once. The window is usable
+straight away; a photo you open during that time simply waits for it. After that,
+finding stars usually takes about a second.
 
-## Editing
+## Update or remove the app
 
-1. Open a supported TIFF. StarLab reads the original pixels, builds a sky mask and detects sources across the image.
-2. Use **General** to adjust detection. The foreground is always excluded. The mask icon changes mask visibility; it does not disable protection.
-3. Configure **Primary**, **Secondary**, **Soft Flare** and **Ring Flare**. Each group has independent controls. Advanced mode exposes color, rainbow and edge parameters; switching modes preserves values.
-4. Use **Original**, **Result**, **Effects only** or **Compare**. **100%** displays original-resolution pixels for the visible region. Hold **Before** to inspect the source temporarily.
-5. Export a new 16-bit TIFF. The application protects the input file from overwrite. Presets store effect settings; they do not store the image or manually edited source catalogue.
+To update, open PowerShell or Terminal in the `starlab` folder and run:
 
-### Soft filter
-
-The **Soft filter** control belongs to Soft Flare. It modifies measured source profiles before effect layers are composited: smaller stars shrink gently and larger stars expand. It works with halo **Quantity=0** and **Intensity=0**. These two controls govern the additional halo, not the source-profile correction.
-
-```text
-original pixels → source-profile correction → effect layers → result
+```powershell
+git pull
+uv sync
 ```
 
-`Soft filter = 0` preserves the source pixels. Disabling the whole Soft Flare group disables its source correction as well. Original always displays the unmodified source; Effects only displays added effect layers, excluding source-profile corrections. Source positions and classification stay fixed during slider movement.
+Without Git, download the ZIP again and replace the folder. To remove the app,
+delete the `starlab` folder and the app's data folder (the folder that holds
+`logs`, listed under [Troubleshooting](#troubleshooting)).
 
-## Supported images and limits
+## Your first edit in five steps
 
-- Single-page, RGB or grayscale TIFF, 8 or 16 bits per sample; no alpha.
-- RGB without an ICC profile is interpreted as sRGB. Untagged grayscale is interpreted as linear. Supported embedded profiles are checked numerically; an unsupported profile must be converted to sRGB in an image editor before import. Removing a profile is not a color conversion.
-- The working image is immutable float32 linear RGB. Large panoramas need substantial RAM. TIFF orientation must already be normalized to 1.
-- The sky model and detector can miss or misclassify sources. Crowded, saturated and irregular stars have less reliable photometry. Soft filter uses approximate source profiles, not full PSF fitting.
-- Fit view samples a reduced grid; use 100% for sharpness and pixel alignment. Preview does not implement complete monitor-profile color management.
-- No FITS, HDR workflow, batch export, persistent editing sessions or macOS installer. Interactive latency and startup depend on image content, hardware and first-use Numba compilation; there is no universal 10-second guarantee.
+1. **Open a photo.** Click **Load Image** or drag a TIFF into the window. Later
+   you can open another photo with the folder icon (Ctrl+O, or Cmd+O on a Mac). The
+   app builds the sky mask and finds the stars. The counter in **General**
+   shows how many stars it found.
+2. **Pick a starting look.** At the bottom, choose a preset: **Default
+   Spikes**, **Subtle Glow** or **Dramatic Diffraction**.
+3. **Adjust the effects.** Open the **Spikes**, **Soft Flare** and **Ring Flare**
+   tabs and move the sliders. The preview updates as you drag.
+4. **Check the result.** Hold **Hold for Before** to see the original for a
+   moment, or switch the view to **Compare**. Click **100%** to inspect fine
+   detail.
+5. **Export.** Click **Export**, choose **Result**, and pick a file name.
 
-## Development
+## The controls
+
+The panel on the right has one tab for star detection and one tab for each
+effect.
+
+### General: finding stars
+
+| Control | What it does |
+| --- | --- |
+| **Automatic Star Detection** | Finds stars as soon as you open an image. Turn it off if you want to start detection yourself. |
+| **Star detector** | **Original-style detector** suits most photos. **Multiscale · larger stars** also picks up big, soft stars. |
+| **Minimum brightness** / **Detection threshold** | How bright a star must be to be found. Lower values find more, fainter stars. The original-style detector uses a brightness from 0.04 to 0.98; the multiscale detector uses a threshold in σ (1-30) above the local noise. |
+| **Detect stars** | Runs detection again with the current settings. If you have edited stars by hand, the app asks first, because detection replaces those edits. |
+| **Show star centers** | Marks each detected star in the preview. |
+
+The app remembers the stars it found, and your edits to them, only while the
+photo is open. Moving sliders never runs detection again. When you close the app
+or open another photo, the stars are found afresh; nothing is saved next to your
+files.
+
+### Effect tabs
+
+Each effect tab (**Primary** and **Secondary** under **Spikes**, plus **Soft
+Flare** and **Ring Flare**) has its own **Enable** checkbox, its own sliders,
+and a **Reset this group** button.
+
+The panel opens in **Advanced** mode, which shows every slider. Choose **Basic**
+to see the main sliders only. Switching between the two keeps your values.
+
+| Slider | What it does |
+| --- | --- |
+| **Quantity** | Which stars get the effect. Higher values add it to fainter stars too; lower values keep it to the brightest stars. |
+| **Intensity** | How bright the effect is. |
+| **Length** | How long the spikes are. |
+| **Angle** | Rotates the spikes. |
+| **Number of points** | How many spikes each star gets (Primary only). |
+| **Spike sharpness**, **Spike spread** | How thin and how fanned out the spikes are. |
+| **Size** | How large the glow or ring is. |
+| **Soft filter** | Shrinks small stars and enlarges big ones (Soft Flare tab). At 0 the stars stay as they are. |
+| **Edge falloff**, **Inner/Outer edge width and falloff** | How softly the glow or ring fades at its edges. |
+| **Color saturation**, **Color hue** | Change the effect's color. At saturation 0 each effect keeps its star's natural color. |
+| **Rainbow intensity**, **frequency**, **phase** | Add a rainbow tint along the spikes and control how it repeats. |
+
+**Soft filter** works even when the glow itself is set to zero, so you can use
+it on its own: set **Quantity** or **Intensity** to 0 in **Soft Flare** and
+keep **Soft filter** above 0. Turning off the whole **Soft Flare** tab also
+turns Soft filter off.
+
+## Viewing your image
+
+Use the menu in the toolbar to switch between views:
+
+| View | What you see |
+| --- | --- |
+| **Result** | Your photo with all effects. |
+| **Original** | Your photo exactly as it was opened. |
+| **Effects only** | Just the added spikes and glow, on black. |
+| **Compare** | A split view: original on one side, result on the other. |
+| **Sky mask** | Blue for sky, red for foreground, yellow where the app is unsure. |
+
+- **Zoom** with the mouse wheel or the **−** and **+** buttons.
+- **Fit** shows the whole image; it is a quick, reduced preview.
+- **100%** shows real pixels. Use it to judge sharpness.
+- **Hold for Before** shows the original while you hold it.
+- **Apply** redraws the preview with the current settings.
+- **Cancel** stops a long task, such as detection.
+
+The mask icon in the toolbar switches the sky-mask colors on and off over the
+current view. The foreground is always protected, even when the mask is hidden.
+
+## Fixing individual stars
+
+Pick a tool in the toolbar:
+
+- **Pan image** moves around the photo. You can also hold **Space** with any
+  tool to pan.
+- **Edit star** opens a star's position, brightness and color when you click
+  it.
+- **Add star** places a new star where you click.
+- **Hide / show star** removes a star from the effects without deleting it.
+
+**Undo** (Ctrl+Z, or Cmd+Z on a Mac) and **Redo** (Ctrl+Y, or Cmd+Shift+Z on a
+Mac) work for star edits and for slider changes. One slider drag counts as one
+step.
+
+## Presets
+
+- **Default Spikes**, **Subtle Glow** and **Dramatic Diffraction** are built in.
+  **Reset** goes back to Default Spikes.
+- Use the folder and disk icons next to the preset menu to load and save your
+  own presets as `.json` files.
+- A preset stores only the effect settings. It does not store the photo or any
+  stars you edited by hand.
+
+## Exporting
+
+Click **Export** and choose what to save:
+
+- **Result:** your photo with all effects.
+- **Effects only (added glow on black):** just the effects, ready to blend in
+  another editor, for example with the Screen blend mode. The Soft filter
+  changes to the stars themselves are not part of this layer.
+
+The export is always a new 16-bit TIFF. Color photos are saved in sRGB with an
+embedded sRGB profile; grayscale photos are saved with the same tone curve and
+no profile. The app will not let you overwrite the photo you opened. Camera data
+such as EXIF is not copied into the export.
+
+## Which images work
+
+| Works | Does not work yet |
+| --- | --- |
+| TIFF (`.tif`, `.tiff`), 8 or 16 bits per channel | JPEG, PNG, RAW, FITS; 12-bit or 32-bit TIFF |
+| Uncompressed or compressed (LZW, ZIP) | Images with transparency (alpha), CMYK, palette images |
+| RGB color with an sRGB profile or no profile | Other profiles, such as Adobe RGB or ProPhoto |
+| Grayscale with no profile | Grayscale with an embedded profile (such as Gray Gamma 2.2) |
+| Single-page TIFF | Multi-page TIFF, HDR images |
+
+Files without a profile, color or grayscale, are read with the sRGB tone curve,
+the way most editors save them.
+
+If the app rejects your file, its message tells you why. The usual fixes, all
+done in your photo editor:
+
+- **Wrong color profile:** convert a color image to sRGB. Removing the profile
+  is not the same as converting it. For grayscale, convert to sRGB grayscale or
+  save without a profile.
+- **Rotated image:** save the image with its rotation applied.
+- **Transparency:** flatten the image before saving.
+
+## Tips
+
+- **Start from a finished photo.** The app expects an image that is already
+  stretched and processed for viewing, not a raw linear stack.
+- **Too many spikes?** Lower **Quantity** so only the brightest stars get them.
+- **Effects on the landscape?** Look at the **Sky mask** view. Areas marked red
+  are protected; if the mask is wrong in a spot, hide the affected stars by hand.
+- **Judge sharpness at 100%,** not in Fit view.
+- **Very bright spikes fade to white.** Where an effect is brighter than the
+  image can show, its color thins out toward white, like an overexposed star,
+  while the edges keep their color. Lower **Intensity** if you want more color
+  in the brightest parts.
+
+## Troubleshooting
+
+**The window is black or the app closes right after starting.**
+Update your graphics card driver. The preview needs OpenGL 3.3.
+
+**Finding stars takes up to a minute the first time.**
+This happens once after installing or updating, while the app prepares its image
+code in the background. Later, detection usually takes about a second. Large
+panoramas need more time and memory, so close other memory-hungry programs.
+
+**The app says it cannot start because of log files.**
+The app always writes a log and refuses to start if it cannot. Check that the
+folder named in the message exists and that you can write to it; the usual
+locations are listed below.
+
+**A star was missed, or something that is not a star got an effect.**
+Use **Add star** or **Hide / show star**, or change the detection threshold in
+**General**.
+
+**The app crashed.**
+The app writes logs you can attach to a bug report. They are usually here:
+
+| System | Log file |
+| --- | --- |
+| Windows | `%LOCALAPPDATA%\Star Effects Lab\Star Effects Lab\logs\startup.log` |
+| macOS | `~/Library/Application Support/Star Effects Lab/Star Effects Lab/logs/startup.log` |
+
+In the same folder, `native-crash.log` records low-level crashes and
+`preparation.log` records problems while the app prepares its image code. The
+logs contain no image data and are never sent anywhere.
+
+## For developers
 
 ```powershell
 uv run pytest -q
@@ -53,6 +328,11 @@ uv run mypy
 uv run pylint src/starlab
 ```
 
-The full tests use checked-in fixtures and do not depend on an external research folder. `tools/`, local environments, IDE settings and generated artifacts are excluded from publication.
+More detail is in [docs](docs/README.md): [architecture](docs/architecture.md),
+[image pipeline](docs/image-pipeline.md), [assets](docs/assets.md) and
+[development](docs/development.md).
 
-[Documentation](docs/README.md) · [Architecture](docs/architecture.md) · [Image pipeline](docs/image-pipeline.md) · [Assets](docs/assets.md) · [Development and verification](docs/development.md)
+## License
+
+[MIT](LICENSE). You may use, change and share Star Effects Lab freely, including
+for commercial work.

@@ -122,7 +122,9 @@ Windows x64, 16 logical CPUs; Python 3.14.5, NumPy 2.5.4, Numba 0.68.1,
 Pillow 12.3.0 and LittleCMS 2.19. Production uses 16 detector workers,
 1024-pixel tiles and 272-pixel halos.
 
-The ignored local directory `.artifacts/benchmarks/lut-vs-lcms-20261110/` contains
+The benchmark script and raw results are not published with the repository; the
+commands below record how they were produced. The ignored local directory
+`.artifacts/benchmarks/lut-vs-lcms-20261110/` contains
 `benchmark_lut_lcms.py`, per-run JSON, the exhaustive result and `summary.json`.
 The summary records source commit and script SHA-256. The script imports the
 normal installed package; it has no dependency on an excluded experiment folder.

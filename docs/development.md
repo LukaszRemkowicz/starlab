@@ -24,7 +24,7 @@ Ordinary Qt tests explicitly request the CPU test backend and use the offscreen 
 
 Ruff checks selected syntax/import/error rules, import ordering, unused suppressions, McCabe complexity (maximum 10) and statement count (maximum 50). Two function-scoped exceptions document numerical state machines whose exact accumulator/rejection order is intentional: the two-axis rolling filter and conservative sparse peak screening. No module-wide complexity suppressions are used. Annotation and public-documentation rules are also enabled. Mypy checks all production modules in strict mode; array aliases distinguish dtype, and protocols describe service boundaries. The signature-preserving JIT adapter keeps static checking across Numba decorators without changing runtime compilation. Two overload-factory parameters remain intentionally unannotated because Numba requires their annotations to equal the implementation parameters. Untyped external-library stubs are isolated by boundary casts; strict checking does not prove array shape or numerical accuracy. Independent image and workflow checks remain necessary.
 
-The Windows quality workflow runs the locked environment, lint, formatting, strict type checking, ordinary tests and wheel build on pushes and pull requests. It follows the [official uv Actions integration](https://docs.astral.sh/uv/guides/integration/github/). A hosted headless test run does not establish hardware shader correctness.
+The quality workflow runs on Ubuntu: the locked environment, lint, formatting, strict type checking and the ordinary (headless) tests, on pull requests and on pushes to `main` and `dev`. A newer push cancels an outdated run. It follows the [official uv Actions integration](https://docs.astral.sh/uv/guides/integration/github/). A hosted headless test run does not establish hardware shader correctness.
 
 ## Naming and local types
 
@@ -53,7 +53,6 @@ Pylint compares similar text across modules; PyCharm can also identify renamed
 structural copies and same-file duplication. A passing clone scan is one check,
 not proof that every conceivable similar algorithm has been eliminated. Review
 must still distinguish shared business rules from backend-specific data access.
-See [the duplicate cleanup](duplicate-cleanup.md) for the measured scope.
 
 ## Native GPU checks
 
@@ -89,4 +88,15 @@ Local experiments under `tools/`, environments, IDE configuration and generated 
 
 ## Verification scope
 
-Pixel regressions compare numerical output with captured expected images. They establish behavior for those fixtures, not a universal quality claim for every photograph. A full GPU/driver matrix, monitor-profile color management and macOS packaging have not been verified. Startup and interaction timings depend on hardware, source content and compilation state; published documentation makes no universal latency guarantee.
+Pixel regressions compare numerical output with captured expected images. They establish behavior for those fixtures, not a universal quality claim for every photograph. The GPU tests (`--run-gpu`) pass on a Windows GPU and on an Apple-silicon Mac; a full GPU/driver matrix, monitor-profile color management and macOS packaging have not been verified. Startup and interaction timings depend on hardware, source content and compilation state; published documentation makes no universal latency guarantee.
+
+## Numba compiled-code cache
+
+Kernels use `cache=True`, so Numba stores machine code in `__pycache__`. Numba
+checks only the source file of each kernel: after editing a helper or constant
+that a kernel imports from another module (for example `numeric.py` or
+`rays.py`), delete the `__pycache__` folders under `src/starlab` before testing,
+or the old machine code may be reused. The app protects users from this: its
+background preparation stamp (`prepared-code`) includes a hash of every source
+file, and when it changes the app deletes StarLab's compiled code before
+compiling again.

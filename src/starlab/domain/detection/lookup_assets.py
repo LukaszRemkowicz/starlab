@@ -13,6 +13,8 @@ from ..array_types import ByteArray
 
 # Pin the approved archive identity; recalculating the expected digest would accept changed data.
 ANALYSIS_ARCHIVE_SHA256 = "9bd9d8c4798fd340c8356422eff55f2bbfb1e0bf6546c0f56868caed9e8e9a61"
+COLOR_ARCHIVE_SHA256 = "6384f6ae50403911b82cceb9781f1fa099880426a44b0b120798704ff9a3dfa0"
+COLOR_TABLE_SHA256 = "9cf814a133376c04853756c212d9524c701e0236ed6e79a8123dfe53a21b5a9e"
 
 
 def load_analysis_tables(path: Path | None = None) -> tuple[NDArray[np.float32], NDArray[np.uint8]]:
@@ -49,7 +51,7 @@ def load_color_cube(path: Path | None = None) -> NDArray[np.uint8]:
     if metadata.get("shape") != [256, 256, 256, 3] or metadata.get("dtype") != "uint8":
         raise ValueError("Color-transform metadata has unsupported dimensions or dtype.")
     archive: bytes = path.read_bytes()
-    if hashlib.sha256(archive).hexdigest() != metadata["archive_sha256"]:
+    if hashlib.sha256(archive).hexdigest() != COLOR_ARCHIVE_SHA256:
         raise ValueError("Color-transform archive does not match its recorded identity.")
     with np.load(io.BytesIO(archive), allow_pickle=False) as stored:
         cube: NDArray[np.uint8] = stored["delta"]
@@ -65,7 +67,7 @@ def load_color_cube(path: Path | None = None) -> NDArray[np.uint8]:
     np.add(cube[..., 0], baselines[0][:, None, None], out=cube[..., 0])
     np.add(cube[..., 1], baselines[1][None, :, None], out=cube[..., 1])
     np.add(cube[..., 2], baselines[2][None, None, :], out=cube[..., 2])
-    if hashlib.sha256(memoryview(cube)).hexdigest() != metadata["table_sha256"]:
+    if hashlib.sha256(memoryview(cube)).hexdigest() != COLOR_TABLE_SHA256:
         raise ValueError("Universal color cube does not match its recorded identity.")
     cube.flags.writeable = False
     return cube

@@ -15,7 +15,7 @@ layout(location=7) in vec3 gradientY;
 layout(location=8) in vec3 measuredPeak;
 uniform vec2 outputSize, origin;
 uniform float sampling, cutoff, coefficient, widening;
-uniform float threshold, hue, saturation, intensity;
+uniform float threshold, ceiling, hue, saturation, intensity;
 uniform float softFilter;
 uniform int kind, rayCount, gray;
 // Capacity for the fixed Secondary pattern; rayCount is the active count.
@@ -40,7 +40,7 @@ void main() {
     float luma=dot(color,vec3(0.212639004,0.715168655,0.072192311));
     c *= brightness/max(luma,1e-20);
     if (gray!=0) c=vec3((c.r+c.g+c.b)/3.0);
-    light=c*max(brightness-threshold,0.0)/max((1.0-threshold)*brightness,1e-20)*intensity;
+    light=c*max(brightness-threshold,0.0)/max((ceiling-threshold)*brightness,1e-20)*intensity;
     light *= rayWeights[ray];
     // Halo weighting complements the independent source prefilter: small
     // measured stars lose added glow as the filter grows; large stars gain it.

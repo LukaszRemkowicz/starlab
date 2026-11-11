@@ -25,7 +25,6 @@ from ..array_types import (
     Bounds,
     ByteArray,
     CandidateRecord,
-    CoordinateKey,
     Diagnostics,
     DoubleArray,
     FloatArray,
@@ -37,7 +36,7 @@ from .catalog import join_catalogs
 from .constants import PREFERRED_SEED_OFFSETS
 from .numeric import normalize_catalog
 from .peaks import peak_positions
-from .proxy import coarse_codes, decode, full_codes, full_proxy, maximum_luminance
+from .proxy import coarse_codes, coarse_step, decode, full_codes, full_proxy, maximum_luminance
 from .records import IndexArray, PreparedTile, ReferenceAttempt, TileKey, TileResult
 
 TILE = 1024
@@ -618,6 +617,7 @@ def _scan_coarse(
     neighbor_radius: int,
     cancel: Event | None,
     sky_mask: SkyMask | None,
+    source_shape: tuple[int, int],
 ) -> tuple[list[CandidateRecord], Diagnostics]:
     """Scan decoded coarse tiles and restore full-image source coordinates/sizes."""
 
@@ -637,10 +637,15 @@ def _scan_coarse(
         sky_mask=sky_mask,
         source_scale=4,
     )
+    # Coarse pixel i averages a source box starting near i*step, where step is
+    # (source - box)/(coarse - 1): exactly 4 only when the size is a multiple of 4.
+    (box_y, step_y), (box_x, step_x) = (
+        coarse_step(source, coarse) for source, coarse in zip(source_shape, codes.shape[:2])
+    )
     for row in coarse_rows:
-        fields: tuple[CoordinateKey, ...] = ("x", "y", "size")
-        for key in fields:
-            row[key] *= 4
+        row["x"] = (row["x"] - 0.5) * step_x + box_x / 2
+        row["y"] = (row["y"] - 0.5) * step_y + box_y / 2
+        row["size"] *= (step_x + step_y) / 2
     return coarse_rows, coarse_stats
 
 
@@ -700,7 +705,7 @@ def analyze(
     coarse_stats: Diagnostics = dict(peaks=0, candidate_seeds=0)
     if use_coarse:
         coarse_rows, coarse_stats = _scan_coarse(
-            codes, denominator, threshold, neighbor_radius, cancel, sky_mask
+            codes, denominator, threshold, neighbor_radius, cancel, sky_mask, (height, width)
         )
     del codes
     coarse_seconds: float = time.monotonic() - coarse_started

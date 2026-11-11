@@ -7,7 +7,7 @@ from PySide6.QtGui import QIcon, QPainter, QPixmap
 from PySide6.QtSvg import QSvgRenderer
 
 STYLE = """
-QWidget { color: #d5dbe5; font-family: 'Segoe UI', 'Inter', sans-serif; font-size: 12px; }
+QWidget { color: #d5dbe5; font-size: 12px; }
 QMainWindow, QDialog { background: #181a1f; }
 QWidget#canvas, QGraphicsView { background: #0f1013; border: none; }
 QWidget#inspector, QScrollArea, QStackedWidget, QTabWidget::pane { background: #21252b; border: none; }

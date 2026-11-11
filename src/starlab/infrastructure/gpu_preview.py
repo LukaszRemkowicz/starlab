@@ -36,7 +36,7 @@ from ..domain.effects.profiles import (
     sine,
 )
 from ..domain.effects.settings import KINDS, EffectKind, EffectParameters, EffectSettings
-from ..domain.imaging import ImageFrame, Pixels, check_cancel
+from ..domain.imaging import ImageFrame, Pixels, check_cancel, preview_region_bounds
 from ..domain.sky_mask import SkyMask
 from ..domain.stars import Star
 
@@ -59,7 +59,7 @@ def _view_region(
 ) -> tuple[Bounds, int, bool]:
     """Choose integer sampling with at least two samples per full-image axis."""
     if region is not None:
-        return region, sampling, True
+        return preview_region_bounds(frame, region, sampling), sampling, True
     stride: int = (
         1
         if full_resolution
@@ -236,10 +236,12 @@ class GpuPreviewRenderer:
             self.target = None
             framebuffer_format: QOpenGLFramebufferObjectFormat = QOpenGLFramebufferObjectFormat()
             framebuffer_format.setInternalTextureFormat(0x8814)
-            self.target = QOpenGLFramebufferObject(width, height, framebuffer_format)
-            if not self.target.isValid():
+            target = QOpenGLFramebufferObject(width, height, framebuffer_format)
+            if not target.isValid():  # never keep a failed buffer for the next call
                 raise RuntimeError("Cannot allocate the preview framebuffer.")
-        self.target.bind()
+            self.target = target
+        if not self.target.bind():
+            raise RuntimeError("Cannot bind the preview framebuffer.")
         self._gpu.glViewport(0, 0, width, height)
         self._gpu.glDisable(0x0B71)
         self._gpu.glEnable(0x0BE2)
@@ -311,6 +313,7 @@ class GpuPreviewRenderer:
             rayLength=parameters.length,
             intensity=gain(kind, parameters),
             threshold=threshold,
+            ceiling=max(self.maximum, 1.0),
             hue=parameters.hue,
             saturation=parameters.saturation,
             rainbow=parameters.rainbow,
@@ -542,24 +545,24 @@ class GpuPreviewRenderer:
         """Release GL objects on their worker thread; repeated close calls are safe."""
         if self.context is None:
             return
-        if not self.context.makeCurrent(self.surface):
-            self.context = None
-            return
-        self.target = None
-        if self.source_texture is not None:
-            self.source_texture.destroy()
-            self.source_texture = None
-        for buffer in self.buffers.values():
-            buffer.destroy()
+        # Without a current context GL objects die with the context; CPU-side state must still go.
+        current: bool = self.context.makeCurrent(self.surface)
+        if current:
+            if self.source_texture is not None:
+                self.source_texture.destroy()
+            for buffer in self.buffers.values():
+                buffer.destroy()
+            if self.vao is not None:
+                self._vertex_array.destroy()
+            if self.program is not None:
+                self._shader.removeAllShaders()
+        self.target = self.source_texture = None
         self.buffers.clear()
         self.buffer_keys.clear()
         self.group_cache.clear()
         self.reduction_cache = None
         self.catalog = self.catalog_mask = self.texture_key = None
-        if self.vao is not None:
-            self._vertex_array.destroy()
-        if self.program is not None:
-            self._shader.removeAllShaders()
         self.program = self.vao = self.gl = None
-        self.context.doneCurrent()
+        if current:
+            self.context.doneCurrent()
         self.context = None

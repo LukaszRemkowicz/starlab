@@ -30,7 +30,7 @@ def test_mask_precedes_detection_and_sliders_reuse_it(qtbot, monkeypatch):
 
     controller.services.sky_mask = mask_service
     monkeypatch.setattr(controller.services, "analyze", analyze)
-    controller.analyze(force=False)
+    controller.analyze()
     qtbot.waitUntil(lambda: not controller.runner.busy)
     assert controller.session.sky_mask is mask
     controller.change_settings(
@@ -98,7 +98,7 @@ def test_cancel_after_mask_restores_committed_catalog_controls(qtbot, monkeypatc
         return ()
 
     monkeypatch.setattr(controller.services, "analyze", analyze)
-    controller.analyze(force=False)
+    controller.analyze()
     qtbot.waitUntil(entered.is_set)
     assert controller.mask_preview is mask
     controller.cancel()

@@ -1,3 +1,4 @@
+import os
 from dataclasses import replace
 
 import numpy as np
@@ -166,7 +167,9 @@ def test_tiff_above_40_megapixels_loads_without_resizing(tmp_path):
     del mapped
     frame = read_tiff(source)
     assert frame.pixels.shape == (6400, 6400, 1)
-    assert frame.pixels[6399, 6398, 0] == pytest.approx(32768 / 65535)
+    from starlab.domain.imaging import srgb_to_linear
+
+    assert frame.pixels[6399, 6398, 0] == pytest.approx(float(srgb_to_linear(32768 / 65535)))
 
 
 @pytest.mark.parametrize("delta, accepted", [(20, True), (2000, False)])
@@ -211,7 +214,7 @@ def test_integer_import_matches_existing_transfer_for_every_code(tmp_path, dtype
     tifffile.imwrite(path, data, photometric="rgb" if rgb else "minisblack")
     frame = read_tiff(path)
     expected = data.astype(np.float32) / maximum
-    expected = srgb_to_linear(expected) if rgb else expected[..., None]
+    expected = srgb_to_linear(expected if rgb else expected[..., None])  # gray: same sRGB curve
     np.testing.assert_array_equal(frame.pixels, expected)
     assert frame.pixels.flags.owndata and not frame.pixels.flags.writeable
 
@@ -265,7 +268,10 @@ def test_preview_accepts_thin_valid_images(tmp_path, shape):
     assert (height, width) == shape
     assert min(frame.pixels.shape[:2]) >= 2
     assert max(frame.pixels.shape[:2]) <= 24
-    np.testing.assert_array_equal(frame.pixels, np.float32(8192 / 65535))
+    from starlab.domain.imaging import srgb_to_linear
+
+    # float32 pow differs by an ulp between platforms' math libraries
+    np.testing.assert_allclose(frame.pixels, srgb_to_linear(np.float32(8192 / 65535)), rtol=1e-6)
 
 
 def test_reader_owned_buffer_transfer_does_not_weaken_public_copy_contract():
@@ -279,3 +285,51 @@ def test_reader_owned_buffer_transfer_does_not_weaken_public_copy_contract():
     assert trusted.pixels is data and not data.flags.writeable
     with pytest.raises(ValueError, match="owned"):
         ImageFrame._from_owned_validated(data[::2], "view", "linear-srgb", "")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX permission bits")
+def test_export_and_preset_files_follow_umask(tmp_path):
+    from starlab.domain.effects.settings import EffectSettings
+    from starlab.infrastructure.preset_json import save_preset
+    from starlab.infrastructure.tiff_io import read_tiff, write_tiff
+
+    source = tmp_path / "in.tif"
+    tifffile.imwrite(source, np.zeros((4, 4, 3), np.uint16), photometric="rgb")
+    frame = read_tiff(source)
+    umask = os.umask(0o022)
+    try:
+        write_tiff(tmp_path / "out.tif", frame, frame.pixels, source_path=source)
+        save_preset(tmp_path / "preset.json", EffectSettings())
+    finally:
+        os.umask(umask)
+    assert (tmp_path / "out.tif").stat().st_mode & 0o777 == 0o644
+    assert (tmp_path / "preset.json").stat().st_mode & 0o777 == 0o644
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["in.tif", "out.tif", "preset.json"]
+
+
+def test_compressed_tiff_decodes_in_memory_without_temp_files(tmp_path, monkeypatch):
+    import tempfile as tempfile_module
+
+    from starlab.infrastructure.tiff_io import read_tiff
+
+    source = tmp_path / "compressed.tif"
+    data = np.arange(32 * 40 * 3, dtype=np.uint16).reshape(32, 40, 3)
+    tifffile.imwrite(source, data, photometric="rgb", compression="zlib")
+
+    def no_temp_files(*args, **kwargs):
+        raise AssertionError("photo data must not be written to a temporary file")
+
+    monkeypatch.setattr(tempfile_module, "NamedTemporaryFile", no_temp_files)
+    frame = read_tiff(source)
+    assert frame.pixels.shape == (32, 40, 3)
+
+
+def test_preset_rejects_deep_nesting_and_non_files(tmp_path):
+    from starlab.infrastructure.preset_json import load_preset
+
+    nested = tmp_path / "nested.json"
+    nested.write_text("[" * 99_000, encoding="utf-8")
+    with pytest.raises(ValueError):
+        load_preset(nested)
+    with pytest.raises(ValueError):
+        load_preset(tmp_path)

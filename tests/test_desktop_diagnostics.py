@@ -1,4 +1,4 @@
-"""Session diagnostics retain failures without making unavailable log storage fatal."""
+"""Session diagnostics record failures, and missing log storage stops the app."""
 
 import faulthandler
 import logging
@@ -22,11 +22,12 @@ def test_uncaught_failure_is_recorded_and_original_exception_survives(tmp_path):
     assert faulthandler.is_enabled() == was_enabled
 
 
-def test_unavailable_log_directory_does_not_prevent_running_application(tmp_path):
+def test_unavailable_log_directory_stops_the_application(tmp_path):
+    from starlab.infrastructure.diagnostics import DiagnosticsUnavailable
+
     blocked = tmp_path / "file-instead-of-directory"
     blocked.write_text("existing data", encoding="utf-8")
-    completed = False
-    with application_diagnostics(blocked):
-        completed = True
-    assert completed
+    with pytest.raises(DiagnosticsUnavailable, match="Cannot create log files"):
+        with application_diagnostics(blocked):
+            pytest.fail("the app must not run without logs")
     assert blocked.read_text(encoding="utf-8") == "existing data"

@@ -89,10 +89,13 @@ def test_catalog_join_failure_cancels_workers_and_disposes_prepared_tiles(monkey
     from starlab.domain.detection import join_fast, pipeline
 
     images = []
+    second_prepared = Event()
 
     def prepare(row, column, **kwargs):
         image = Image(np.zeros((2, 2, 3), np.float32))
         images.append(image)
+        if len(images) >= 2:
+            second_prepared.set()
         return image, [], np.zeros(2)
 
     def qualify(value, **kwargs):
@@ -101,6 +104,8 @@ def test_catalog_join_failure_cancels_workers_and_disposes_prepared_tiles(monkey
         return [], 0, 0, np.zeros(3)
 
     def fail_join(*args):
+        # Fail only once a later tile is in flight, so cleanup of prepared tiles is exercised.
+        assert second_prepared.wait(5)
         raise RuntimeError("join failed")
 
     monkeypatch.setattr(pipeline, "TILE", 4)

@@ -154,3 +154,20 @@ def display_pixels(data: Pixels, color_space: str) -> ByteArray:
         encoded: Pixels = linear_to_srgb(values[exact])
         result[exact] = np.rint(np.clip(encoded, 0, 1) * 255).astype(np.uint8)
     return np.ascontiguousarray(result)
+
+
+def preview_region_bounds(
+    frame: ImageFrame, region: tuple[int, int, int, int], sampling: int
+) -> tuple[int, int, int, int]:
+    """Clip a requested ROI and require two sampled pixels along each image axis."""
+    left, top, right, bottom = region
+    left, top = max(0, int(left)), max(0, int(top))
+    right, bottom = min(frame.width, int(right)), min(frame.height, int(bottom))
+    if (
+        type(sampling) is not int
+        or sampling < 1
+        or (right - left + sampling - 1) // sampling < 2
+        or (bottom - top + sampling - 1) // sampling < 2
+    ):
+        raise ValueError("Preview region must contain at least two sampled pixels on each axis.")
+    return left, top, right, bottom

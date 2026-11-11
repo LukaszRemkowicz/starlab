@@ -33,6 +33,31 @@ type LitArrays = tuple[IndexArray, Pixels]
 SCENE_CACHE = ArrayCache[SceneArrays](128)
 GROUP_CACHE = ArrayCache[Pixels](32)
 LIGHT_CACHE = ArrayCache[LitArrays](64)
+LUMA = np.array([0.212639004, 0.715168655, 0.072192311], np.float32)
+
+
+def fit_to_white(light: Pixels) -> Pixels:
+    """Limit per-source RGB light to [0, 1] along a path to white.
+
+    Clipping each channel separately pushes bright colors toward pure primaries
+    (orange cores turn yellow). Instead, an overbright color keeps its hue and
+    luminance and loses only as much saturation as it must; luminance >= 1 is white.
+    """
+    result: Pixels = np.clip(light, 0, 1)
+    if light.shape[1] != 3:
+        return result
+    peak: Pixels = light.max(axis=1)
+    over: BoolArray = peak > 1
+    if not over.any():
+        return result
+    color: Pixels = light[over]
+    luma: Pixels = color @ LUMA
+    spread: Pixels = peak[over] - luma
+    fraction: Pixels = np.clip(
+        np.divide(1 - luma, spread, out=np.zeros_like(luma), where=spread > 0), 0, 1
+    )
+    result[over] = np.clip(luma[:, None] + fraction[:, None] * (color - luma[:, None]), 0, 1)
+    return result
 
 
 def _grouped_ray_scene(kind: EffectKind, sampling: int, source_count: int, region: bool) -> bool:
@@ -229,7 +254,11 @@ def _lit_scene(
     )
     brightness: FloatArray = np.array([star.brightness for star in stars], np.float32)
     threshold: float = (1 - parameters.quantity / 100) ** 2 * maximum
-    factors: FloatArray = np.maximum(brightness - threshold, 0) / ((1 - threshold) * brightness)
+    # Edited brightness may exceed 1; normalizing by the ceiling keeps the denominator positive.
+    ceiling: float = max(maximum, 1.0)
+    factors: FloatArray = np.maximum(brightness - threshold, 0) / (
+        (ceiling - threshold) * brightness
+    )
     original: DoubleArray = np.array([star.color for star in stars])
     colors: FloatArray = source_colors(original, parameters.hue, parameters.saturation)
     # The native catalog already has this luminance. The ratio additionally
@@ -325,7 +354,7 @@ def _group(
         for start in range(0, len(indices), 131072):
             check_cancel(cancel)
             pixels: IndexArray = indices[start : start + 131072]
-            factors: Pixels = 1 - np.clip(light[start : start + 131072] * intensity, 0, 1)
+            factors: Pixels = 1 - fit_to_white(light[start : start + 131072] * intensity)
             if _grouped_ray_scene(kind, sampling, len(subset), diagonal is not None):
                 boundaries: IntArray = np.r_[0, np.flatnonzero(np.diff(pixels)) + 1]
                 transmission[pixels[boundaries]] *= np.multiply.reduceat(

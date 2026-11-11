@@ -194,11 +194,17 @@ def maximum_luminance(
 
 def axis_mapping(source_size: int, destination_size: int) -> tuple[int, IntArray]:
     """Return native encoded-box width and source starts for one downsampled axis."""
+    width, step = coarse_step(source_size, destination_size)
+    return width, (0.5 + np.arange(destination_size) * step).astype(np.int64)
+
+
+def coarse_step(source_size: int, destination_size: int) -> tuple[int, float]:
+    """Return the encoded-box width and the source distance between coarse samples."""
     width: int = round(float(np.float32(source_size) / np.float32(destination_size)))
     step: float = (
         (source_size - width) / (destination_size - 1) if destination_size > 1 else source_size
     )
-    return width, (0.5 + np.arange(destination_size) * step).astype(np.int64)
+    return width, step
 
 
 @njit(cache=True, nogil=True)

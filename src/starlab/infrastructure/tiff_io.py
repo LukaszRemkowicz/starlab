@@ -5,7 +5,6 @@ from __future__ import annotations
 import io
 import os
 import struct
-import tempfile
 from functools import lru_cache
 from pathlib import Path
 from threading import Event
@@ -147,7 +146,9 @@ def _check_profile(profile: bytes | None, rgb: bool) -> str:
     """Validate color interpretation and return the import note or raise ValueError."""
     if not profile:
         return (
-            "Untagged image: sRGB assumed." if rgb else "Untagged grayscale: linear gray assumed."
+            "Untagged image: sRGB assumed."
+            if rgb
+            else "Untagged grayscale: sRGB tone curve assumed."
         )
     try:
         parsed: ImageCmsProfile = ImageCms.ImageCmsProfile(io.BytesIO(profile))
@@ -183,8 +184,14 @@ def _validated_page(tiff_file: tifffile.TiffFile) -> tuple[tifffile.TiffPage, st
         raise ValueError(
             "Unsupported TIFF orientation. Normalize rotation/mirroring in your editor."
         )
-    if page.dtype not in (np.dtype("uint8"), np.dtype("uint16")):
+    # 12-bit or 4-bit samples sit in 16/8-bit containers and would load far too dark.
+    if page.dtype not in (np.dtype("uint8"), np.dtype("uint16")) or page.bitspersample not in (
+        8,
+        16,
+    ):
         raise ValueError("Supported input: unsigned 8/16-bit TIFF. HDR is a later milestone.")
+    if page.imagedepth > 1:
+        raise ValueError("Use a single-page, flattened TIFF (no image stacks).")
     if page.photometric not in (1, 2) or page.samplesperpixel not in (1, 3) or page.extrasamples:
         raise ValueError("Use RGB or grayscale TIFF without alpha, palette or CMYK.")
     if min(page.imagelength, page.imagewidth) < 2:
@@ -195,9 +202,9 @@ def _validated_page(tiff_file: tifffile.TiffFile) -> tuple[tifffile.TiffPage, st
 
 def _mapped_pixels(page: tifffile.TiffPage) -> EncodedPixels:
     """Expose validated unsigned samples as H×W×C, mapping/decoding only as needed."""
-    # Direct mapping for compatible uncompressed TIFFs; other layouts and
-    # compressed files decode into tifffile's temporary map before sampling.
-    data: EncodedPixels = page.asarray(out="memmap")
+    # Uncompressed contiguous TIFFs map the source file directly. Everything else decodes
+    # in RAM: tifffile's "memmap" fallback would write the photo to a temporary file.
+    data: EncodedPixels = page.asarray(out="memmap" if page.is_memmappable else None)
     if page.planarconfig == 2 and data.ndim == 3:
         data = np.moveaxis(data, 0, -1)
     if data.ndim == 2:
@@ -206,10 +213,14 @@ def _mapped_pixels(page: tifffile.TiffPage) -> EncodedPixels:
 
 
 @lru_cache(maxsize=4)
-def _integer_transfer(maximum: int, rgb: bool) -> Pixels:
-    """Build an immutable scalar conversion table for uint8/uint16 input codes."""
+def _integer_transfer(maximum: int) -> Pixels:
+    """Build an immutable sRGB-decoding table for uint8/uint16 input codes.
+
+    Grayscale uses the same tone curve as RGB, like most editors treat untagged gray,
+    so effects blend in linear light for both.
+    """
     codes: Pixels | DoubleArray = np.arange(maximum + 1, dtype=np.float32) / maximum
-    values: Pixels | DoubleArray = srgb_to_linear(codes) if rgb else codes
+    values: Pixels | DoubleArray = srgb_to_linear(codes)
     values.flags.writeable = False
     # Weak-scalar division preserves float32; NumPy stubs conservatively include float64.
     return cast(Pixels, values)
@@ -228,9 +239,8 @@ def _convert_integer_image(
     data: EncodedPixels, path: Path, note: str, cancel: Event | None
 ) -> ImageFrame:
     """Convert validated samples in cancellable strips, then transfer buffer ownership."""
-    rgb: bool = data.shape[2] == 3
     normalized: FloatArray = np.empty(data.shape, np.float32)
-    table: FloatArray = _integer_transfer(np.iinfo(data.dtype).max, rgb)
+    table: FloatArray = _integer_transfer(np.iinfo(data.dtype).max)
     for row in range(0, data.shape[0], ROWS_PER_BLOCK):
         check_cancel(cancel)
         source: EncodedPixels = np.asarray(
@@ -241,7 +251,7 @@ def _convert_integer_image(
     return ImageFrame._from_owned_validated(
         normalized,
         path.name,
-        "linear-srgb" if rgb else "linear-gray",
+        "linear-srgb",
         note,
     )
 
@@ -262,7 +272,7 @@ def read_tiff_preview(
     """Return a quick strided preview, scale, original width and original height.
 
     Compatible uncompressed files are sampled directly from their map before
-    float conversion. Compressed TIFFs must first decode into a temporary map.
+    float conversion. Compressed TIFFs are decoded in memory first.
     This is an opening preview, not an antialiased export or detection input.
     """
     check_cancel(cancel)
@@ -295,7 +305,7 @@ def write_tiff(
             path.exists() and source.exists() and path.samefile(source)
         ):
             raise ValueError("Choose a new output file; the original image is protected.")
-    if pixels.shape != frame.pixels.shape or not np.isfinite(pixels).all() or pixels.min() < 0:
+    if pixels.shape != frame.pixels.shape:
         raise ValueError("Invalid output pixels.")
     check_cancel(cancel)
     rgb: bool = pixels.shape[2] == 3
@@ -303,7 +313,10 @@ def write_tiff(
     for row in range(0, pixels.shape[0], ROWS_PER_BLOCK):
         check_cancel(cancel)
         block: FloatArray = pixels[row : row + ROWS_PER_BLOCK]
-        encoded: FloatArray = linear_to_srgb(block) if rgb else block
+        # Checked per block so a huge export needs no extra full-image boolean buffer.
+        if not np.isfinite(block).all() or block.min() < 0:
+            raise ValueError("Invalid output pixels.")
+        encoded: FloatArray = linear_to_srgb(block)
         output[row : row + ROWS_PER_BLOCK] = np.rint(np.clip(encoded, 0, 1) * 65535).astype(
             np.uint16
         )
@@ -313,10 +326,9 @@ def write_tiff(
     tags: list[tuple[int, str, int, bytes, bool]] = (
         [(34675, "B", len(profile), profile, False)] if profile else []
     )
-    file_descriptor, temporary = tempfile.mkstemp(
-        prefix=f".{path.stem}-", suffix=".tif", dir=path.parent
-    )
-    os.close(file_descriptor)
+    # Unlike mkstemp (0600), touch honours the umask so exports stay readable like other files.
+    temporary: Path = path.parent / f".{path.stem}-{os.urandom(8).hex()}.tif"
+    temporary.touch(exist_ok=False)
     try:
         tifffile.imwrite(
             temporary,
@@ -325,7 +337,23 @@ def write_tiff(
             metadata=None,
             extratags=tags,
         )
+        with temporary.open("rb+") as written:
+            os.fsync(written.fileno())  # a power cut must not leave a truncated export
+        if path.exists():
+            os.chmod(temporary, path.stat().st_mode & 0o7777)  # replacing keeps its permissions
         check_cancel(cancel)
         os.replace(temporary, path)
     finally:
         Path(temporary).unlink(missing_ok=True)
+
+
+def write_samples(path: Path | str, samples: NDArray[np.integer], compress: bool) -> None:
+    """Write already-encoded 8/16-bit samples as an untagged TIFF (used by the warm-up)."""
+    gray: bool = samples.shape[2] == 1
+    tifffile.imwrite(
+        path,
+        samples[..., 0] if gray else samples,
+        photometric="minisblack" if gray else "rgb",
+        compression="zlib" if compress else None,
+        metadata=None,
+    )

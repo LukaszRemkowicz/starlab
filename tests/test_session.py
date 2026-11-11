@@ -84,3 +84,38 @@ def test_moving_source_discards_old_measurement_and_undo_restores_it():
     assert s.stars[0].source_profile == profile
     assert s.stars[0].source_peak == source.source_peak
     assert s.stars[0].soft_weight == 0.1
+
+
+def test_slider_gesture_records_one_state_and_noop_click_keeps_history():
+    s = session()
+    original = s.settings
+    first = replace(original, primary=replace(original.primary, angle=45))
+    s.set_settings(first)
+    assert s.undo()
+    for _ in range(70):  # clicks without movement must not evict history or clear redo
+        s.begin_edit()
+    assert s.redo()
+    assert s.settings == first
+    s.begin_edit()
+    for angle in (50, 55, 60):
+        s.set_settings(replace(first, primary=replace(first.primary, angle=angle)), remember=False)
+    assert s.undo()
+    assert s.settings == first
+    assert s.undo()
+    assert s.settings == original
+
+
+def test_undo_after_motionless_slider_press_keeps_history_order():
+    s = session()
+    base = s.settings
+
+    def angle(value):
+        return replace(base, primary=replace(base.primary, angle=value))
+
+    for value in (10, 20, 30):
+        s.set_settings(angle(value))
+    s.begin_edit()  # pressed, never moved
+    assert s.undo()
+    s.set_settings(angle(40))
+    assert s.undo()
+    assert s.settings.primary.angle == 20
