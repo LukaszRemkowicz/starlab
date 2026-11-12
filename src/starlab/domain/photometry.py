@@ -620,7 +620,8 @@ def calibrate_sources(
             * measured[valid, 4]
             / np.median(measured[valid, 4])
         )
-        weights[valid] = score**2 / (score**2 + 16)
+        # Neutral at score 2 (4x median flux at median FWHM), so large stars clearly outweigh small.
+        weights[valid] = score**2 / (score**2 + 4)
     result: tuple[Star, ...] = tuple(
         replace(
             star,

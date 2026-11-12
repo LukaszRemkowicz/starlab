@@ -20,8 +20,14 @@ from numba import get_num_threads, prange, set_num_threads
 from ..domain.array_types import FloatArray, IntArray
 from ..domain.imaging import ImageFrame, check_cancel, linear_to_srgb
 from ..domain.jit import njit
-from ..domain.sky_mask import EncodedArray, SkyMask, SkySegmenter, build_sky_mask
-from .tiff_io import _mapped_pixels, _validated_page
+from ..domain.sky_mask import (
+    BlockMean,
+    EncodedArray,
+    SkyMask,
+    SkySegmenter,
+    build_sky_mask,
+)
+from .tiff_io import EncodedRows, _validated_page
 
 MODEL_DIRECTORY = Path(__file__).with_name("models")
 # Inference contract of the packaged sky-mask.onnx; the hash pins these values to that file.
@@ -125,7 +131,7 @@ class SkyMaskService:
     def from_source(self, source: Path, cancel: Event | None = None) -> SkyMask:
         """Build a full-coordinate mask directly from an encoded TIFF source."""
         with tifffile.TiffFile(source) as tiff_file:
-            page, _ = _validated_page(tiff_file)
+            page, _, _ = _validated_page(tiff_file)
             dimensions: _ImageDimensions = _ImageDimensions(page.imagewidth, page.imagelength)
         return self(dimensions, source, cancel)
 
@@ -165,15 +171,19 @@ class SkyMaskService:
         """Run mask preprocessing on encoded TIFF samples, never working RGB."""
         assert self.segmenter is not None
         with tifffile.TiffFile(source) as tiff_file:
-            page, _ = _validated_page(tiff_file)
-            raw: EncodedArray = _mapped_pixels(page)
-            return build_sky_mask(
-                shape,
-                lambda top, bottom: raw[top:bottom],
-                self.segmenter,
-                cancel,
-                block_mean=_block_mean,
-            )
+            page, _, conversion = _validated_page(tiff_file)
+            block_mean: BlockMean = _block_mean
+            if conversion is not None:
+                maximum: int = int(np.iinfo(page.dtype).max)
+
+                def block_mean(strip: EncodedArray, factor: int) -> FloatArray:
+                    """Reduce encoded samples, then express the means in sRGB codes."""
+                    return conversion.encode_means(_block_mean(strip, factor), maximum)
+
+            with EncodedRows(page) as reader:
+                return build_sky_mask(
+                    shape, reader.rows, self.segmenter, cancel, block_mean=block_mean
+                )
 
     def _from_working_frame(self, frame: ImageFrame, cancel: Event | None) -> SkyMask:
         """Encode in-memory working samples when no TIFF source exists."""

@@ -80,7 +80,15 @@ class SkyMask:
             )
         ):
             raise ValueError("Sky mask must cover the full image.")
-        if not np.isfinite(values).all() or not np.isin(values, (FOREGROUND, SKY, UNKNOWN)).all():
+        # Integer labels need only a range check; isin/isfinite would add image-sized temporaries.
+        valid: bool = (
+            bool(FOREGROUND <= values.min() and values.max() <= UNKNOWN)
+            if values.dtype.kind in "biu"
+            else bool(
+                np.isfinite(values).all() and np.isin(values, (FOREGROUND, SKY, UNKNOWN)).all()
+            )
+        )
+        if not valid:
             raise ValueError("Invalid sky-mask classes.")
         values = np.array(values, dtype=np.uint8, copy=True)
         values.flags.writeable = False
@@ -134,7 +142,7 @@ def _reduce_encoded_rows(
 ) -> FloatArray:
     """Read bounded encoded strips and preserve the original float32 block means."""
     reduced: FloatArray = np.empty((output_height, output_width, 3), np.float32)
-    strip_rows: int = max(factor, 512 // factor * factor)
+    strip_rows: int = max(factor, 64 // factor * factor)
     for top in range(0, output_height * factor, strip_rows):
         check_cancel(cancel)
         bottom: int = min(top + strip_rows, output_height * factor)
@@ -160,70 +168,111 @@ def _reduce_encoded_rows(
     return reduced
 
 
-def _normalize_channels(reduced: FloatArray, cancel: Event | None) -> HalfArray:
-    """Normalize each encoded channel into the model's float16 input range."""
-    normalized: HalfArray = np.empty_like(reduced, dtype=np.float16)
+type _Statistics = list[tuple[float, float]]
+
+
+def _channel_statistics(reduced: FloatArray, cancel: Event | None) -> _Statistics:
+    """Return each encoded channel's median and 99.5th percentile from the sampled grid."""
+    statistics: _Statistics = []
     for channel in range(3):
         check_cancel(cancel)
         sample: FloatArray = reduced[::4, ::4, channel]
-        median: float = float(np.median(sample))
-        high: float = float(np.percentile(sample, 99.5))
+        statistics.append((float(np.median(sample)), float(np.percentile(sample, 99.5))))
+    return statistics
+
+
+def _normalized_tile(reduced: FloatArray, statistics: _Statistics) -> FloatArray:
+    """Normalize one region into the model's float16 input range, returned as float32."""
+    normalized: HalfArray = np.empty_like(reduced, dtype=np.float16)
+    for channel, (median, high) in enumerate(statistics):
         normalized[..., channel] = np.clip(
             (reduced[..., channel] - median) / max(high - median, 1e-6), -1, 8
         )
-    return normalized
+    return normalized.astype(np.float32)
+
+
+def _model_logits(
+    segmenter: SkySegmenter, parts: FloatArray, batch_size: int, cancel: Event | None
+) -> FloatArray:
+    """Run one batch of normalized tiles and validate the returned logits."""
+    if batch_size == 1:
+        logits: FloatArray = np.asarray(segmenter.sky_logits(parts[0]), dtype=np.float32)[None]
+    else:
+        logits = np.asarray(
+            cast(BatchedSkySegmenter, segmenter).sky_logits_batch(parts), dtype=np.float32
+        )
+    check_cancel(cancel)
+    if logits.shape != (len(parts), *parts.shape[1:3]) or not np.isfinite(logits).all():
+        raise ValueError("Sky model returned invalid logits.")
+    return logits
 
 
 def _infer_overlapping_logits(
-    normalized: HalfArray, segmenter: SkySegmenter, cancel: Event | None
-) -> FloatArray:
-    """Average validated model logits in the original tile and batch order."""
+    reduced: FloatArray, segmenter: SkySegmenter, cancel: Event | None
+) -> ByteArray:
+    """Classify overlap-averaged logits, normalizing tiles and releasing finished rows lazily."""
     output_height: int
     output_width: int
-    output_height, output_width = normalized.shape[:2]
+    output_height, output_width = reduced.shape[:2]
     overlap: int
     tile: int
     tile, overlap = segmenter.tile, segmenter.overlap
     if not 0 <= overlap < tile:
         raise ValueError("Invalid model tile overlap.")
+    statistics: _Statistics = _channel_statistics(reduced, cancel)
     padded_height: int
     padded_width: int
     padded_height, padded_width = max(output_height, tile), max(output_width, tile)
-    normalized = np.pad(
-        normalized,
-        ((0, padded_height - output_height), (0, padded_width - output_width), (0, 0)),
-        mode="edge",
-    )
-    total: FloatArray = np.zeros((padded_height, padded_width), np.float32)
-    count: FloatArray = np.zeros_like(total)
+    if (padded_height, padded_width) != (output_height, output_width):
+        reduced = np.pad(
+            reduced,
+            ((0, padded_height - output_height), (0, padded_width - output_width), (0, 0)),
+            mode="edge",
+        )
     stride: int = tile - overlap
-    positions: list[tuple[int, int]] = [
-        (top, left)
-        for top in sorted({*range(0, padded_height - tile, stride), padded_height - tile})
-        for left in sorted({*range(0, padded_width - tile, stride), padded_width - tile})
-    ]
+    tops: list[int] = sorted({*range(0, padded_height - tile, stride), padded_height - tile})
+    lefts: list[int] = sorted({*range(0, padded_width - tile, stride), padded_width - tile})
+    positions: list[tuple[int, int]] = [(top, left) for top in tops for left in lefts]
     batch_size: int = getattr(segmenter, "batch_size", 1)
+    # Rows before the next tile row's top are final; a batch spans at most this many rows.
+    window: int = tile + stride * -(-batch_size // len(lefts))
+    total: FloatArray = np.zeros((window, padded_width), np.float32)
+    count: FloatArray = np.zeros_like(total)
+    classes: ByteArray = np.empty((output_height, output_width), np.uint8)
+    base: int = 0
+
+    def finish(limit: int) -> None:
+        nonlocal base
+        limit = min(limit, padded_height)
+        if limit <= base:
+            return
+        rows: int = limit - base
+        # NumPy preserves these float32 operands; its division stub widens the dtype.
+        done: FloatArray = cast(FloatArray, total[:rows] / count[:rows])
+        keep: int = max(0, min(limit, output_height) - base)
+        classes[base : base + keep] = _classify_logits(done[:keep, :output_width])
+        total[: window - rows] = total[rows:]
+        count[: window - rows] = count[rows:]
+        total[window - rows :] = 0
+        count[window - rows :] = 0
+        base = limit
+
     for start in range(0, len(positions), batch_size):
         check_cancel(cancel)
         batch_positions: list[tuple[int, int]] = positions[start : start + batch_size]
         parts: FloatArray = np.stack(
-            [normalized[top : top + tile, left : left + tile] for top, left in batch_positions],
-            dtype=np.float32,
+            [
+                _normalized_tile(reduced[top : top + tile, left : left + tile], statistics)
+                for top, left in batch_positions
+            ]
         )
-        if batch_size == 1:
-            logits: FloatArray = np.asarray(segmenter.sky_logits(parts[0]), dtype=np.float32)[None]
-        else:
-            logits = np.asarray(
-                cast(BatchedSkySegmenter, segmenter).sky_logits_batch(parts), dtype=np.float32
-            )
-        check_cancel(cancel)
-        if logits.shape != (len(parts), tile, tile) or not np.isfinite(logits).all():
-            raise ValueError("Sky model returned invalid logits.")
+        logits: FloatArray = _model_logits(segmenter, parts, batch_size, cancel)
         for (top, left), tile_logits in zip(batch_positions, logits):
-            total[top : top + tile, left : left + tile] += tile_logits
-            count[top : top + tile, left : left + tile] += 1
-    # NumPy preserves these float32 operands; its division stub widens the dtype.
-    return cast(FloatArray, (total / count)[:output_height, :output_width])
+            total[top - base : top - base + tile, left : left + tile] += tile_logits
+            count[top - base : top - base + tile, left : left + tile] += 1
+        completed: int = (start + len(batch_positions)) // len(lefts)
+        finish(tops[completed] if completed < len(tops) else padded_height)
+    return classes
 
 
 def build_sky_mask(
@@ -244,9 +293,7 @@ def build_sky_mask(
     reduced: FloatArray = _reduce_encoded_rows(
         output_height, output_width, factor, read_rows, cancel, block_mean
     )
-    normalized: HalfArray = _normalize_channels(reduced, cancel)
-    del reduced
-    classes: ByteArray = _classify_logits(_infer_overlapping_logits(normalized, segmenter, cancel))
+    classes: ByteArray = _infer_overlapping_logits(reduced, segmenter, cancel)
     grid_height: int
     grid_width: int
     grid_height, grid_width = (height + factor - 1) // factor, (width + factor - 1) // factor

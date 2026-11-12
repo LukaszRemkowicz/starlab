@@ -45,7 +45,8 @@ def test_export_keeps_original_ground_pixels(tmp_path):
     stars = (Star(1, 48, 30, 0.4, (0.4,) * 3), Star(2, 60, 40, 10, (1,) * 3))
     captured = []
     services = ImageServices(
-        read=None, write=lambda path, frame, pixels, **kwargs: captured.append(pixels)
+        read=None,
+        write=lambda path, frame, bands, **kwargs: captured.append(np.concatenate(list(bands))),
     )
     services.export(
         tmp_path / "result.tif", frame, stars, EffectSettings(), False, None, sky_mask=mask

@@ -33,6 +33,7 @@ from ..array_types import (
 )
 from ..jit import njit
 from . import numeric, rays
+from .buffers import anonymous_array
 from .candidate import Image
 from .constants import PREFERRED_SEED_OFFSETS
 from .precision import round_to_float32
@@ -125,7 +126,13 @@ def scan_tile(
     if len(positions) >= PARALLEL_MIN_PEAKS:
         indices: IndexArray
         indices, coordinates = candidate_indices(
-            tile, positions, threshold, neighbor_radius, visited.shape, MAX_CANDIDATE_COORDS
+            tile,
+            anonymous_array(tile.luminance.shape, np.int32),
+            positions,
+            threshold,
+            neighbor_radius,
+            visited.shape,
+            MAX_CANDIDATE_COORDS,
         )
         set_num_threads(min(4, get_num_threads()))
         records: DoubleArray = np.empty((len(coordinates), 8))
@@ -175,6 +182,7 @@ def scan_tile(
 @njit(cache=True, nogil=True)
 def candidate_indices(
     tile: DetectionTile,
+    indices: IndexArray,
     positions: IntArray,
     threshold: float,
     radius: int,
@@ -182,7 +190,7 @@ def candidate_indices(
     budget: int,
 ) -> tuple[IndexArray, IntArray]:
     """Index above-threshold neighboring pixel seeds within the bounded eager budget."""
-    indices: IndexArray = np.full(tile.luminance.shape, -1, np.int32)
+    indices[:, :] = -1
     radius = max(1, radius)
     for peak_x, peak_y in positions:
         for y in range(max(0, peak_y - radius), min(shape[0], peak_y + radius + 1)):

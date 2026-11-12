@@ -342,3 +342,27 @@ def test_undo_preset_allows_reselecting_same_preset(qtbot):
     assert window.preset_combo.currentText() == "Custom"
     assert window.controller.session.settings.primary.intensity == 12
     assert window.controller.shutdown()
+
+
+def test_footer_shows_opened_path_elided_with_full_tooltip(qtbot, tmp_path):
+    from starlab.bootstrap import create_window
+
+    source, _ = _write_star_image(tmp_path)
+    window = create_window(backend="cpu")
+    qtbot.addWidget(window)
+    window.show()
+    assert window.path_label.full_text() == ""
+    window.controller.open_path(source)
+    qtbot.waitUntil(
+        lambda: window.controller.session.frame is not None and not window.controller.runner.busy,
+        timeout=10000,
+    )
+    label = window.path_label
+    assert label.full_text() == label.toolTip() == str(source)
+    label.setFixedWidth(60)
+    qtbot.waitUntil(lambda: "…" in label.text())
+    # Middle elision keeps both ends; how many characters fit depends on the platform font.
+    head, tail = label.text().split("…")
+    assert str(source).startswith(head) and str(source).endswith(tail) and head and tail
+    window.set_loaded(False)
+    assert label.full_text() == "" and label.text() == ""

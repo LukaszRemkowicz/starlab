@@ -51,13 +51,21 @@ def _encoded_variants(frame: ImageFrame) -> dict[str, tuple[np.ndarray, bool]]:
     }
 
 
-def _detect(
-    services: ImageServices, source: Path, methods: tuple[str, ...] = ("native",)
-) -> tuple[ImageFrame, SkyMask | None, tuple[Star, ...]]:
-    """Open one file like the app does and run the given detectors on it."""
+def _open(services: ImageServices, source: Path) -> tuple[ImageFrame, SkyMask | None]:
+    """Open one file like the app does: strided thumbnail, then image and mask."""
     if services.read_preview is not None:
-        services.read_preview(source, max_edge=64)  # strided thumbnail read
-    frame, sky_mask = services.open_image(source)
+        services.read_preview(source, max_edge=64)
+    return services.open_image(source)
+
+
+def _detect(
+    services: ImageServices,
+    source: Path,
+    opened: tuple[ImageFrame, SkyMask | None],
+    methods: tuple[str, ...] = ("native",),
+) -> tuple[Star, ...]:
+    """Run the given detectors on an opened file."""
+    frame, sky_mask = opened
     stars: tuple[Star, ...] = ()
     for method in methods:
         stars = services.analyze(
@@ -66,7 +74,7 @@ def _detect(
             DetectionSettings(threshold_sigma=5.0, method=method, sky_only=sky_mask is not None),
             sky_mask=sky_mask,
         )
-    return frame, sky_mask, stars
+    return stars
 
 
 def warm_up(services: ImageServices, write_samples: SampleWriter | None = None) -> int:
@@ -89,13 +97,18 @@ def warm_up(services: ImageServices, write_samples: SampleWriter | None = None) 
         tiled: Path = Path(directory) / "tiled.tif"
         large: ImageFrame = _synthetic_sky(1100, 1300, 1600)
         services.write(tiled, large, large.pixels)
-        _detect(services, tiled)
+        files: list[Path] = [source, tiled]
         if write_samples is not None:
             for name, (samples, compress) in _encoded_variants(synthetic).items():
                 variant: Path = Path(directory) / f"{name}.tif"
                 write_samples(variant, samples, compress)
-                _detect(services, variant)
-        frame, sky_mask, stars = _detect(services, source, ("multiscale", "native"))
+                files.append(variant)
+        # Opening first: it is what a user waits for, so its kernels are cached soonest.
+        opened = {path: _open(services, path) for path in files}
+        for path in files[1:]:
+            _detect(services, path, opened[path])
+        frame, sky_mask = opened[source]
+        stars = _detect(services, source, opened[source], ("multiscale", "native"))
         for full_resolution in (False, True):
             render_preview(
                 frame, stars, settings, full_resolution=full_resolution, sky_mask=sky_mask

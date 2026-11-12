@@ -1,5 +1,6 @@
 """Typed I/O and preview boundaries supplied by infrastructure adapters."""
 
+from collections.abc import Iterable
 from pathlib import Path
 from threading import Event
 from typing import TYPE_CHECKING, Protocol
@@ -29,12 +30,12 @@ class ImageWriter(Protocol):
         self,
         path: Path,
         frame: ImageFrame,
-        pixels: Pixels,
+        pixels: Pixels | Iterable[Pixels],
         *,
         source_path: Path | None = None,
         cancel: Event | None = None,
     ) -> None:
-        """Encode pixels without overwriting the protected source path."""
+        """Encode a full array or full-width row bands (top to bottom), never the source path."""
         ...
 
 

@@ -8,9 +8,11 @@ import hashlib
 import os
 import platform
 import sys
+from importlib import import_module
 from importlib.metadata import version
 from pathlib import Path
 from threading import Thread
+from typing import Any
 
 PACKAGE = Path(__file__).resolve().parent
 
@@ -70,13 +72,35 @@ def prepare(stamp: Path | None) -> None:
         stamp.write_text(signature, encoding="utf-8")
 
 
+def _wait_for_parent_exit_windows(pid: int) -> None:
+    """Block until process `pid` ends; a missing process counts as already ended."""
+    winapi: Any = import_module("_winapi")  # Windows only, so untyped here
+
+    try:
+        handle = winapi.OpenProcess(0x00100000, False, pid)  # SYNCHRONIZE
+    except OSError:
+        return
+    winapi.WaitForSingleObject(handle, winapi.INFINITE)
+
+
 def main(arguments: list[str]) -> None:
-    """Run preparation, stopping at once if the app's end of stdin closes."""
+    """Run preparation, stopping at once when the app that started it goes away."""
 
     def exit_with_parent() -> None:
-        """The app holds stdin open; the OS closes it when the app exits or crashes."""
+        """POSIX: the OS closes the app's stdin pipe on exit or crash."""
         sys.stdin.read()
         os._exit(0)
 
-    Thread(target=exit_with_parent, daemon=True).start()
+    def exit_with_parent_windows(pid: int) -> None:
+        """Windows: a thread reading the stdin pipe deadlocks `import numpy`, and the
+        parent PID is a launcher stub, so wait on the app's own process handle."""
+        _wait_for_parent_exit_windows(pid)
+        os._exit(0)
+
+    parent: str | None = os.environ.get("STARLAB_PARENT_PID")
+    if parent is not None:
+        if sys.platform == "win32":
+            Thread(target=exit_with_parent_windows, args=(int(parent),), daemon=True).start()
+        else:
+            Thread(target=exit_with_parent, daemon=True).start()
     prepare(Path(arguments[0]) if arguments else None)

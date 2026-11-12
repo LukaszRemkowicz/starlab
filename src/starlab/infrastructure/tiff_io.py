@@ -5,6 +5,9 @@ from __future__ import annotations
 import io
 import os
 import struct
+from collections.abc import Callable, Iterable, Iterator
+from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 from threading import Event
@@ -96,7 +99,7 @@ def _matches_srgb_curve(value: bytes, expected: bytes) -> bool:
 
 
 def _matches_optional_tags(tags: dict[bytes, bytes], reference_tags: dict[bytes, bytes]) -> bool:
-    """Validate optional adaptation/chromaticity and a zero black point."""
+    """Validate optional adaptation/chromaticity; the black point is ignored."""
     for signature in (b"chad", b"chrm"):
         if signature in tags:
             if signature == b"chrm":
@@ -104,8 +107,7 @@ def _matches_optional_tags(tags: dict[bytes, bytes], reference_tags: dict[bytes,
                     return False
             elif not _matches_fixed_tag(tags[signature], reference_tags[signature]):
                 return False
-    if b"bkpt" in tags and tags[b"bkpt"] != b"XYZ \0\0\0\0" + bytes(12):
-        return False
+    # bkpt is informational: a matrix/TRC decode without black point compensation never uses it.
     return True
 
 
@@ -142,13 +144,127 @@ def _matches_srgb(
     )
 
 
-def _check_profile(profile: bytes | None, rgb: bool) -> str:
-    """Validate color interpretation and return the import note or raise ValueError."""
+def _s15(data: bytes, count: int, offset: int = 0) -> DoubleArray:
+    """Read `count` big-endian s15Fixed16 numbers."""
+    if len(data) < offset + 4 * count:
+        raise ValueError("Truncated ICC number array.")
+    return np.frombuffer(data, dtype=">i4", count=count, offset=offset).astype(np.float64) / 65536
+
+
+_PARAMETRIC_COUNTS = {0: 1, 1: 3, 2: 4, 3: 5, 4: 7}
+
+
+def _evaluate_curve(tag: bytes, x: DoubleArray) -> DoubleArray:
+    """Evaluate an ICC 'curv' or 'para' tone curve at x in [0, 1], clipped to [0, 1].
+
+    https://www.color.org/icc34.pdf, clauses 10.5 and 10.15.
+    """
+    if len(tag) < 12 or tag[4:8] != bytes(4):
+        raise ValueError("Malformed ICC curve.")
+    if tag[:4] == b"curv":
+        count: int = struct.unpack_from(">I", tag, 8)[0]
+        if len(tag) < 12 + 2 * count:
+            raise ValueError("Malformed ICC curve.")
+        if count == 0:
+            return x.copy()
+        values: DoubleArray = np.frombuffer(tag, dtype=">u2", count=count, offset=12)
+        if count == 1:
+            return np.clip(x ** (float(values[0]) / 256), 0, 1)
+        return np.interp(x, np.linspace(0, 1, count), values.astype(np.float64) / 65535)
+    if tag[:4] != b"para":
+        raise ValueError("Unsupported ICC curve type.")
+    return _parametric_curve(tag, x)
+
+
+def _parametric_curve(tag: bytes, x: DoubleArray) -> DoubleArray:
+    """Evaluate an ICC 'para' function type 0-4."""
+    function: int = struct.unpack_from(">H", tag, 8)[0]
+    if function not in _PARAMETRIC_COUNTS or struct.unpack_from(">H", tag, 10)[0]:
+        raise ValueError("Unsupported ICC parametric curve.")
+    g, *rest = _s15(tag, _PARAMETRIC_COUNTS[function], 12)
+    a, b, c, d, e, f = [*rest, 0, 0, 0, 0, 0, 0][:6]
+    if function == 0:
+        y: DoubleArray = x**g
+    else:
+        if a == 0 and function < 3:
+            raise ValueError("Malformed ICC parametric curve.")
+        base: DoubleArray = np.maximum(a * x + b, 0) ** g
+        if function == 1:
+            y = np.where(x >= -b / a, base, 0)
+        elif function == 2:
+            y = np.where(x >= -b / a, base + c, c)
+        elif function == 3:
+            y = np.where(x >= d, base, c * x)
+        else:
+            y = np.where(x >= d, base + e, c * x + f)
+    return np.clip(np.nan_to_num(y), 0, 1)
+
+
+@dataclass(frozen=True)
+class IccConversion:
+    """Matrix/TRC RGB profile to linear sRGB: relative colorimetric, no black compensation."""
+
+    name: str
+    curves: tuple[bytes, bytes, bytes]
+    matrix: tuple[tuple[float, ...], ...]
+
+    def tables(self, maximum: int) -> FloatArray:
+        """Return per-channel code-to-linear tables, one row per channel."""
+        codes: DoubleArray = np.arange(maximum + 1, dtype=np.float64) / maximum
+        return np.stack([_evaluate_curve(curve, codes) for curve in self.curves]).astype(np.float32)
+
+    def encode_means(self, means: FloatArray, maximum: int) -> FloatArray:
+        """Map reduced encoded means (code scale) to sRGB-encoded values on the same scale."""
+        tables: FloatArray = self.tables(maximum)
+        codes: DoubleArray = np.arange(maximum + 1, dtype=np.float64)
+        linear: DoubleArray = np.stack(
+            [np.interp(means[..., c], codes, tables[c]) for c in range(3)], axis=-1
+        )
+        converted: DoubleArray = np.clip(linear @ np.array(self.matrix).T, 0, 1)
+        return linear_to_srgb(converted.astype(np.float32)) * maximum
+
+
+def _matrix_conversion(
+    name: str, characteristics: ProfileCharacteristics, reference: ProfileCharacteristics
+) -> IccConversion:
+    """Describe a pure matrix/TRC RGB profile as a conversion to sRGB, or raise ValueError."""
+    header, tags = characteristics
+    required: set[bytes] = {b"rXYZ", b"gXYZ", b"bXYZ", b"rTRC", b"gTRC", b"bTRC", b"wtpt"}
+    if (
+        header[4:8] not in (b"mntr", b"scnr", b"spac")
+        or header[8:16] != b"RGB XYZ "
+        or not required <= tags.keys()
+        or tags.keys() - required - {b"chad", b"chrm", b"bkpt"}
+    ):
+        raise ValueError("Not a matrix/TRC RGB profile.")
+
+    def colorants(profile_tags: dict[bytes, bytes]) -> DoubleArray:
+        columns: list[DoubleArray] = []
+        for signature in (b"rXYZ", b"gXYZ", b"bXYZ"):
+            tag: bytes = profile_tags[signature]
+            if len(tag) < 20 or tag[:8] != b"XYZ \0\0\0\0":
+                raise ValueError("Malformed ICC colorant.")
+            columns.append(_s15(tag, 3, 8))
+        return np.stack(columns, axis=1)
+
+    source, target = colorants(tags), colorants(reference[1])
+    if abs(np.linalg.det(source)) < 1e-6:
+        raise ValueError("Singular ICC colorant matrix.")
+    matrix: DoubleArray = np.linalg.solve(target, source)
+    curves: tuple[bytes, bytes, bytes] = (tags[b"rTRC"], tags[b"gTRC"], tags[b"bTRC"])
+    for curve in curves:
+        _evaluate_curve(curve, np.zeros(1))  # reject malformed curves now, not during decode
+    return IccConversion(name, curves, tuple(tuple(float(v) for v in row) for row in matrix))
+
+
+def _check_profile(profile: bytes | None, rgb: bool) -> tuple[str, IccConversion | None]:
+    """Validate color interpretation; return the import note and any needed conversion."""
     if not profile:
         return (
             "Untagged image: sRGB assumed."
             if rgb
-            else "Untagged grayscale: sRGB tone curve assumed."
+            else "Untagged grayscale: sRGB tone curve assumed.",
+            None,
         )
     try:
         parsed: ImageCmsProfile = ImageCms.ImageCmsProfile(io.BytesIO(profile))
@@ -160,21 +276,51 @@ def _check_profile(profile: bytes | None, rgb: bool) -> str:
     reference_characteristics: tuple[bytes, dict[bytes, bytes]] = _profile_characteristics(
         reference
     )
-    if not rgb or not _matches_srgb(characteristics, reference_characteristics):
-        raise ValueError(
-            f"Profile '{name}' is not supported by this prototype's strict ICC check. "
-            "Convert to sRGB in your editor, then export an untagged RGB TIFF. "
-            "Removing a profile alone does not convert colors."
+    if rgb and _matches_srgb(characteristics, reference_characteristics):
+        suffix: str = (
+            " (validated sRGB matrix/TRC variant)"
+            if characteristics != reference_characteristics
+            else ""
         )
-    suffix: str = (
-        " (validated sRGB matrix/TRC variant)"
-        if characteristics != reference_characteristics
-        else ""
+        return f"Embedded sRGB profile: {name}{suffix}", None
+    if rgb:
+        try:
+            conversion: IccConversion = _matrix_conversion(
+                name, characteristics, reference_characteristics
+            )
+        except ValueError:
+            pass  # LUT, unknown-tag or malformed profiles fall through to the strict rejection
+        else:
+            return (
+                f"Converted from '{name}' to sRGB (relative colorimetric); "
+                "colors outside sRGB were clipped.",
+                conversion,
+            )
+    raise ValueError(
+        f"Profile '{name}' is not supported by this prototype's strict ICC check. "
+        "Convert to sRGB in your editor, then export an untagged RGB TIFF. "
+        "Removing a profile alone does not convert colors."
     )
-    return f"Embedded sRGB profile: {name}{suffix}"
 
 
-def _validated_page(tiff_file: tifffile.TiffFile) -> tuple[tifffile.TiffPage, str]:
+def _alpha_note(page: TiffPage, extras: tuple[int, ...]) -> str:
+    """Describe ignored extra samples; premultiplied alpha is restored only when interleaved."""
+    if 1 in extras:
+        if page.planarconfig == 2:
+            raise ValueError(
+                "Premultiplied alpha is supported only in interleaved TIFFs; "
+                "flatten or export without alpha."
+            )
+        return (
+            " Alpha channel ignored (premultiplied colors restored;"
+            " fully transparent areas are black); export has no alpha."
+        )
+    return " Alpha channel ignored; export has no alpha." if extras else ""
+
+
+def _validated_page(
+    tiff_file: tifffile.TiffFile,
+) -> tuple[tifffile.TiffPage, str, IccConversion | None]:
     """Accept one supported page and describe its validated color interpretation."""
     if len(tiff_file.pages) != 1:
         raise ValueError("Use a single-page, flattened TIFF (no image stacks).")
@@ -192,24 +338,179 @@ def _validated_page(tiff_file: tifffile.TiffFile) -> tuple[tifffile.TiffPage, st
         raise ValueError("Supported input: unsigned 8/16-bit TIFF. HDR is a later milestone.")
     if page.imagedepth > 1:
         raise ValueError("Use a single-page, flattened TIFF (no image stacks).")
-    if page.photometric not in (1, 2) or page.samplesperpixel not in (1, 3) or page.extrasamples:
-        raise ValueError("Use RGB or grayscale TIFF without alpha, palette or CMYK.")
+    colors: int = 3 if page.photometric == 2 else 1
+    if page.photometric not in (1, 2) or page.samplesperpixel < colors:
+        raise ValueError("Use RGB or grayscale TIFF; palette and CMYK are not supported.")
+    extras = tuple(int(extra) for extra in page.extrasamples)
+    if page.samplesperpixel != colors + len(extras) or any(
+        extra not in (0, 1, 2) for extra in extras
+    ):
+        raise ValueError("Use RGB or grayscale TIFF with only alpha extras.")
     if min(page.imagelength, page.imagewidth) < 2:
         raise ValueError("Expected an image of at least 2 × 2 pixels.")
     tag: TiffTag | None = page.tags.get(34675)
-    return page, _check_profile(tag.value if tag else None, page.photometric == 2)
+    note, conversion = _check_profile(tag.value if tag else None, page.photometric == 2)
+    return page, note + _alpha_note(page, extras), conversion
 
 
-def _mapped_pixels(page: tifffile.TiffPage) -> EncodedPixels:
-    """Expose validated unsigned samples as H×W×C, mapping/decoding only as needed."""
-    # Uncompressed contiguous TIFFs map the source file directly. Everything else decodes
-    # in RAM: tifffile's "memmap" fallback would write the photo to a temporary file.
-    data: EncodedPixels = page.asarray(out="memmap" if page.is_memmappable else None)
-    if page.planarconfig == 2 and data.ndim == 3:
-        data = np.moveaxis(data, 0, -1)
-    if data.ndim == 2:
-        data = data[..., None]
-    return data
+class EncodedRows:
+    """Read encoded unsigned samples as H×W×C rows without holding a decoded file.
+
+    Uncompressed contiguous pages are memory-mapped. Every other page decodes, per
+    request, only the strips or tiles that intersect the requested rows (in parallel,
+    never writing to disk) and keeps just the last partially used strip row, so
+    sequential bands decode each segment once. A band is released after use. A
+    TIFF stored as ONE compressed strip (or planar with one strip per plane) must
+    be decoded whole to read any row, so it needs about one decoded image of RAM.
+    """
+
+    def __init__(self, page: TiffPage) -> None:
+        """Describe the segment grid of a validated page."""
+        self.page = page
+        self.height, self.width = page.imagelength, page.imagewidth
+        self.samples: int = page.samplesperpixel  # stored per pixel, including ignored extras
+        self.channels: int = 3 if page.photometric == 2 else 1  # color channels returned
+        extras: list[int] = [int(extra) for extra in page.extrasamples]
+        # Index of a premultiplied alpha sample (ExtraSamples 1), whose color is restored on read.
+        self.alpha: int | None = self.channels + extras.index(1) if 1 in extras else None
+        self.dtype = cast(
+            np.dtype[np.uint8] | np.dtype[np.uint16], np.dtype(page.dtype).newbyteorder("=")
+        )
+        self.mapped: EncodedPixels | None = None
+        if page.is_memmappable:
+            # Mapping the source never writes: tifffile's "memmap" fallback for other pages would.
+            mapped: EncodedPixels = page.asarray(out="memmap")
+            if page.planarconfig == 2 and mapped.ndim == 3:
+                mapped = np.moveaxis(mapped, 0, -1)
+            self.mapped = mapped.reshape(self.height, self.width, self.samples)
+        self.planar: bool = page.planarconfig == 2 and self.samples > 1
+        # Planar reads skip the extra planes; interleaved ones keep them until the final slice.
+        self.stored: int = self.channels if self.planar else self.samples
+        # Segment height/width: tile, or strip rows (clipped, a lone strip is rowsperstrip=2**32-1).
+        self.seg_rows: int = page.tile[0] if page.tile else min(page.rowsperstrip, self.height)
+        self.seg_cols: int = page.tile[1] if page.tile else self.width
+        self.grid_rows: int = -(-self.height // self.seg_rows)
+        self.grid_cols: int = -(-self.width // self.seg_cols)
+        self.kept: tuple[int, EncodedPixels] | None = None  # (strip-row index, its decoded rows)
+        self.pool: ThreadPoolExecutor | None = None
+
+    def __enter__(self) -> EncodedRows:
+        """Use as a context manager so the decode threads end with the reader."""
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        """Stop the decode threads, if any were started."""
+        self.close()
+
+    def close(self) -> None:
+        """Shut the reusable decode executor down; later reads start a new one."""
+        pool, self.pool = self.pool, None
+        if pool is not None:
+            pool.shutdown()
+
+    def _color(self, samples: EncodedPixels) -> EncodedPixels:
+        """Return the color channels, undoing premultiplied alpha (rounded, as Registar does)."""
+        colors: EncodedPixels = np.asarray(samples[..., : self.channels], dtype=self.dtype)
+        if self.alpha is None:
+            return colors
+        maximum: int = int(np.iinfo(self.dtype).max)
+        alpha: NDArray[np.uint32] = samples[..., self.alpha].astype(np.uint32)
+        if alpha.size == 0 or int(alpha.min()) == maximum:
+            return colors  # fully opaque band: stored color is already the true color
+        # stored * maximum <= 65535**2 fits uint32; alpha 0 has no color left, so it becomes black.
+        restored: NDArray[np.uint32] = (
+            colors.astype(np.uint32) * maximum + (alpha // 2)[..., None]
+        ) // np.maximum(alpha, 1)[..., None]
+        restored[alpha == 0] = 0
+        return cast(EncodedPixels, np.minimum(restored, maximum).astype(self.dtype))
+
+    def _place(
+        self, out: EncodedPixels, top: int, row0: int, col0: int, plane: int, data: EncodedPixels
+    ) -> None:
+        """Copy the part of one decoded segment that falls inside the output rows."""
+        lo, hi = max(top, row0), min(top + out.shape[0], row0 + data.shape[1], self.height)
+        width: int = min(data.shape[2], self.width - col0)
+        if lo < hi:
+            part: EncodedPixels = data[0, lo - row0 : hi - row0, :width]
+            if self.planar:
+                out[lo - top : hi - top, col0 : col0 + width, plane] = part[..., 0]
+            else:
+                out[lo - top : hi - top, col0 : col0 + width] = part
+
+    def _decode(self, indices: list[int]) -> Iterator[tuple[int, EncodedPixels | None]]:
+        """Decode the given segments a few at a time, yielding each with its index."""
+        page, handle = self.page, self.page.parent.filehandle
+        workers: int = max(1, page.maxworkers)
+        args: dict[str, object] = {"_fullsize": page.is_tiled}
+        if page.compression in {6, 7, 34892, 33007}:  # JPEG
+            args["jpegtables"] = page.jpegtables
+            args["jpegheader"] = page.jpegheader
+
+        def decode(item: tuple[bytes | None, int]) -> tuple[int, EncodedPixels | None]:
+            result = page.decode(*item, **args)
+            return item[1], result[0]
+
+        if self.pool is None:
+            self.pool = ThreadPoolExecutor(workers)
+        for start in range(0, len(indices), 2 * workers):
+            items: list[tuple[bytes | None, int]] = []
+            with handle.lock:
+                for index in indices[start : start + 2 * workers]:
+                    count: int = page.databytecounts[index]
+                    handle.seek(page.dataoffsets[index])
+                    items.append((handle.read(count) if count else None, index))
+            yield from self.pool.map(decode, items)
+
+    def rows(self, top: int, bottom: int, step: int = 1) -> EncodedPixels:
+        """Return rows top, top+step, ... below `bottom`; only those are read or decoded."""
+        if self.mapped is not None:
+            return self._color(self.mapped[top:bottom:step])
+        out: EncodedPixels = np.zeros((bottom - top, self.width, self.stored), self.dtype)
+        kept, self.kept = self.kept, None
+        last: int = (bottom - 1) // self.seg_rows
+        partial: bool = (last + 1) * self.seg_rows > bottom
+        wanted: list[int] = []
+        for band in range(top // self.seg_rows, last + 1):
+            lo, hi = band * self.seg_rows, (band + 1) * self.seg_rows
+            if -(-(lo - top) // step) * step + top >= hi:
+                continue  # no sampled row inside this strip row
+            if kept is not None and kept[0] == band:
+                start, stop = max(top, lo), min(bottom, hi)
+                out[start - top : stop - top] = kept[1][start - lo : stop - lo]
+                self.kept = kept if band == last and partial else None
+                continue
+            for plane in range(self.channels if self.planar else 1):
+                first: int = (plane * self.grid_rows + band) * self.grid_cols
+                wanted += range(first, first + self.grid_cols)
+        retained: EncodedPixels | None = None
+        for index, data in self._decode(wanted):
+            if data is None:
+                continue
+            plane, rest = divmod(index, self.grid_rows * self.grid_cols)
+            band, col = divmod(rest, self.grid_cols)
+            self._place(out, top, band * self.seg_rows, col * self.seg_cols, plane, data)
+            if band == last and partial:
+                retained = self._extend(retained, plane, col, data)
+        if retained is not None:
+            self.kept = (last, retained)
+        return self._color(out[::step])
+
+    def _extend(
+        self, band: EncodedPixels | None, plane: int, col: int, data: EncodedPixels
+    ) -> EncodedPixels:
+        """Add a decoded segment to the retained strip row (a plain view if it spans the row)."""
+        if band is None and not self.planar and self.grid_cols == 1:
+            return np.asarray(data[0, :, : self.width], dtype=self.dtype)
+        if band is None:
+            band = np.zeros((data.shape[1], self.width, self.stored), self.dtype)
+        left: int = col * self.seg_cols
+        width: int = min(data.shape[2], self.width - left)
+        rows: int = min(data.shape[1], band.shape[0])
+        if self.planar:
+            band[:rows, left : left + width, plane] = data[0, :rows, :width, 0]
+        else:
+            band[:rows, left : left + width] = data[0, :rows, :width]
+        return band
 
 
 @lru_cache(maxsize=4)
@@ -235,18 +536,43 @@ def _transfer_integer_block(source: EncodedPixels, table: Pixels, destination: P
                 destination[y, x, channel] = table[source[y, x, channel]]
 
 
+@njit(cache=True, nogil=True)
+def _convert_icc_block(
+    source: EncodedPixels, tables: Pixels, matrix: Pixels, destination: Pixels
+) -> None:
+    """Decode each channel's TRC, apply the 3x3 matrix to linear sRGB and clip to [0, 1]."""
+    for y in range(source.shape[0]):
+        for x in range(source.shape[1]):
+            r = tables[0, source[y, x, 0]]
+            g = tables[1, source[y, x, 1]]
+            b = tables[2, source[y, x, 2]]
+            for channel in range(3):
+                value = matrix[channel, 0] * r + matrix[channel, 1] * g + matrix[channel, 2] * b
+                destination[y, x, channel] = min(1.0, max(0.0, value))
+
+
 def _convert_integer_image(
-    data: EncodedPixels, path: Path, note: str, cancel: Event | None
+    read_rows: Callable[[int, int], EncodedPixels],
+    shape: tuple[int, int, int],
+    maximum: int,
+    path: Path,
+    note: str,
+    cancel: Event | None,
+    block: int = ROWS_PER_BLOCK,
+    conversion: IccConversion | None = None,
 ) -> ImageFrame:
-    """Convert validated samples in cancellable strips, then transfer buffer ownership."""
-    normalized: FloatArray = np.empty(data.shape, np.float32)
-    table: FloatArray = _integer_transfer(np.iinfo(data.dtype).max)
-    for row in range(0, data.shape[0], ROWS_PER_BLOCK):
+    """Convert encoded row bands in cancellable strips, then transfer buffer ownership."""
+    normalized: FloatArray = np.empty(shape, np.float32)
+    table: FloatArray = _integer_transfer(maximum)
+    tables: FloatArray | None = conversion.tables(maximum) if conversion else None
+    matrix: FloatArray | None = np.array(conversion.matrix, np.float32) if conversion else None
+    for row in range(0, shape[0], block):
         check_cancel(cancel)
-        source: EncodedPixels = np.asarray(
-            data[row : row + ROWS_PER_BLOCK], dtype=data.dtype.newbyteorder("=")
-        )
-        _transfer_integer_block(source, table, normalized[row : row + ROWS_PER_BLOCK])
+        source: EncodedPixels = read_rows(row, min(row + block, shape[0]))
+        if tables is not None and matrix is not None:
+            _convert_icc_block(source, tables, matrix, normalized[row : row + block])
+        else:
+            _transfer_integer_block(source, table, normalized[row : row + block])
     check_cancel(cancel)
     return ImageFrame._from_owned_validated(
         normalized,
@@ -261,9 +587,23 @@ def read_tiff(path: Path | str, cancel: Event | None = None) -> ImageFrame:
     check_cancel(cancel)
     path = Path(path)
     with tifffile.TiffFile(path) as tiff_file:
-        page, note = _validated_page(tiff_file)
-        data: EncodedPixels = _mapped_pixels(page)
-        return _convert_integer_image(data, path, note, cancel)
+        page, note, conversion = _validated_page(tiff_file)
+        with EncodedRows(page) as reader:
+            shape: tuple[int, int, int] = (reader.height, reader.width, reader.channels)
+            return _convert_integer_image(
+                reader.rows,
+                shape,
+                int(np.iinfo(reader.dtype).max),
+                path,
+                note,
+                cancel,
+                conversion=conversion,
+            )
+
+
+def _slice_rows(array: EncodedPixels) -> Callable[[int, int], EncodedPixels]:
+    """Serve row bands of an in-memory array through the reader interface."""
+    return lambda top, bottom: array[top:bottom]
 
 
 def read_tiff_preview(
@@ -271,33 +611,100 @@ def read_tiff_preview(
 ) -> tuple[ImageFrame, float, int, int]:
     """Return a quick strided preview, scale, original width and original height.
 
-    Compatible uncompressed files are sampled directly from their map before
-    float conversion. Compressed TIFFs are decoded in memory first.
-    This is an opening preview, not an antialiased export or detection input.
+    Rows are read band by band (see EncodedRows): uncompressed files are sampled
+    from their map; compressed ones decode only strips/tiles holding a sampled row
+    and keep none of them. This is an opening preview, not an antialiased export
+    or detection input.
     """
     check_cancel(cancel)
     if max_edge < 2:
         raise ValueError("Preview edge must be at least two pixels.")
     path = Path(path)
     with tifffile.TiffFile(path) as tiff_file:
-        page, note = _validated_page(tiff_file)
+        page, note, conversion = _validated_page(tiff_file)
         width, height = page.imagewidth, page.imagelength
         stride: int = max(1, (max(width, height) + max_edge - 1) // max_edge)
-        data: EncodedPixels = _mapped_pixels(page)[::stride, ::stride]
-        # Keep ImageFrame's 2×2 minimum for exceptionally thin panoramas.
-        if min(data.shape[:2]) < 2:
-            data = cast(EncodedPixels, np.repeat(data, 2, axis=0 if data.shape[0] == 1 else 1))
-        return _convert_integer_image(data, path, note, cancel), 1 / stride, width, height
+        with EncodedRows(page) as reader:
+            shape: tuple[int, int, int] = (
+                -(-height // stride),
+                -(-width // stride),
+                reader.channels,
+            )
+
+            def sampled(top: int, bottom: int) -> EncodedPixels:
+                """Return strided output rows [top, bottom) of the preview grid."""
+                rows: EncodedPixels = reader.rows(
+                    top * stride, min((bottom - 1) * stride + 1, height), stride
+                )
+                return rows[:, ::stride]
+
+            block: int = max(1, ROWS_PER_BLOCK // stride)
+            # Keep ImageFrame's 2×2 minimum for exceptionally thin panoramas.
+            if min(shape[:2]) < 2:
+                thin: EncodedPixels = cast(
+                    EncodedPixels,
+                    np.concatenate(
+                        [
+                            sampled(row, min(row + block, shape[0]))
+                            for row in range(0, shape[0], block)
+                        ]
+                    ),
+                )
+                thin = cast(EncodedPixels, np.repeat(thin, 2, axis=0 if thin.shape[0] == 1 else 1))
+                shape = (thin.shape[0], thin.shape[1], shape[2])
+                read_rows = _slice_rows(thin)
+            else:
+                read_rows = sampled
+            frame: ImageFrame = _convert_integer_image(
+                read_rows,
+                shape,
+                int(np.iinfo(reader.dtype).max),
+                path,
+                note,
+                cancel,
+                block,
+                conversion,
+            )
+            return frame, 1 / stride, width, height
+
+
+def _encoded_rows(
+    pixels: Pixels | Iterable[Pixels], shape: tuple[int, ...], cancel: Event | None
+) -> Iterator[NDArray[np.uint16]]:
+    """Validate and encode float bands, yielding one uint16 row at a time."""
+    bands: Iterable[Pixels] = (
+        (pixels[row : row + ROWS_PER_BLOCK] for row in range(0, shape[0], ROWS_PER_BLOCK))
+        if isinstance(pixels, np.ndarray)
+        else pixels
+    )
+    written: int = 0
+    for band in bands:
+        check_cancel(cancel)
+        if band.ndim != 3 or band.shape[1:] != shape[1:] or written + band.shape[0] > shape[0]:
+            raise ValueError("Invalid output pixels.")
+        # Checked per band so a huge export needs no extra full-image boolean buffer.
+        if not np.isfinite(band).all() or band.min() < 0:
+            raise ValueError("Invalid output pixels.")
+        for start in range(0, band.shape[0], ROWS_PER_BLOCK):
+            encoded: FloatArray = linear_to_srgb(band[start : start + ROWS_PER_BLOCK])
+            block: NDArray[np.uint16] = np.rint(np.clip(encoded, 0, 1) * 65535).astype(np.uint16)
+            yield from (block if shape[2] == 3 else block[..., 0])
+        written += band.shape[0]
+    if written != shape[0]:
+        raise ValueError("Invalid output pixels.")
 
 
 def write_tiff(
     path: Path | str,
     frame: ImageFrame,
-    pixels: Pixels,
+    pixels: Pixels | Iterable[Pixels],
     source_path: Path | str | None = None,
     cancel: Event | None = None,
 ) -> None:
-    """Write atomically. A cancellation before replacement preserves the existing destination."""
+    """Write atomically from an array or full-width float row bands, top to bottom.
+
+    A cancellation before replacement preserves the existing destination.
+    """
     path = Path(path)
     if source_path is not None:
         source: Path = Path(source_path)
@@ -305,21 +712,11 @@ def write_tiff(
             path.exists() and source.exists() and path.samefile(source)
         ):
             raise ValueError("Choose a new output file; the original image is protected.")
-    if pixels.shape != frame.pixels.shape:
+    shape: tuple[int, ...] = frame.pixels.shape
+    if isinstance(pixels, np.ndarray) and pixels.shape != shape:
         raise ValueError("Invalid output pixels.")
     check_cancel(cancel)
-    rgb: bool = pixels.shape[2] == 3
-    output: NDArray[np.uint16] = np.empty(pixels.shape, np.uint16)
-    for row in range(0, pixels.shape[0], ROWS_PER_BLOCK):
-        check_cancel(cancel)
-        block: FloatArray = pixels[row : row + ROWS_PER_BLOCK]
-        # Checked per block so a huge export needs no extra full-image boolean buffer.
-        if not np.isfinite(block).all() or block.min() < 0:
-            raise ValueError("Invalid output pixels.")
-        encoded: FloatArray = linear_to_srgb(block)
-        output[row : row + ROWS_PER_BLOCK] = np.rint(np.clip(encoded, 0, 1) * 65535).astype(
-            np.uint16
-        )
+    rgb: bool = shape[2] == 3
     profile: bytes | None = (
         ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB")).tobytes() if rgb else None
     )
@@ -332,7 +729,9 @@ def write_tiff(
     try:
         tifffile.imwrite(
             temporary,
-            output if rgb else output[..., 0],
+            _encoded_rows(pixels, shape, cancel),
+            shape=shape if rgb else shape[:2],
+            dtype=np.uint16,
             photometric="rgb" if rgb else "minisblack",
             metadata=None,
             extratags=tags,

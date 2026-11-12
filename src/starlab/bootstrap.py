@@ -1,6 +1,7 @@
 """Construct the application dependency graph without leaking Qt into domain code."""
 
 import logging
+import os
 import subprocess
 import sys
 import time
@@ -78,6 +79,7 @@ def start_preparation(
         process: subprocess.Popen[bytes] = subprocess.Popen(
             [sys.executable, "-P", "-c", PREPARE, *arguments],
             stdin=subprocess.PIPE,
+            env={**os.environ, "STARLAB_PARENT_PID": str(os.getpid())},
             stdout=subprocess.DEVNULL,
             stderr=errors,
             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),

@@ -503,7 +503,8 @@ def sparse_profile(
         sampling,
         residue,
         angle,
-        bounds,
+        # Ray profiles ignore the bounds; keying on them would defeat the cache.
+        bounds if kind not in ("primary", "secondary") else None,
     )
     cached: ProfileArrays | None = PROFILE_CACHE.get(key)
     if cached is not None:
@@ -525,6 +526,10 @@ def sparse_profile(
             kind, parameters, diagonal, extent, center, sampling, residue, bounds
         )
     valid: BoolArray = values > 0
+    if kind in ("primary", "secondary"):
+        # Rows ascending lets a band find its slice by bisection; pixels of one ray are
+        # distinct, so the order inside a ray cannot change any composited value.
+        valid = np.flatnonzero(valid)[np.argsort(offset_y[valid], kind="stable")]
     arrays: ProfileArrays = cast(
         ProfileArrays,
         tuple(

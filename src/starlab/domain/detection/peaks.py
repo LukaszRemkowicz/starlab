@@ -6,9 +6,9 @@ from scipy import ndimage
 
 from ..array_types import BoolArray, Bounds, FloatArray, IntArray
 from ..jit import njit
+from .buffers import anonymous_array
 from .candidate import Image
 from .peak_filters import uniform7_at
-from .records import IndexArray
 
 SPARSE_FLOOR_LIMIT = 256
 
@@ -176,8 +176,11 @@ def _component_centers(
     selected: NDArray[np.bool_], image: Image, core: tuple[int, int, int, int]
 ) -> list[tuple[int, int]]:
     """Find component bounding-box centers after retaining the complete halo topology."""
-    labels: IndexArray
-    labels, _ = ndimage.label(selected)
+    # Components never outnumber selected pixels, so small selections fit 16-bit labels.
+    labels: NDArray[np.int16 | np.int32] = anonymous_array(
+        selected.shape, np.int16 if np.count_nonzero(selected) < 2**15 else np.int32
+    )
+    ndimage.label(selected, output=labels)
     centers: list[tuple[int, int]] = []
     for region in ndimage.find_objects(labels):
         if region is not None:

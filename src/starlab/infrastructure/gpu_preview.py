@@ -34,8 +34,10 @@ from ..domain.effects.profiles import (
     radial_extent,
     ray_coefficients,
     sine,
+    source_colors,
 )
 from ..domain.effects.settings import KINDS, EffectKind, EffectParameters, EffectSettings
+from ..domain.effects.soft_filter import halo_shape
 from ..domain.imaging import ImageFrame, Pixels, check_cancel, preview_region_bounds
 from ..domain.sky_mask import SkyMask
 from ..domain.stars import Star
@@ -44,8 +46,8 @@ type Bounds = tuple[int, int, int, int]
 type FrameIdentity = weakref.ReferenceType[ImageFrame] | ImageFrame
 type CropKey = tuple[FrameIdentity, Bounds, int]
 type GroupKey = tuple[EffectParameters, Bounds, int, int, int, SkyMask | None]
-type SourceFilterKey = tuple[float, CropKey | None, SkyMask | None]
-type BufferKey = int | tuple[int, float]
+type SourceFilterKey = tuple[tuple[float, ...], CropKey | None, SkyMask | None]
+type BufferKey = int | tuple[float, ...]
 type UniformComparable = float | int | tuple[float, float]
 
 # Generated PySide stubs label void* as int, but the installed binding requires
@@ -426,18 +428,33 @@ class GpuPreviewRenderer:
         assert self.source_texture is not None
         self.source_texture.bind(0)
 
-    def _correction_buffer(self, mode: int) -> str:
-        """Select measured small/large sources, without halo quantity filtering."""
+    def _correction_buffer(self, mode: int, parameters: EffectParameters) -> str:
+        """Select measured small/large sources the Soft Flare Quantity keeps, in Soft Flare color."""
         name: str = "reduction" if mode == 4 else "enlargement"
-        key: int = id(self.catalog)
+        key: tuple[float, ...] = (
+            id(self.catalog),
+            parameters.quantity,
+            parameters.hue,
+            parameters.saturation,
+        )
         if self.buffer_keys.get(name) != key:
-            eligible: BoolArray = (self.records[:, 6] > 0) & (self.records[:, 8] > 0)
+            threshold: float = (1 - parameters.quantity / 100) ** 2 * self.maximum
+            eligible: BoolArray = (
+                (self.records[:, 6] > 0)
+                & (self.records[:, 8] > 0)
+                & (self.records[:, 5] > threshold)
+            )
             eligible &= (
                 self.records[:, 7] < 0.5
                 if mode == 4
                 else ((self.records[:, 7] > 0.5) & (self.records[:, 18:21].max(axis=1) > 0))
             )
-            self._upload_buffer(name, key, self.records[eligible])
+            records: NDArray[np.float32] = self.records[eligible].copy()
+            if mode == 5 and len(records):
+                records[:, 18:21] = source_colors(
+                    records[:, 18:21], parameters.hue, parameters.saturation
+                )
+            self._upload_buffer(name, key, records)
         return name
 
     def _source_filter(
@@ -452,7 +469,14 @@ class GpuPreviewRenderer:
         if not parameters.enabled or not parameters.soft_filter or not self.catalog:
             return None, None
         key: SourceFilterKey = (
-            parameters.soft_filter,
+            (
+                parameters.soft_filter,
+                parameters.quantity,
+                parameters.size,
+                parameters.falloff,
+                parameters.hue,
+                parameters.saturation,
+            ),
             self.crop_key,
             sky_mask,
         )
@@ -463,13 +487,16 @@ class GpuPreviewRenderer:
         self._uniform("originalImage", 0)
         self._uniform("rayCount", 1)
         self._uniform("softFilter", float(parameters.soft_filter / 100))
+        size_factor, shape = halo_shape(parameters.size, parameters.falloff)
+        self._uniform("softSizeFactor", size_factor)
+        self._uniform("softShape", shape)
         passes: list[Pixels] = []
         self._gpu.glBlendEquation(0x8008)
         try:
             for mode in (4, 5):
                 check_cancel(cancel)
                 self._uniform("kind", mode)
-                name: str = self._correction_buffer(mode)
+                name: str = self._correction_buffer(mode, parameters)
                 self._attributes(self.buffers[name], 1)
                 self._gpu.glClear(0x4000)
                 self._draw(self.buffer_counts[name], 1)

@@ -9,6 +9,7 @@ from PySide6.QtCore import (
     QElapsedTimer,
     QSettings,
     QSignalBlocker,
+    QSize,
     QStandardPaths,
     Qt,
     QTimer,
@@ -20,7 +21,9 @@ from PySide6.QtGui import (
     QDragEnterEvent,
     QDragMoveEvent,
     QDropEvent,
+    QFontMetrics,
     QKeySequence,
+    QResizeEvent,
 )
 from PySide6.QtWidgets import (
     QButtonGroup,
@@ -53,6 +56,55 @@ from .theme import STYLE, icon
 
 if TYPE_CHECKING:
     from .controller import Controller
+
+
+class _ElidedLabel(QLabel):
+    """A single-line label that keeps its full text and shows it middle-elided to fit."""
+
+    def __init__(self) -> None:
+        """Start empty, shrinkable to nothing and capped in width."""
+        super().__init__()
+        self._full: str = ""
+        self.setMaximumWidth(600)
+        self.hide()
+        self.setSizePolicy(QSizePolicy.Policy.Preferred, QSizePolicy.Policy.Preferred)
+
+    def set_full_text(self, text: str) -> None:
+        """Remember the full path (also as tooltip) and show its elided form."""
+        self._full = text
+        self.setToolTip(text)
+        self.setVisible(bool(text))  # no empty padded box on the canvas
+        self._elide()
+        self.updateGeometry()
+
+    def full_text(self) -> str:
+        """Return the unelided text."""
+        return self._full
+
+    def sizeHint(self) -> QSize:
+        """Ask for the full text width; the layout may give less."""
+        hint: QSize = super().sizeHint()
+        self.ensurePolished()  # stylesheet padding must be applied before measuring it
+        padding: int = self.width() - self.contentsRect().width()
+        hint.setWidth(QFontMetrics(self.font()).horizontalAdvance(self._full) + padding + 6)
+        return hint
+
+    def minimumSizeHint(self) -> QSize:
+        """Allow shrinking to nothing so the buttons never lose room."""
+        return QSize(0, super().minimumSizeHint().height())
+
+    def resizeEvent(self, event: QResizeEvent) -> None:
+        """Re-elide for the new width."""
+        super().resizeEvent(event)
+        self._elide()
+
+    def _elide(self) -> None:
+        """Show the text elided in the middle for the current width."""
+        self.setText(
+            QFontMetrics(self.font()).elidedText(
+                self._full, Qt.TextElideMode.ElideMiddle, max(self.contentsRect().width(), 0)
+            )
+        )
 
 
 class Canvas(QWidget):
@@ -171,6 +223,13 @@ class MainWindow(QMainWindow):
         self.image_info.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents)
         canvas_layout.addWidget(
             self.image_info, 0, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignLeft
+        )
+        # Opened file path, on the same strip as the size, at the right edge.
+        self.path_label = _ElidedLabel()
+        self.path_label.setObjectName("imageInfo")
+        self.path_label.setTextInteractionFlags(Qt.TextInteractionFlag.TextSelectableByMouse)
+        canvas_layout.addWidget(
+            self.path_label, 0, 0, Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight
         )
         return self.canvas
 
@@ -642,6 +701,8 @@ class MainWindow(QMainWindow):
             widget.setEnabled(loaded)
         self.stack.setCurrentIndex(1 if loaded else 0)
         self.effect_panel.setEnabled(True)
+        if not loaded:
+            self.path_label.set_full_text("")
         self.hud.setVisible(loaded)
         self.image_info.setVisible(loaded)
         self.set_exclusive(False)

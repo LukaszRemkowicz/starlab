@@ -31,6 +31,7 @@ from ..array_types import (
 )
 from ..imaging import ImageFrame, check_cancel
 from ..sky_mask import SkyMask
+from .buffers import anonymous_array
 from .candidate import Image, candidate, covered, merge_candidate
 from .catalog import join_catalogs
 from .constants import PREFERRED_SEED_OFFSETS
@@ -343,6 +344,8 @@ def scan_tiled(
 
 
 WORKERS = min(16, os.cpu_count() or 1)
+# Each in-flight halo tile holds ~40 MB of float32 proxy/luminance: one per worker bounds memory.
+IN_FLIGHT = WORKERS
 
 
 def _prepare_tile(
@@ -483,7 +486,7 @@ def _compiled_tiles(
     source_scale: int,
 ) -> Generator[tuple[int, int, TileResult], None, None]:
     """Schedule bounded tile work and yield completed tiles in row-major join order."""
-    visited: BoolArray = np.zeros((height, width), np.bool_)
+    visited: BoolArray = anonymous_array((height, width), np.bool_)
     columns, row_count = (width + TILE - 1) // TILE, (height + TILE - 1) // TILE
     keys: list[tuple[int, int]] = [
         (row_index, column_index)
@@ -528,7 +531,7 @@ def _compiled_tiles(
                 check_cancel(token)
                 while next_prepare < len(keys) and len(preparing) + len(prepared) + len(
                     qualifying
-                ) < max(2, WORKERS * 2):
+                ) < max(2, IN_FLIGHT):
                     key: tuple[int, int] = keys[next_prepare]
                     preparing[proxy_pool.submit(prepare, *key)] = key
                     next_prepare += 1

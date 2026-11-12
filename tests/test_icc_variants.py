@@ -93,7 +93,7 @@ def test_real_srgb_v2_sampled_profile_imports_without_losing_rgb16_precision(tmp
 
 
 @pytest.mark.parametrize(
-    "change", ["curve", "localized-curve", "matrix", "white", "black", "v4-white", "lut"]
+    "change", ["curve", "localized-curve", "matrix", "white", "v4-white", "lut"]
 )
 def test_srgb_description_does_not_hide_changed_colorimetry(tmp_path, change):
     profile = _profile()
@@ -105,8 +105,8 @@ def test_srgb_description_does_not_hide_changed_colorimetry(tmp_path, change):
         position = offset + 12 + 777 * 2
         old = struct.unpack_from(">H", profile, position)[0]
         struct.pack_into(">H", profile, position, old + 10)
-    elif change in ("matrix", "white", "black"):
-        offset, _ = _tag(profile, {"matrix": b"rXYZ", "white": b"wtpt", "black": b"bkpt"}[change])
+    elif change in ("matrix", "white"):
+        offset, _ = _tag(profile, {"matrix": b"rXYZ", "white": b"wtpt"}[change])
         struct.pack_into(">i", profile, offset + 8, 65536)
     elif change == "v4-white":
         profile[8] = 4
@@ -118,5 +118,20 @@ def test_srgb_description_does_not_hide_changed_colorimetry(tmp_path, change):
     assert "srgb" in ImageCms.getProfileName(ImageCms.ImageCmsProfile(io.BytesIO(profile))).lower()
     path = tmp_path / "changed-srgb.tif"
     _write_rgb16(path, profile)
-    with pytest.raises(ValueError, match="not supported"):
-        read_tiff(path)
+    if change == "lut":
+        with pytest.raises(ValueError, match="not supported"):
+            read_tiff(path)
+    else:  # a changed matrix/TRC profile is converted by its own colorimetry, never trusted as sRGB
+        assert read_tiff(path).note.startswith("Converted from")
+
+
+def test_nonzero_black_point_tag_is_ignored(tmp_path):
+    profile = _profile()
+    offset, _ = _tag(profile, b"bkpt")
+    struct.pack_into(">iii", profile, offset + 8, 793, 819, 675)  # Microsoft sRGB v2 values
+    path = tmp_path / "bkpt.tif"
+    _write_rgb16(path, profile)
+    reference = tmp_path / "zero.tif"
+    _write_rgb16(reference, _profile())
+    np.testing.assert_array_equal(read_tiff(path).pixels, read_tiff(reference).pixels)
+    assert "Embedded sRGB" in read_tiff(path).note

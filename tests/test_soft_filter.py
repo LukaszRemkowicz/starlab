@@ -1,6 +1,7 @@
 from dataclasses import replace
 
 import numpy as np
+import pytest
 
 from starlab.application.use_cases import render_preview
 from starlab.domain.effects.render import composite
@@ -82,7 +83,7 @@ def test_reduction_narrows_small_source_at_fixed_half_height_without_raising_pea
         return np.interp(profile[0] / 2, profile[::-1], x[::-1])
 
     before, after = half_width(frame.pixels), half_width(reduced)
-    assert 0.85 * before < after < before
+    assert 0.4 * before < after < 0.8 * before  # clearly narrower, not erased
     assert reduced[48, 40, 2] == frame.pixels[48, 40, 2]
 
 
@@ -108,7 +109,7 @@ def test_filter_strength_is_continuous_and_roi_matches_full_result():
 def test_filter_changes_original_stars_before_halo_selection_and_other_effects():
     frame, stars = scene()
     base = settings(100)
-    no_halo = replace(base, soft=replace(base.soft, quantity=0, intensity=0))
+    no_halo = replace(base, soft=replace(base.soft, intensity=0))
     p = render_preview(frame, stars, no_halo, full_resolution=True)
     result = composite(p.frame, p.effects, reduction=p.reduction, enlargement=p.enlargement)
     assert not p.effects.any()
@@ -151,7 +152,7 @@ def test_large_source_expansion_preserves_center_color_and_masks_foreground():
     large = star_enlargement(frame.pixels, records, 100)
     assert not large[48, 115].any()
     np.testing.assert_allclose(large[48, 122] / large[48, 122, 2], [1 / 3, 2 / 3, 1], atol=1e-6)
-    assert not large[:, :80].any()
+    assert not large[:, :60].any()  # halo reaches at most 12 sigma = 48 px
     np.testing.assert_array_equal(
         star_enlargement(frame.pixels, np.concatenate([records, records]), 100), large
     )
@@ -295,3 +296,65 @@ def test_soft_filter_suppresses_small_star_halos_and_strengthens_large_star_halo
     np.testing.assert_array_equal(previews[2].effects, previews[4].effects)
     # Suppressing the halo must still shrink the measured small source itself.
     assert previews[2].reduction[48, 42, 2] > 0
+
+
+def _soft(**changes):
+    base = EffectSettings.disabled()
+    return replace(base, soft=replace(base.soft, enabled=True, soft_filter=100, **changes))
+
+
+def _layers(stars, frame=None, **changes):
+    frame = frame or scene()[0]
+    preview = render_preview(frame, stars, _soft(**changes), full_resolution=True)
+    return preview.reduction, preview.enlargement
+
+
+def test_quantity_zero_disables_the_source_filter_and_quantity_gates_stars():
+    frame, stars = scene()
+    reduction, enlargement = _layers(stars, frame, quantity=0)
+    assert not reduction.any() and not enlargement.any()
+    # Same threshold as the glow: (1 - quantity / 100) ** 2 * brightest.
+    small, large = replace(stars[0], brightness=0.05), stars[1]
+    reduction, enlargement = _layers((small, large), frame, quantity=50)  # threshold 0.1
+    assert not reduction.any() and enlargement.any()
+    reduction, _ = _layers((small, large), frame, quantity=100)
+    assert reduction.any()
+
+
+def test_defaults_reproduce_the_original_halo_formula():
+    frame, stars = scene()
+    _, enlargement = _layers(stars, frame)  # Size 12, Edge falloff 60, no color change
+    star = stars[1]  # weight 1: spread 4, sigma 4
+    sigma, spread = star.source_profile[0] / 2.354820045, 4.0
+    for dx in (2, 5, 9, 20, 30):
+        d2 = (dx / sigma) ** 2
+        limit = 9 * spread**2
+        wings = (np.exp(-d2 / (2 * spread**2)) - np.exp(-d2 / 2)) * (1 - d2 / limit) ** 2
+        expected = 0.8 * 1.0 * 0.6 * wings if d2 < limit else 0
+        assert enlargement[48, 115 + dx, 2] == pytest.approx(expected, abs=2e-7)
+
+
+def test_size_widens_the_halo_and_falloff_changes_its_tail():
+    _, stars = scene()
+
+    def radius(**changes):
+        columns = np.flatnonzero(_layers(stars, **changes)[1][48, :, 2] > 1e-6)
+        return 115 - columns.min()  # leftwards: the image edge is far away on this side
+
+    assert radius(size=6) < radius(size=12) < radius(size=25) < radius(size=40)
+
+    def tail(**changes):
+        halo = _layers(stars, **changes)[1][48, :, 2]
+        total = halo.sum()
+        return halo[115 + 12 :].sum() / total  # beyond 3 sigma of the largest star (sigma 4)
+
+    assert tail(falloff=0) < tail(falloff=60) < tail(falloff=100)
+
+
+def test_color_controls_change_only_the_halo_color():
+    _, stars = scene()
+    plain = _layers(stars)[1]
+    tinted = _layers(stars, hue=40, saturation=50)[1]
+    assert not np.allclose(plain[48, 120] / plain[48, 120, 2], tinted[48, 120] / tinted[48, 120, 2])
+    assert np.array_equal(plain.any(axis=2), tinted.any(axis=2))
+    assert np.array_equal(_layers(stars)[0], _layers(stars, hue=40, saturation=50)[0])

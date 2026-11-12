@@ -38,7 +38,7 @@ def test_gray_round_trip_and_source_protection(tmp_path):
     np.testing.assert_array_equal(tifffile.imread(tmp_path / "out.tif"), data)
 
 
-@pytest.mark.parametrize("data", [np.zeros((8, 9, 4), np.uint8), np.zeros((8, 9), np.float32)])
+@pytest.mark.parametrize("data", [np.zeros((8, 9, 5), np.uint8), np.zeros((8, 9), np.float32)])
 def test_unsupported_image_is_rejected(tmp_path, data):
     from starlab.infrastructure.tiff_io import read_tiff
 
@@ -101,7 +101,7 @@ def test_nonstandard_orientation_rejected(tmp_path, orientation):
         read_tiff(source)
 
 
-def test_profile_named_srgb_with_altered_transfer_curve_rejected(tmp_path):
+def test_profile_named_srgb_with_altered_transfer_curve_is_converted_not_trusted(tmp_path):
     import io
     import struct
 
@@ -125,8 +125,9 @@ def test_profile_named_srgb_with_altered_transfer_curve_rejected(tmp_path):
         photometric="rgb",
         extratags=[(34675, "B", len(profile), bytes(profile), False)],
     )
-    with pytest.raises(ValueError, match="not supported"):
-        read_tiff(source)
+    frame = read_tiff(source)  # converted by its real (linear) curve, not trusted as sRGB
+    assert frame.note.startswith("Converted from")
+    assert frame.pixels[0, 0, 0] == pytest.approx((32768 / 65535 + 0.055) / 1.055, abs=1e-5)  # g=1
 
 
 def test_multipage_tiff_rejected(tmp_path):
@@ -173,7 +174,7 @@ def test_tiff_above_40_megapixels_loads_without_resizing(tmp_path):
 
 
 @pytest.mark.parametrize("delta, accepted", [(20, True), (2000, False)])
-def test_srgb_matrix_variants_keep_strict_transfer_curve_check(tmp_path, delta, accepted):
+def test_srgb_matrix_variants_are_validated_or_converted(tmp_path, delta, accepted):
     import struct
 
     from PIL import ImageCms
@@ -196,9 +197,9 @@ def test_srgb_matrix_variants_keep_strict_transfer_curve_check(tmp_path, delta, 
     if accepted:
         frame = read_tiff(source)
         assert frame.pixels[599, 8, 0] == pytest.approx(0.214048, abs=1e-5)
-    else:
-        with pytest.raises(ValueError, match="not supported"):
-            read_tiff(source)
+        assert frame.note.startswith("Embedded sRGB")
+    else:  # chad is not part of a matrix/TRC decode, so it is converted rather than trusted
+        assert read_tiff(source).note.startswith("Converted from")
 
 
 @pytest.mark.parametrize("dtype", [np.uint8, np.uint16])

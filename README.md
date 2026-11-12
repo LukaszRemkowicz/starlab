@@ -32,8 +32,8 @@ The app is free for everyone under the [MIT License](LICENSE).
   and add a second, finer set of spikes if you want one.
 - **Soft glow and halo rings.** Add the look of a softening filter or a lens
   ring around bright stars.
-- **Soft filter.** Small stars get slightly smaller and big stars slightly
-  larger, much like a diffusion filter on the lens.
+- **Soft filter.** Small stars get smaller and big stars larger, clearly
+  visible at high values, much like a diffusion filter on the lens.
 - **Color.** Keep each star's natural color, change the hue and saturation, or
   add a rainbow tint to the spikes.
 - **Live preview.** See every change straight away, compare it with the
@@ -48,11 +48,10 @@ You need:
   but has not been checked.
 - **A graphics card that supports OpenGL 3.3.** Almost any graphics card from
   the last ten years does.
-- **Enough memory for your photo.** The app keeps the whole photo in memory.
-  Measured on a 48-megapixel photo, it needs about 2.5 GB at its peak, or about
-  4 GB if the TIFF is compressed (LZW/ZIP). That is roughly 50-85 bytes per
-  pixel, so a 200-megapixel panorama needs 10-17 GB. Very large panoramas may
-  not fit on a computer with 16 GB of RAM.
+- **Enough memory for your photo.** The app keeps one working copy of the photo
+  in memory and processes the rest in pieces. Measured on a 48-megapixel photo,
+  it needs about 2 GB at its peak, compressed or not. That is roughly 40-45
+  bytes per pixel, so a 200-megapixel panorama needs about 8-9 GB.
 - **An internet connection** for the first install.
 
 ## Install
@@ -182,14 +181,17 @@ to see the main sliders only. Switching between the two keeps your values.
 | **Number of points** | How many spikes each star gets (Primary only). |
 | **Spike sharpness**, **Spike spread** | How thin and how fanned out the spikes are. |
 | **Size** | How large the glow or ring is. |
-| **Soft filter** | Shrinks small stars and enlarges big ones (Soft Flare tab). At 0 the stars stay as they are. |
+| **Soft filter** | Shrinks small stars and enlarges big ones, noticeably at high values (Soft Flare tab). At 0 the stars stay as they are. |
 | **Edge falloff**, **Inner/Outer edge width and falloff** | How softly the glow or ring fades at its edges. |
 | **Color saturation**, **Color hue** | Change the effect's color. At saturation 0 each effect keeps its star's natural color. |
 | **Rainbow intensity**, **frequency**, **phase** | Add a rainbow tint along the spikes and control how it repeats. |
 
-**Soft filter** works even when the glow itself is set to zero, so you can use
-it on its own: set **Quantity** or **Intensity** to 0 in **Soft Flare** and
-keep **Soft filter** above 0. Turning off the whole **Soft Flare** tab also
+**Soft filter** follows the other **Soft Flare** controls: **Quantity** picks
+which stars it changes, **Size** and **Edge falloff** set how wide and how soft
+the enlarged halo is, and **Saturation** and **Hue** tint it. **Intensity** only
+changes the glow. So you can use Soft filter on its own: set **Intensity** to 0
+in **Soft Flare** and keep **Soft filter** above 0. With **Quantity** at 0 it
+changes no stars. Turning off the whole **Soft Flare** tab also
 turns Soft filter off.
 
 ## Viewing your image
@@ -257,8 +259,9 @@ such as EXIF is not copied into the export.
 | Works | Does not work yet |
 | --- | --- |
 | TIFF (`.tif`, `.tiff`), 8 or 16 bits per channel | JPEG, PNG, RAW, FITS; 12-bit or 32-bit TIFF |
-| Uncompressed or compressed (LZW, ZIP) | Images with transparency (alpha), CMYK, palette images |
-| RGB color with an sRGB profile or no profile | Other profiles, such as Adobe RGB or ProPhoto |
+| Uncompressed or compressed (LZW, ZIP) | CMYK, palette images |
+| RGB color with an sRGB profile, no profile, or a matrix/curve profile such as Adobe RGB, Display P3 or ProPhoto (converted to sRGB on open) | RGB profiles built on lookup tables |
+| RGB or grayscale with an extra alpha channel (ignored; premultiplied colors are restored, fully transparent areas become black) | Premultiplied alpha in planar TIFFs |
 | Grayscale with no profile | Grayscale with an embedded profile (such as Gray Gamma 2.2) |
 | Single-page TIFF | Multi-page TIFF, HDR images |
 
@@ -268,11 +271,11 @@ the way most editors save them.
 If the app rejects your file, its message tells you why. The usual fixes, all
 done in your photo editor:
 
-- **Wrong color profile:** convert a color image to sRGB. Removing the profile
-  is not the same as converting it. For grayscale, convert to sRGB grayscale or
+- **Unsupported color profile:** convert a color image to sRGB. Removing the
+  profile is not the same as converting it. Common wide-gamut profiles are
+  converted for you on open; colors outside sRGB are clipped. For grayscale, convert to sRGB grayscale or
   save without a profile.
 - **Rotated image:** save the image with its rotation applied.
-- **Transparency:** flatten the image before saving.
 
 ## Tips
 

@@ -87,8 +87,24 @@ cache files.
   Python or Numba version, or CPU target differ, and the 20 s wait returns.
   This needs testing on clean Windows and macOS machines before relying on it.
 
+### App name and icon
+
+Run from source (`uv run star-effects-lab`), macOS lists the app as `python3`
+with a blank icon in Force Quit and Activity Monitor, because the process is the
+bare Python interpreter. The Dock icon already comes from the code. Only a real
+application bundle fixes the rest:
+
+- **macOS:** a `Star Effects Lab.app` bundle whose own executable starts the
+  app, with `CFBundleName`/`CFBundleDisplayName` set to `Star Effects Lab` and
+  `CFBundleIconFile` pointing to an `.icns` made from
+  `presentation/qt/assets/application.png`. A shell-script launcher that runs
+  `python3` does not help, because the process would still be `python3`.
+- **Windows:** an `.exe` with `presentation/qt/assets/application.ico` embedded,
+  so Task Manager and the taskbar show the name and icon.
+
 ### Acceptance check for any installer
 
 On a clean machine, install, start the app, open a photo straight away, and read
 `startup.log`: the time from `Job started: analyze` to `Worker idle` must be about
-a second, not tens of seconds. The log location is listed in the README.
+a second, not tens of seconds. The log location is listed in the README. Force Quit, Activity Monitor and
+Task Manager must show `Star Effects Lab` with its icon.
