@@ -35,6 +35,7 @@ std::string storedSettings() {
     std::string out;
     if (gRec->handleProcs->getSizeProc(h) >= int32(sizeof(uint32_t))) {
         const char *p = gRec->handleProcs->lockProc(h, false);
+        if (!p) return {};
         uint32_t n;
         std::memcpy(&n, p, sizeof n);
         if (n <= selb::kSettingsCapacity && size_t(n) + sizeof n <= size_t(gRec->handleProcs->getSizeProc(h)))
@@ -49,6 +50,10 @@ void storeSettings(const uint8_t *json, uint32_t n) {
     Handle h = gRec->handleProcs->newProc(int32(sizeof n + n));
     if (!h) return;  // keep the old settings
     char *p = gRec->handleProcs->lockProc(h, false);
+    if (!p) {  // keep the old settings
+        gRec->handleProcs->disposeProc(h);
+        return;
+    }
     std::memcpy(p, &n, sizeof n);
     std::memcpy(p + sizeof n, json, n);
     gRec->handleProcs->unlockProc(h);
@@ -71,6 +76,11 @@ VRect filterRect() {
 VRect inRect() {
     if (gBig) return gRec->bigDocumentData->inRect32;
     const Rect &r = gRec->inRect;
+    return rect(r.top, r.left, r.bottom, r.right);
+}
+VRect outRect() {
+    if (gBig) return gRec->bigDocumentData->outRect32;
+    const Rect &r = gRec->outRect;
     return rect(r.top, r.left, r.bottom, r.right);
 }
 void setRects(const VRect &in, const VRect &out) {
@@ -145,6 +155,15 @@ int16 transfer(selb::Block &b, Dir dir) {
                 return fail("Photoshop returned an unexpected image area.");
             band.bottom = got.bottom;
         }
+        if (dir == Dir::In) {
+            if (!gRec->inData || gRec->inRowBytes < 0 || size_t(gRec->inRowBytes) < rowBytes)
+                return fail("Photoshop returned unexpected image data.");
+        } else {
+            const VRect o = outRect();
+            if (!gRec->outData || gRec->outRowBytes < 0 || size_t(gRec->outRowBytes) < rowBytes ||
+                o.top != band.top || o.left != band.left || o.bottom != band.bottom || o.right != band.right)
+                return fail("Photoshop returned unexpected image data.");
+        }
         const uint8 *src = static_cast<const uint8 *>(gRec->inData);
         uint8 *dst = static_cast<uint8 *>(gRec->outData);
         for (int32 y = 0; y < band.bottom - band.top; ++y) {
@@ -167,6 +186,8 @@ int16 start() {
         case plugInModeGrayScale: case plugInModeGray16: channels = 1; break;
         default: return fail("only RGB and Grayscale images are supported.");
     }
+    if (gRec->planes < int16(channels))
+        return fail("the target has fewer channels than the image; select the composite RGB or Gray channel.");
     if (gRec->depth == 8) { depth = 8; maxValue = 255; }
     else if (gRec->depth == 16) { depth = 16; maxValue = 32768; }  // Photoshop's 16-bit white
     else return fail("only 8-bit and 16-bit images are supported.");
@@ -180,6 +201,10 @@ int16 start() {
     selb::Block block;
     std::string msg;
     if (!selb::create(block, uint32(w), uint32(h), channels, depth, maxValue, msg)) return fail(msg);
+    struct Guard {  // frees the block on every exit, including exceptions (destroy is idempotent)
+        selb::Block &b;
+        ~Guard() { selb::destroy(b); }
+    } guard{block};
 
     // Last Filter (no Parameters selector) with remembered settings repeats them without a window.
     const std::string last = storedSettings();
@@ -187,7 +212,6 @@ int16 start() {
     gShowDialog = false;
     if (!selb::setRequest(block, repeat ? selb::kModeRepeat : selb::kModeInteractive,
                           reinterpret_cast<const uint8_t *>(last.data()), repeat ? uint32_t(last.size()) : 0)) {
-        selb::destroy(block);
         return fail("the stored settings are invalid.");
     }
     trace("mode %d settings %u", repeat ? 1 : 0, unsigned(last.size()));
@@ -212,10 +236,16 @@ int16 start() {
             }
         }
     }
-    selb::destroy(block);
     setRects(rect(0, 0, 0, 0), rect(0, 0, 0, 0));
     return result;
 }
+
+// True while a Start runs (it pumps the host's run loop, so the host can re-enter us).
+bool gBusy = false;
+struct BusyScope {
+    BusyScope() { gBusy = true; }
+    ~BusyScope() { gBusy = false; }
+};
 
 }  // namespace
 
@@ -226,6 +256,10 @@ DLLExport MACPASCAL void PluginMain(const int16 selector, FilterRecordPtr filter
         *result = noErr;
         trace("selector %d", int(selector));
         if (selector == filterSelectorAbout) return;  // no dialog; the filter menu entry is enough
+        if (gBusy) {  // re-entered during Start: leave the running one's globals alone
+            *result = filterBadParameters;
+            return;
+        }
         gRec = filterRecord;
         gBig = gRec->bigDocumentData != nullptr;
         if (gBig) gRec->bigDocumentData->PluginUsing32BitCoordinates = true;
@@ -236,7 +270,12 @@ DLLExport MACPASCAL void PluginMain(const int16 selector, FilterRecordPtr filter
                 gRec->maxSpace64 = std::min<int64>(gRec->maxSpace64, kMaxHostSpace);
                 gRec->maxSpace = int32(std::min<int64>(gRec->maxSpace, kMaxHostSpace));
                 break;
-            case filterSelectorStart: *result = start(); trace("start result %d", int(*result)); break;
+            case filterSelectorStart: {
+                BusyScope busy;
+                *result = start();
+                trace("start result %d", int(*result));
+                break;
+            }
             case filterSelectorParameters: gShowDialog = true; break;  // menu command, not Last Filter
             default: break;  // Continue/Finish: nothing to do (one-shot Start)
         }

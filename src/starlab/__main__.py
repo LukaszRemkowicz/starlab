@@ -87,7 +87,7 @@ def _run(
 def _run_repeat(
     app: QApplication, bridge: PhotoshopBridge, data: Path, logger: logging.Logger, packaged: bool
 ) -> int:
-    """Re-apply the stored settings headlessly; any failure is shown and leaves status 0."""
+    """Re-apply the stored settings headlessly; any failure is shown and reports cancelled."""
     from .bootstrap import create_services, repeat_last
 
     prepared = _prepare(app, packaged, data, logger)
@@ -101,6 +101,7 @@ def _run_repeat(
     except Exception as exc:  # pylint: disable=broad-exception-caught
         logger.exception("Repeat failed")
         QMessageBox.critical(None, "Star Effects Lab could not repeat the last filter", str(exc))
+        bridge.cancel()  # status 2: the plug-in stays silent instead of reporting a second error
     if prepared is not None:
         prepared[0].terminate()
     result: int = bridge.exit_code

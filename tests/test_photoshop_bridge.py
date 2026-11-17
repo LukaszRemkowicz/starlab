@@ -391,5 +391,5 @@ def test_repeat_failure_shows_dialog_and_reports_cancelled(make_block, monkeypat
         },
     )()
     assert entry._run_repeat(app, bridge, tmp_path, entry.logging.getLogger("starlab"), True) == 2
-    assert shown and bridge.status == 0
+    assert shown and bridge.status == 2
     assert np.array_equal(_codes(block, samples), samples)

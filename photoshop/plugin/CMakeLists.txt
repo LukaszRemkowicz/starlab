@@ -6,7 +6,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 set(PHOTOSHOP_SDK "${CMAKE_SOURCE_DIR}/../sdk/mac/pluginsdk" CACHE PATH "Adobe Photoshop SDK root (pluginsdk)")
 if(APPLE)
-  set(_default_cmd "/Users/lukaszremkowicz/Projects/starlab/.venv/bin/star-effects-lab")
+  get_filename_component(_default_cmd "${CMAKE_CURRENT_SOURCE_DIR}/../../.venv/bin/star-effects-lab" ABSOLUTE)
   set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "" FORCE)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "")
 else()
