@@ -25,6 +25,7 @@ RANGES = {
     "size": (1, 100),
     "soft_filter": (0, 100),
     "diffusion": (0, 100),
+    "wide_halo_share": (0, 100),
     "falloff": (0, 100),
     "inner_width": (1, 100),
     "inner_falloff": (0, 100),
@@ -65,6 +66,7 @@ PARAMETERS = {
         "size",
         "soft_filter",
         "diffusion",
+        "wide_halo_share",
         "saturation",
         "hue",
         "falloff",
@@ -108,6 +110,7 @@ class EffectParameters:
     outer_width: float = 25
     outer_falloff: float = 50
     diffusion: float = 0
+    wide_halo_share: float = 30
 
     def __post_init__(self) -> None:
         """Reject nonfinite, out-of-range, or nonintegral point-count inputs."""

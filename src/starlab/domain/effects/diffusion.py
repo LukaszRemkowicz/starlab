@@ -1,6 +1,7 @@
 """Linear-light soft-focus PSF with an unscattered core and two Gaussian wings."""
 
 import math
+from collections.abc import Iterator
 from threading import Event
 from typing import cast
 
@@ -22,7 +23,7 @@ def _blur(pixels: Pixels, sigma: float) -> Pixels:
 
 def _diffuse_band(
     frame: ImageFrame, bounds: Bounds, stride: int, sigma: float, sky_mask: SkyMask | None
-) -> Pixels:
+) -> tuple[Pixels, Pixels]:
     left, top, right, bottom = bounds
     pad: int = math.ceil(3 * 4 * sigma)
     x: int = max(0, left - pad)
@@ -37,19 +38,51 @@ def _diffuse_band(
     if sky_mask is not None:
         allowed = sky_mask.region((x, y, end_x, end_y))
         if not allowed[rows, cols].any():
-            return np.zeros_like(original)
+            empty = np.zeros_like(original)
+            return empty, empty
         if not allowed.all():
             mask = allowed.astype(np.float32)[..., None]
             patch = patch * mask
-    delta: Pixels = np.zeros_like(original)
-    for width, fraction in ((sigma, 0.7), (4 * sigma, 0.3)):
+
+    def wing(width: float) -> Pixels:
         incoming: Pixels = _blur(patch, width)[rows, cols]
         # Only exchange light between eligible pixels, in both directions.
         outgoing: Pixels = original if mask is None else original * _blur(mask, width)[rows, cols]
-        delta += fraction * (incoming - outgoing)
-    if mask is not None:
-        delta *= mask[rows, cols]
-    return delta
+        delta = incoming - outgoing
+        if mask is not None:
+            delta *= mask[rows, cols]
+        return delta
+
+    return wing(sigma), wing(4 * sigma)
+
+
+def diffusion_bands(
+    frame: ImageFrame,
+    size: float,
+    region: Bounds,
+    sampling: int,
+    sky_mask: SkyMask | None,
+    cancel: Event | None,
+) -> Iterator[tuple[slice, Pixels, Pixels]]:
+    """Yield narrow and wide light transfers on the same native-aligned sample grid."""
+    left, top, right, bottom = region
+    sigma: float = max(1.5, max(frame.width, frame.height) / 1400) * math.sqrt(size / 12)
+    band_rows: int = max(1, 192 // sampling)
+    for row in range(0, len(range(top, bottom, sampling)), band_rows):
+        check_cancel(cancel)
+        start: int = top + row * sampling
+        end: int = min(bottom, start + band_rows * sampling)
+        narrow, wide = _diffuse_band(frame, (left, start, right, end), sampling, sigma, sky_mask)
+        yield slice(row, row + band_rows), narrow, wide
+    check_cancel(cancel)
+
+
+def mix_diffusion(narrow: Pixels, wide: Pixels, parameters: EffectParameters) -> Pixels:
+    """Split the selected scattering strength between the two normalized wings."""
+    fraction = parameters.wide_halo_share / 100
+    result = (1 - fraction) * narrow + fraction * wide
+    result *= 0.55 * parameters.diffusion / 100
+    return result
 
 
 def optical_diffusion(
@@ -60,21 +93,13 @@ def optical_diffusion(
     sky_mask: SkyMask | None,
     cancel: Event | None,
 ) -> Pixels | None:
-    """Return the signed source correction on a native-aligned sample grid."""
+    """Mix each band as it is rendered to bound export memory use."""
     if not parameters.enabled or not parameters.diffusion:
         return None
     left, top, right, bottom = region
-    sigma: float = max(1.5, max(frame.width, frame.height) / 1400) * math.sqrt(parameters.size / 12)
-    sampled: Pixels = frame.pixels[top:bottom:sampling, left:right:sampling]
-    result: Pixels = np.empty_like(sampled)
-    band_rows: int = max(1, 192 // sampling)
-    for row in range(0, len(result), band_rows):
-        check_cancel(cancel)
-        start: int = top + row * sampling
-        end: int = min(bottom, start + band_rows * sampling)
-        result[row : row + band_rows] = _diffuse_band(
-            frame, (left, start, right, end), sampling, sigma, sky_mask
-        )
-    result *= 0.55 * parameters.diffusion / 100
-    check_cancel(cancel)
+    result = np.empty_like(frame.pixels[top:bottom:sampling, left:right:sampling])
+    for rows, narrow, wide in diffusion_bands(
+        frame, parameters.size, region, sampling, sky_mask, cancel
+    ):
+        result[rows] = mix_diffusion(narrow, wide, parameters)
     return result

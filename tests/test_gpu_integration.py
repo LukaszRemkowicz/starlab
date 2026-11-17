@@ -207,6 +207,13 @@ def test_diffusion_cache_tracks_frame_crop_size_and_mask(gpu):
     second = render(frame, (), settings, **options)
     assert cached is renderer.diffusion_cache
     np.testing.assert_array_equal(first.diffusion * 2, second.diffusion)
+    settings = replace(settings, soft=replace(settings.soft, wide_halo_share=83))
+    wider = render(frame, (), settings, **options)
+    assert cached is renderer.diffusion_cache
+    assert not np.array_equal(wider.diffusion, second.diffusion)
+    np.testing.assert_array_equal(
+        wider.diffusion, render_preview(frame, (), settings, **options).diffusion
+    )
     mask = _sky_mask()
     for current_frame, size, region, sky in (
         (frame, 35, options["region"], None),

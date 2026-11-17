@@ -29,7 +29,7 @@ Kenko's nightscape comparison shows how a light diffusion filter makes bright st
 
 We model a direct component plus scattered light in linear RGB. Measuring the spread of light from an isolated source is one way to characterize a real optical system. The following kernel widths and mixing weights are design choices for this application. Matching a particular filter and lens would require paired linear exposures with unsaturated stars. [Talvala et al., *Veiling Glare in High Dynamic Range Imaging*](https://graphics.stanford.edu/papers/glare_removal/)
 
-The slider transfers up to 55% of each pixel's light to two normalized Gaussian kernels. The narrower kernel receives 70% of the scattered light and the wider kernel receives 30%. The wider kernel has four times the standard deviation. Size scales both widths. This linear mixture preserves a flat field and total per-channel light. Brighter stars produce brighter wings naturally. A clipped white source carries only the color recorded in the TIFF.
+The slider transfers up to 55% of each pixel's light to two normalized Gaussian kernels. Wide halo share sets the percentage of scattered light sent to the wider kernel. Its default of 30% leaves 70% in the narrower kernel. The wider kernel has four times the standard deviation. Size scales both widths. This linear mixture preserves a flat field and total per-channel light. Brighter stars produce brighter wings naturally. A clipped white source carries only the color recorded in the TIFF.
 
 The sky mask allows light exchange only between eligible pixels. At a boundary, light that would scatter into a protected pixel stays at the source. Preview crops and export bands read neighboring native pixels out to the kernel radius before sampling the result.
 

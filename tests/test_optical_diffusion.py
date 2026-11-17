@@ -34,6 +34,25 @@ def test_diffusion_moves_light_from_core_to_colored_wings_without_catalog():
     np.testing.assert_allclose(half, (result + pixels) / 2, atol=1e-7)
 
 
+def test_wide_halo_share_redistributes_the_same_light():
+    pixels = np.zeros((65, 65, 3), np.float32)
+    pixels[32, 32] = [1, 0.4, 0.1]
+    frame = ImageFrame(pixels)
+    settings = optical_settings(100)
+
+    def profile(share):
+        varied = replace(settings, soft=replace(settings.soft, wide_halo_share=share))
+        return displayed(render_preview(frame, (), varied))
+
+    narrow, wide = profile(0), profile(100)
+    assert narrow[32, 33, 0] > wide[32, 33, 0]
+    assert wide[32, 40, 0] > narrow[32, 40, 0]
+    for image in (narrow, wide):
+        np.testing.assert_allclose(image.sum(axis=(0, 1)), pixels[32, 32], rtol=1e-5)
+    default = displayed(render_preview(frame, (), settings))
+    np.testing.assert_allclose(default, 0.7 * narrow + 0.3 * wide, atol=1e-7)
+
+
 @pytest.mark.parametrize("channels", [1, 3])
 def test_diffusion_uses_native_neighbors_across_crop_and_export_bands(channels):
     pixels = np.random.default_rng(4).random((281, 65, channels), dtype=np.float32)
@@ -58,6 +77,12 @@ def test_mask_protects_both_sides_of_the_horizon_and_preserves_flat_sky():
 
 def test_older_presets_default_to_clear_glass():
     data = preset_data(optical_settings(66))
+    assert parse_preset(data).soft.diffusion == 66
+    data["settings"]["soft"]["wide_halo_share"] = 72
+    assert parse_preset(data).soft.wide_halo_share == 72
+    for group in data["settings"].values():
+        del group["wide_halo_share"]
+    assert parse_preset(data).soft.wide_halo_share == 30
     assert parse_preset(data).soft.diffusion == 66
     for group in data["settings"].values():
         del group["diffusion"]

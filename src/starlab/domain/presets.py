@@ -25,6 +25,7 @@ class ParameterData(TypedDict):
     size: float
     soft_filter: float
     diffusion: float
+    wide_halo_share: float
     falloff: float
     inner_width: float
     inner_falloff: float
@@ -58,7 +59,7 @@ def parse_preset(data: object) -> EffectSettings:
         if not isinstance(groups, dict) or set(groups) != set(KINDS):
             raise ValueError("Preset must contain all four groups.")
         groups = {
-            kind: {"soft_filter": 0, "diffusion": 0, **parameters}
+            kind: {"soft_filter": 0, "diffusion": 0, "wide_halo_share": 30, **parameters}
             if isinstance(parameters, dict)
             else parameters
             for kind, parameters in groups.items()

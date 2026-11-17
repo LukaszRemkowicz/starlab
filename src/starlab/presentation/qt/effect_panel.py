@@ -35,6 +35,7 @@ LABELS = {
     "size": "Size",
     "soft_filter": "Soft filter",
     "diffusion": "Optical diffusion",
+    "wide_halo_share": "Wide halo share",
     "falloff": "Edge falloff",
     "inner_width": "Inner edge width",
     "inner_falloff": "Inner edge falloff",
@@ -67,6 +68,7 @@ class ParameterControl(QWidget):
             "rainbow": "0 adds no rainbow modulation. Increase to color the rays.",
             "soft_filter": "Shrink small measured stars and enlarge large ones. Quantity selects the stars and Size sets the halo width.",
             "diffusion": "Scatter a fraction of the original light into soft, colored wings. Size controls their width. Set Intensity and Soft filter to 0 to see diffusion on its own.",
+            "wide_halo_share": "Share of optical diffusion in the wide halo. At 0% all scattered light stays in the narrow halo. At 100% it all goes into the wide halo.",
         }
         if key in tips:
             self.setToolTip(tips[key])
@@ -85,6 +87,8 @@ class ParameterControl(QWidget):
         self.spin.setAccessibleName(LABELS[key])
         if key == "angle":
             self.spin.setSuffix("°")
+        elif key == "wide_halo_share":
+            self.spin.setSuffix("%")
         label.setBuddy(self.spin)
         row.addWidget(label)
         row.addStretch()

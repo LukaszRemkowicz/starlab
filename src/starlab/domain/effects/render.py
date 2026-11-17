@@ -332,6 +332,7 @@ def _group(
     export: bool = False,
 ) -> Pixels:
     """Screen-compose one emission group into an immutable sampled layer."""
+    parameters = replace(parameters, diffusion=0, wide_halo_share=30)
     output_height: int
     output_width: int
     output_height, output_width = (

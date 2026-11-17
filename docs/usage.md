@@ -12,6 +12,8 @@ The mask button displays sky, foreground and uncertain regions. Mask visibility 
 
 For a photographic soft-focus effect, open **Soft Flare** and increase **Optical diffusion**. It spreads light in the recorded color across nearby sky pixels, even with an empty star catalogue. Start with **Size** at 12 and **Optical diffusion** at 50. Set **Intensity** and **Soft filter** to 0 to isolate this source correction. Inspect **Compare** at 100% and export **Result** to include it.
 
+In **Advanced**, lower **Wide halo share** for a glow close to the star or raise it to spread more light into the outer halo. The default of 30% sends the remaining 70% into the narrow halo. **Optical diffusion** sets the total amount of scattered light.
+
 Primary and Secondary have separate controls under Spikes. Primary exposes the point count in addition to quantity, intensity, length, angle, sharpness, spread, saturation, hue and rainbow controls. Secondary uses a fixed angular pattern with its own quantity, intensity, geometry and color controls. Soft Flare and Ring Flare have independent radial-size, brightness, color and edge controls.
 
 Quantity controls an effect's source-brightness cutoff; it is not a detection-count limit. Increasing it can admit fainter measured sources. Intensity changes emitted effect light. Saturation 0 leaves the measured source color unchanged before compositing; positive values increase effect saturation and negative values (down to -100) reduce it. Per-source light brighter than the display range follows a path to white: it keeps its hue and luminance and loses only the saturation it must, so bright cores turn white instead of shifting toward pure primaries.

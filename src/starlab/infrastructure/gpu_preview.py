@@ -27,7 +27,7 @@ from shiboken6 import VoidPtr
 from ..application.use_cases import Preview
 from ..domain.array_types import BoolArray, FloatArray
 from ..domain.effects.constants import SECONDARY_RAY_COUNT
-from ..domain.effects.diffusion import optical_diffusion
+from ..domain.effects.diffusion import diffusion_bands, mix_diffusion
 from ..domain.effects.profiles import (
     directions,
     gain,
@@ -104,7 +104,7 @@ class GpuPreviewRenderer:
         self.source_texture: QOpenGLTexture | None = None
         self.texture_key: CropKey | None = None
         self.reduction_cache: tuple[SourceFilterKey, Pixels, Pixels] | None = None
-        self.diffusion_cache: tuple[DiffusionKey, Pixels] | None = None
+        self.diffusion_cache: tuple[DiffusionKey, Pixels, Pixels] | None = None
 
     @property
     def _gpu(self) -> QOpenGLFunctions_3_3_Core:
@@ -375,7 +375,10 @@ class GpuPreviewRenderer:
         """Reuse or draw one effect layer, independently of source correction."""
         key: GroupKey = (
             replace(
-                parameters, diffusion=0, soft_filter=parameters.soft_filter if kind == "soft" else 0
+                parameters,
+                diffusion=0,
+                wide_halo_share=30,
+                soft_filter=parameters.soft_filter if kind == "soft" else 0,
             ),
             region,
             sampling,
@@ -521,18 +524,21 @@ class GpuPreviewRenderer:
         sky_mask: SkyMask | None,
         cancel: Event | None,
     ) -> Pixels | None:
-        """Reuse the native-resolution convolution while the user adjusts strength."""
+        """Reuse both native convolutions while the user adjusts strength or halo share."""
         if not parameters.enabled or not parameters.diffusion:
             self.diffusion_cache = None
             return None
         key: DiffusionKey = self.crop_key, parameters.size, sky_mask
         if self.diffusion_cache is None or self.diffusion_cache[0] != key:
-            response = optical_diffusion(
-                frame, replace(parameters, diffusion=100), region, sampling, sky_mask, cancel
-            )
-            assert response is not None
-            self.diffusion_cache = key, response
-        return self.diffusion_cache[1] * (parameters.diffusion / 100)
+            narrow = np.empty_like(self.crop.pixels)
+            wide = np.empty_like(narrow)
+            for rows, near_band, far_band in diffusion_bands(
+                frame, parameters.size, region, sampling, sky_mask, cancel
+            ):
+                narrow[rows], wide[rows] = near_band, far_band
+            self.diffusion_cache = key, narrow, wide
+        _, narrow, wide = self.diffusion_cache
+        return mix_diffusion(narrow, wide, parameters)
 
     def __call__(
         self,
