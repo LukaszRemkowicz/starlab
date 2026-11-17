@@ -11,6 +11,7 @@ The app is free for everyone under the [MIT License](LICENSE).
 - [Before you start](#before-you-start)
 - [Install](#install)
 - [Start the app](#start-the-app)
+- [Use it from Photoshop](#use-it-from-photoshop)
 - [Update or remove the app](#update-or-remove-the-app)
 - [Your first edit in five steps](#your-first-edit-in-five-steps)
 - [The controls](#the-controls)
@@ -112,6 +113,33 @@ On macOS, a path looks like `~/Pictures/night-sky.tif`.
 
 The installation includes compiled image-processing code for your platform. You can open a photo on the first launch.
 
+## Use it from Photoshop
+
+Star Effects Lab can also run as a Photoshop filter, like other astro plug-ins.
+Choose **Filter → Star Effects Lab → Star Effects Lab…** and the active layer
+opens in the usual Star Effects Lab window. Click **Apply** to put the result
+back into the layer, or **Cancel** to leave it unchanged. The layer is passed
+through memory only; no temporary files are written.
+
+- **Repeat with Ctrl+F (Cmd+F on a Mac).** Photoshop's **Last Filter** applies
+  your last settings again without opening the window. Stars are found again on
+  the new image; stars you edited by hand are not repeated. The settings are
+  kept until you quit Photoshop.
+- **What works:** RGB or Grayscale, 8 or 16 bits per channel, the whole layer
+  or a selection. Select the composite RGB or Gray channel, not a single color
+  channel or a layer mask.
+- **In this mode** the window has **Apply** and **Cancel** instead of
+  **Export**, the old **Apply** button is called **Update preview**, and
+  opening other files is disabled.
+
+Until the installer is ready, you build the plug-in yourself from the
+`starlab` folder. You need [CMake](https://cmake.org/download/), the free
+[Photoshop Plug-In SDK](https://developer.adobe.com/console) from Adobe, and a
+C++ compiler: the Xcode Command Line Tools on a Mac
+(`xcode-select --install`) or Visual Studio Build Tools with C++ on Windows.
+The steps are in [photoshop/README.md](photoshop/README.md). Tested with
+Photoshop 2026 on macOS and Windows.
+
 ## Update or remove the app
 
 To update, open PowerShell or Terminal in the `starlab` folder and run:
@@ -180,6 +208,7 @@ to see the main sliders only. Switching between the two keeps your values.
 | **Size** | How large the glow or ring is. |
 | **Soft filter** | Shrinks small stars and enlarges big ones, noticeably at high values (Soft Flare tab). At 0 the stars stay as they are. |
 | **Optical diffusion** | Spreads part of the original light around each bright detail. Stars keep a sharp core with wings in their own color. **Size** controls the spread. |
+| **Wide halo share** | How much of the optical diffusion goes into a wide halo instead of a narrow one. At 0% all of it stays close to the stars; at 100% it all spreads wide. |
 | **Edge falloff**, **Inner/Outer edge width and falloff** | How softly the glow or ring fades at its edges. |
 | **Color saturation**, **Color hue** | Change the effect's color. At saturation 0 each effect keeps its star's natural color. |
 | **Rainbow intensity**, **frequency**, **phase** | Add a rainbow tint along the spikes and control how it repeats. |

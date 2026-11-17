@@ -28,8 +28,11 @@ ad-hoc signed); `photoshop\build\Release\StarEffectsLab.8bf` on Windows (unteste
 
 ## Install
 
-Copy the bundle into `/Library/Application Support/Adobe/Plug-Ins/CC/` or the `Plug-ins` folder of your
-Photoshop install, then restart Photoshop.
+- macOS: link or copy the folder `photoshop/build/Star Effects Lab` (Photoshop does not follow a link to the
+  `.plugin` bundle itself) into `/Library/Application Support/Adobe/Plug-Ins/CC/`.
+- Windows: copy `StarEffectsLab.8bf` into `C:\Program Files\Common Files\Adobe\Plug-Ins\CC\Star Effects Lab\`.
+
+Then restart Photoshop. Both folders need administrator rights.
 
 ## How the plug-in finds the app
 
