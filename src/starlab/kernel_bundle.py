@@ -9,15 +9,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from zipfile import ZIP_DEFLATED, ZipFile
 
-from .preparation import PACKAGE, code_signature
-
-
-def _cache_folder(relative: str) -> str:
-    from numba.core.caching import UserProvidedCacheLocator
-
-    # Numba keys each external cache directory by the path of its installed module.
-    source = str(PACKAGE / relative / "__init__.py")
-    return str(UserProvidedCacheLocator.get_suitable_cache_subpath(source))  # type: ignore[no-untyped-call]
+from .preparation import PACKAGE, cache_folder, code_signature
 
 
 def _signature() -> str:
@@ -36,7 +28,7 @@ def build(archive: Path) -> None:
         output.writestr("signature", _signature())
         for init in sorted(PACKAGE.rglob("__init__.py")):
             relative = init.parent.relative_to(PACKAGE).as_posix()
-            for file in sorted((cache / _cache_folder(relative)).glob("*.nb[ci]")):
+            for file in sorted((cache / cache_folder(relative)).glob("*.nb[ci]")):
                 output.write(file, (Path(relative) / file.name).as_posix())
 
 
@@ -70,7 +62,7 @@ def install(data: Path) -> bool:
                 member = Path(name)
                 if member.suffix not in (".nbi", ".nbc"):
                     continue
-                folder = staged / _cache_folder(member.parent.as_posix())
+                folder = staged / cache_folder(member.parent.as_posix())
                 folder.mkdir(parents=True, exist_ok=True)
                 with bundle.open(name) as source, (folder / member.name).open("wb") as dest:
                     shutil.copyfileobj(source, dest)

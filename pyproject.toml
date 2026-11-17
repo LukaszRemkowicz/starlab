@@ -31,7 +31,7 @@ packages = ["src/starlab"]
 require-runtime-dependencies = true
 
 [tool.uv]
-cache-keys = [{ file = "pyproject.toml" }, { file = "hatch_build.py" }, { file = "src/starlab/domain/**/*.py" }, { file = "src/starlab/infrastructure/*.py" }, { file = "src/starlab/application/warmup.py" }, { file = "src/starlab/kernel_bundle.py" }, { file = "src/starlab/preparation.py" }]
+cache-keys = [{ file = "pyproject.toml" }, { file = "hatch_build.py" }, { file = "src/starlab/domain/**/*.py" }, { file = "src/starlab/infrastructure/**/*.py" }, { file = "src/starlab/application/warmup.py" }, { file = "src/starlab/kernel_bundle.py" }, { file = "src/starlab/preparation.py" }]
 
 [dependency-groups]
 dev = [

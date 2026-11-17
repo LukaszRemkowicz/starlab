@@ -118,12 +118,15 @@ def test_detection_can_start_while_remaining_layouts_are_preparing(tmp_path, mon
         process.wait(timeout=5)
 
 
-def test_ui_edits_preserve_detector_cache_but_shared_math_invalidates_it(tmp_path, monkeypatch):
+@pytest.mark.parametrize("folder", ["domain/detection", "domain/effects", "infrastructure"])
+def test_ui_edits_preserve_detector_cache_but_shared_math_invalidates_it(
+    tmp_path, monkeypatch, folder
+):
     from starlab import preparation
 
     monkeypatch.setattr(preparation, "PACKAGE", tmp_path)
     ui = tmp_path / "presentation" / "qt" / "controls.py"
-    helper = tmp_path / "domain" / "detection" / "numeric.py"
+    helper = tmp_path / folder / "numeric.py"
     for path in (ui, helper):
         path.parent.mkdir(parents=True)
         path.write_text("value = 1")
@@ -147,8 +150,8 @@ def test_new_build_clears_stale_compiled_code(tmp_path, monkeypatch):
     from starlab import preparation
 
     cache = tmp_path / "cache"
-    stale = cache / "Users" / "starlab" / "domain" / "kernel.f-1.py314.nbi"
-    other = cache / "Users" / "otherapp" / "kernel.f-1.py314.nbi"
+    stale = cache / preparation.cache_folder("domain") / "kernel.f-1.py314.nbi"
+    other = cache / "starlab_other_checkout" / "kernel.f-1.py314.nbi"
     for path in (stale, other):
         path.parent.mkdir(parents=True)
         path.write_bytes(b"old machine code")

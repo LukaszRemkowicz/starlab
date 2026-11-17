@@ -10,7 +10,7 @@ from typing import TypedDict
 import numpy as np
 
 from ..domain.array_types import Bounds, DoubleArray, FloatArray
-from ..domain.effects.diffusion import optical_diffusion
+from ..domain.effects.diffusion import export_diffusion_bands, preview_diffusion
 from ..domain.effects.profiles import image_diagonal, radial_extent
 from ..domain.effects.render import render_effects
 from ..domain.effects.settings import KINDS, EffectKind, EffectParameters, EffectSettings
@@ -199,7 +199,7 @@ def _render_region(
         is_region=True,
         reduction=reduction,
         enlargement=enlargement,
-        diffusion=optical_diffusion(
+        diffusion=preview_diffusion(
             frame, settings.soft, (left, top, right, bottom), sampling, sky_mask, cancel
         ),
     )
@@ -244,7 +244,7 @@ def render_preview(
     reduction, enlargement = preview_source_filter(
         preview_frame.pixels, stars, settings, cancel, sampling=scale, sky_mask=sky_mask
     )
-    diffusion = optical_diffusion(
+    diffusion = preview_diffusion(
         frame, settings.soft, (0, 0, frame.width, frame.height), scale, sky_mask, cancel
     )
     return Preview(
@@ -312,6 +312,11 @@ def _export_bands(
     """Yield the final linear pixels one full-width band at a time."""
     diagonal: int = image_diagonal(frame.width, frame.height)
     visible: tuple[Star, ...] = filter_stars(stars, sky_mask)
+    corrections = (
+        export_diffusion_bands(frame, settings.soft, EXPORT_BAND_ROWS, sky_mask, cancel)
+        if not effects_only and settings.soft.enabled and settings.soft.diffusion
+        else None
+    )
     for top in range(0, frame.height, EXPORT_BAND_ROWS):
         check_cancel(cancel)
         bottom: int = min(top + EXPORT_BAND_ROWS, frame.height)
@@ -328,9 +333,7 @@ def _export_bands(
             yield effects
             continue
         output: FloatArray = source + (1 - source) * effects
-        diffusion = optical_diffusion(
-            frame, settings.soft, (0, top, frame.width, bottom), 1, sky_mask, cancel
-        )
+        diffusion = next(corrections) if corrections is not None else None
         if settings.soft.enabled and settings.soft.soft_filter:
             _apply_export_source_filter(
                 output, effects, source, top, stars, settings, cancel, sky_mask, diffusion

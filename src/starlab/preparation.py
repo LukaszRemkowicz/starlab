@@ -27,16 +27,9 @@ def code_signature() -> str:
         for source in (PACKAGE / folder).rglob("*.py")
     )
     for source in sorted(numerical_sources):
-        name: str = source.relative_to(PACKAGE).as_posix()
-        content: bytes = source.read_bytes()
-        # Numba also inlines helpers and constants defined outside decorated modules.
-        if (
-            name.startswith("domain/detection/")
-            or name in {"domain/jit.py", "domain/array_types.py", "domain/effects/constants.py"}
-            or b"@njit(" in content
-        ):
-            digest.update(name.encode())
-            digest.update(content)
+        # Numba may embed helpers and constants from undecorated modules.
+        digest.update(source.relative_to(PACKAGE).as_posix().encode())
+        digest.update(source.read_bytes())
     numba: str = version("numba")
     abi = getattr(sys, "abiflags", "")
     digest.update(
@@ -45,15 +38,28 @@ def code_signature() -> str:
     return digest.hexdigest()
 
 
+def cache_folder(relative: str) -> str:
+    """Name the external Numba cache directory for one installed StarLab package."""
+    from numba.core.caching import UserProvidedCacheLocator
+
+    source = str(PACKAGE / relative / "__init__.py")
+    return str(UserProvidedCacheLocator.get_suitable_cache_subpath(source))  # type: ignore[no-untyped-call]
+
+
 def compiled_files() -> list[Path]:
     """StarLab's Numba compiled-code files where this process will look for them."""
     configured: str | None = os.environ.get("NUMBA_CACHE_DIR")
-    root: Path = Path(configured) if configured else PACKAGE
+    folders = (
+        Path(configured) / cache_folder(init.parent.relative_to(PACKAGE).as_posix())
+        if configured
+        else init.parent / "__pycache__"
+        for init in PACKAGE.rglob("__init__.py")
+    )
     return [
         path
+        for folder in folders
         for pattern in ("*.nbi", "*.nbc")
-        for path in root.rglob(pattern)
-        if configured is None or "starlab" in path.as_posix()
+        for path in folder.glob(pattern)
     ]
 
 

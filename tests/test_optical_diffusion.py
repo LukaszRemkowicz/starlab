@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from starlab.application.use_cases import _export_bands, render_preview
+from starlab.domain.effects import diffusion
 from starlab.domain.effects.render import composite
 from starlab.domain.effects.settings import EffectSettings
 from starlab.domain.imaging import ImageFrame
@@ -103,3 +104,57 @@ def test_older_presets_default_to_clear_glass():
     for group in data["settings"].values():
         del group["diffusion"]
     assert parse_preset(data).soft.diffusion == 0
+
+
+def test_cpu_preview_reuses_wings_only_for_the_same_source_and_geometry(monkeypatch):
+    frame = ImageFrame(np.random.default_rng(7).random((93, 131, 3), dtype=np.float32))
+    base = optical_settings(80)
+    builds = []
+    original = diffusion.preview_wings
+
+    def count(*args):
+        builds.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(diffusion, "preview_wings", count)
+    settings = base
+    first = render_preview(frame, (), settings)
+    settings = replace(base, soft=replace(base.soft, diffusion=40))
+    np.testing.assert_array_equal(
+        render_preview(frame, (), settings).diffusion, first.diffusion / 2
+    )
+    settings = replace(base, soft=replace(base.soft, wide_halo_share=90))
+    assert not np.array_equal(render_preview(frame, (), settings).diffusion, first.diffusion)
+    assert len(builds) == 1
+    settings = replace(base, soft=replace(base.soft, size=40))
+    mask = SkyMask(1, np.ones((93, 131), np.uint8), (93, 131))
+    for count_expected, (source, region, sampling, sky) in enumerate(
+        (
+            (frame, None, 1, None),
+            (frame, (7, 12, 91, 71), 1, None),
+            (frame, (7, 12, 91, 71), 2, None),
+            (frame, (7, 12, 91, 71), 2, mask),
+            (ImageFrame(frame.pixels / 2), (7, 12, 91, 71), 2, mask),
+        ),
+        start=2,
+    ):
+        render_preview(source, (), settings, region=region, region_sampling=sampling, sky_mask=sky)
+        assert len(builds) == count_expected
+
+
+def test_export_shares_halos_across_writer_bands(monkeypatch):
+    frame = ImageFrame(np.random.default_rng(11).random((113, 47, 1), dtype=np.float32))
+    settings = optical_settings(73)
+    reference = render_preview(frame, (), settings).diffusion
+    calls = []
+    original = diffusion._diffuse_band
+
+    def record(frame, bounds, *args):
+        calls.append(bounds)
+        return original(frame, bounds, *args)
+
+    monkeypatch.setattr(diffusion, "_diffuse_band", record)
+    chunks = list(diffusion.export_diffusion_bands(frame, settings.soft, 17, None, None))
+    assert [len(c) for c in chunks] == [17] * 6 + [11]
+    assert len(calls) < len(chunks)
+    np.testing.assert_allclose(np.concatenate(chunks), reference, atol=2e-7)

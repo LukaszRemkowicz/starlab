@@ -27,7 +27,7 @@ from shiboken6 import VoidPtr
 from ..application.use_cases import Preview
 from ..domain.array_types import BoolArray, FloatArray
 from ..domain.effects.constants import SECONDARY_RAY_COUNT
-from ..domain.effects.diffusion import diffusion_bands, mix_diffusion
+from ..domain.effects.diffusion import mix_diffusion, preview_wings
 from ..domain.effects.profiles import (
     directions,
     gain,
@@ -530,12 +530,7 @@ class GpuPreviewRenderer:
             return None
         key: DiffusionKey = self.crop_key, parameters.size, sky_mask
         if self.diffusion_cache is None or self.diffusion_cache[0] != key:
-            narrow = np.empty_like(self.crop.pixels)
-            wide = np.empty_like(narrow)
-            for rows, near_band, far_band in diffusion_bands(
-                frame, parameters.size, region, sampling, sky_mask, cancel
-            ):
-                narrow[rows], wide[rows] = near_band, far_band
+            narrow, wide = preview_wings(frame, parameters.size, region, sampling, sky_mask, cancel)
             self.diffusion_cache = key, narrow, wide
         _, narrow, wide = self.diffusion_cache
         return mix_diffusion(narrow, wide, parameters)

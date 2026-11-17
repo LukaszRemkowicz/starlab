@@ -31,10 +31,10 @@ We model a direct component plus scattered light in linear RGB. Measuring the sp
 
 The slider transfers up to 55% of each pixel's light to two normalized Gaussian kernels. Wide halo share sets the percentage of scattered light sent to the wider kernel. Its default of 30% leaves 70% in the narrower kernel. The wider kernel has four times the standard deviation. Size scales both widths. This linear mixture preserves a flat field and total per-channel light. Brighter stars produce brighter wings naturally. A clipped white source carries only the color recorded in the TIFF.
 
-The sky mask allows light exchange only between eligible pixels. At a boundary, light that would scatter into a protected pixel stays at the source. Preview crops and export bands read neighboring native pixels out to the kernel radius before sampling the result.
+The sky mask allows light exchange only between eligible pixels. At a boundary, light that would scatter into a protected pixel stays at the source. Preview crops and export bands read neighboring native pixels out to the kernel radius before sampling the result. The CPU preview caches narrow and wide responses within a 64 MiB budget, so changing diffusion strength or wide halo share can reuse the same convolutions.
 
 ## Regions and cancellation
 
 Preview coordinates map to original pixels through an explicit origin and integer sampling step. The catalogue remains global when rendering a crop. Original view bypasses source corrections and effects.
 
-Workers check cancellation between bounded batches or image strips. They cannot interrupt an individual native-library call. Export renders, composites, corrects, encodes and writes one 256-row band at a time, so only the working image stays full-size in memory; see [Memory and chunked processing](memory.md).
+Workers check cancellation between bounded batches or image strips. They cannot interrupt an individual native-library call. Export composites, encodes and writes 256-row bands. Optical diffusion groups consecutive bands so they share the padded source rows needed by a wide halo. The retained correction is limited to 128 MiB or one writer band, whichever is larger. See [Memory and chunked processing](memory.md).
