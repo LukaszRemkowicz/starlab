@@ -8,6 +8,7 @@ file is never changed.
 The app is free for everyone under the [MIT License](LICENSE).
 
 - [What it does](#what-it-does)
+- [How it looks](#how-it-looks)
 - [Before you start](#before-you-start)
 - [Install](#install)
 - [Start the app](#start-the-app)
@@ -40,6 +41,26 @@ The app is free for everyone under the [MIT License](LICENSE).
 - **Live preview.** See every change straight away, compare it with the
   original, and zoom in to check single pixels.
 - **Fix the detection by hand.** Move, add, hide or recolor individual stars.
+
+## How it looks
+
+The **Dramatic Diffraction** preset on a Milky Way panorama over Castillo de
+Zafra, Spain:
+
+![Star Effects Lab window with diffraction spikes added to the stars](docs/images/app-result.jpg)
+
+**Compare** shows the original on the left and the result on the right:
+
+![Compare view: original and result side by side](docs/images/app-compare.jpg)
+
+The **Sky mask** view shows where effects are allowed: blue is sky, red is
+protected foreground.
+
+![Sky mask view: sky in blue, foreground in red](docs/images/app-sky-mask.jpg)
+
+At **100%** you see real pixels, so you can judge each spike:
+
+![The Milky Way core at 100% zoom with spikes on bright stars](docs/images/app-detail.jpg)
 
 ## Before you start
 
