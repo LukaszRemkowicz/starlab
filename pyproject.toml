@@ -1,6 +1,6 @@
 [project]
 name = "star-effects-lab"
-version = "0.1.0"
+version = "0.2.0"
 description = "Standalone star diffraction effects research application"
 license = "MIT"
 license-files = ["LICENSE"]

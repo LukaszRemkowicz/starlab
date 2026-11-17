@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, Literal
 
 from .application.use_cases import ImageServices
 from .domain.imaging import check_cancel
+from .infrastructure.photoshop_bridge import LAYER_NAME, PhotoshopBridge
 from .infrastructure.preset_json import load_preset, save_preset
 from .infrastructure.tiff_io import read_tiff, read_tiff_preview, write_tiff
 
@@ -23,18 +24,43 @@ PREPARE = "import sys; from starlab.preparation import main; main(sys.argv[1:])"
 PREPARATION_WAIT_LIMIT = 120.0
 
 
-def create_services(*, sky_mask: bool) -> ImageServices:
-    """Build the image services shared by the window and background preparation."""
-    services: ImageServices = ImageServices(read_tiff, write_tiff, read_preview=read_tiff_preview)
+def create_services(*, sky_mask: bool, bridge: PhotoshopBridge | None = None) -> ImageServices:
+    """Build the image services shared by the window and background preparation.
+
+    With a Photoshop bridge, pixels come from and go to its shared memory; there is no
+    encoded source file, so the sky mask is built from the decoded frame instead.
+    """
+    services: ImageServices = (
+        ImageServices(read_tiff, write_tiff, read_preview=read_tiff_preview)
+        if bridge is None
+        else ImageServices(bridge.read, bridge.write, read_preview=bridge.read_preview)
+    )
     if sky_mask:
         from .infrastructure.sky_mask import SkyMaskService
 
         services.sky_mask = SkyMaskService(persistent_cache=False)
-        services.read_mask = services.sky_mask.from_source
+        if bridge is None:
+            services.read_mask = services.sky_mask.from_source
     return services
 
 
-def create_window(*, backend: Literal["auto", "cpu", "gpu"] = "auto") -> MainWindow:
+def repeat_last(services: ImageServices, bridge: PhotoshopBridge) -> None:
+    """Re-apply the plug-in's stored settings to the layer without a window ("Last Filter").
+
+    Mirrors the GUI path: decode the frame, build the sky mask from it, detect, then
+    export the composite into the block (status 1 only after the last row).
+    """
+    detection, effects = bridge.settings()
+    path: Path = Path(LAYER_NAME)
+    frame, _ = services.open_image(path)
+    mask = services.sky_mask(frame, None, None) if services.sky_mask is not None else None
+    stars = services.analyze(frame, None, detection, None, sky_mask=mask)
+    services.export(path, frame, stars, effects, False, None, None, sky_mask=mask)
+
+
+def create_window(
+    *, backend: Literal["auto", "cpu", "gpu"] = "auto", bridge: PhotoshopBridge | None = None
+) -> MainWindow:
     """Build production services; explicit cpu is a bounded test backend without the model.
 
     Auto retains native GPU previews and mandatory sky masking on desktop platforms.
@@ -50,7 +76,7 @@ def create_window(*, backend: Literal["auto", "cpu", "gpu"] = "auto") -> MainWin
     gpu: bool = backend == "gpu" or (
         backend == "auto" and QGuiApplication.platformName() != "offscreen"
     )
-    services: ImageServices = create_services(sky_mask=gpu)
+    services: ImageServices = create_services(sky_mask=gpu, bridge=bridge)
     if gpu:
         from .infrastructure.gpu_preview import GpuPreviewRenderer
 
@@ -62,6 +88,9 @@ def create_window(*, backend: Literal["auto", "cpu", "gpu"] = "auto") -> MainWin
         save_preset,
     )
     window.controller = controller
+    if bridge is not None:
+        window.enter_bridge_mode()
+        controller.store_settings = bridge.store_settings
     if services.preview is not None:
         controller.runner.cleanup = services.preview.close
     return window

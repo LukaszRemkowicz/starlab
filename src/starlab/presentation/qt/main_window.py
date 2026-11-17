@@ -162,6 +162,7 @@ class MainWindow(QMainWindow):
         self._mask_return_mode = "result"
         self._before_mode: str | None = None
         self._loaded = False
+        self.bridge_mode = False
         self._activity = ""
         self.clock = QElapsedTimer()
         self.activity_timer = QTimer(self)
@@ -508,6 +509,11 @@ class MainWindow(QMainWindow):
         self.export_button.setObjectName("accent")
         self.export_button.clicked.connect(self.choose_export)
         box.addWidget(self.export_button)
+        self.bridge_cancel_button = QPushButton("Cancel")
+        self.bridge_cancel_button.setToolTip("Leave the Photoshop layer unchanged")
+        self.bridge_cancel_button.clicked.connect(self.close)
+        self.bridge_cancel_button.hide()
+        box.addWidget(self.bridge_cancel_button)
         return footer
 
     def _activity_feedback(self) -> QVBoxLayout:
@@ -628,9 +634,22 @@ class MainWindow(QMainWindow):
         ):
             widget.setEnabled(not exclusive and (self._loaded or widget is not self.apply_button))
 
+    def enter_bridge_mode(self) -> None:
+        """Turn the window into a Photoshop layer editor: Apply and Cancel, no file opening."""
+        self.bridge_mode = True
+        self.setWindowTitle(f"{APPLICATION_NAME} — editing a Photoshop layer")
+        self.export_button.setText("Apply")
+        self.export_button.setToolTip("Write the result back into the Photoshop layer")
+        self.apply_button.setText("Update preview")
+        self.bridge_cancel_button.show()
+        for widget in (self.open_button, self.empty_open_button):
+            widget.hide()
+        for target in (self.canvas, self.image_view):
+            target.setAcceptDrops(False)
+
     def choose_open(self) -> None:
         """Choose a TIFF path and remember its parent folder after selection."""
-        if self.controller and self.controller.exclusive:
+        if self.bridge_mode or (self.controller and self.controller.exclusive):
             return
         # QSettings returns object in the stub even when type=str requests string conversion.
         directory: str = cast(
@@ -655,6 +674,9 @@ class MainWindow(QMainWindow):
     def choose_export(self) -> None:
         """Choose output content and a TIFF destination for the loaded document."""
         if not self.export_button.isEnabled():
+            return
+        if self.bridge_mode:
+            self.export_requested.emit("Photoshop layer", False)  # path is ignored
             return
         from PySide6.QtWidgets import QInputDialog
 

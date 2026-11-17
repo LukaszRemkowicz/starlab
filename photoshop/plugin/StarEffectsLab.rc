@@ -1,0 +1,2 @@
+// PiPL for the new SDK is JSON, embedded as resource "JSON_PIPL" of type JSON.
+JSON_PIPL JSON "PiPLs.json"
