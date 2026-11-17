@@ -1,5 +1,6 @@
 from dataclasses import replace
 from pathlib import Path
+from threading import Event
 
 import numpy as np
 import pytest
@@ -30,6 +31,20 @@ def document(qtbot):
     controller.display()
     yield window, controller, frame
     assert controller.shutdown()
+
+
+def test_open_with_active_diffusion_defers_effects_until_after_masking(document, monkeypatch):
+    _, controller, frame = document
+    settings = controller.session.settings
+    controller.session.set_settings(replace(settings, soft=replace(settings.soft, diffusion=70)))
+    controller.services.read_preview = None
+    monkeypatch.setattr(controller.services, "open_image", lambda *_: (frame, None))
+    jobs = []
+    monkeypatch.setattr(controller.runner, "submit", lambda kind, fn: jobs.append(fn))
+    controller.open_path("new.tif")
+    result = jobs[0](Event())
+    assert result.preview.diffusion is None
+    assert controller.session.settings.soft.diffusion == 70
 
 
 @pytest.mark.parametrize("termination", ["cancel", "failure"])

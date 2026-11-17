@@ -186,14 +186,22 @@ def test_export_includes_reduction_and_effects_only_remains_added_light(tmp_path
     frame, stars = scene()
     path = tmp_path / "result.tif"
     service = ImageServices(None, write_tiff)
-    service.export(path, frame, stars, settings(100), False, None)
-    p = render_preview(frame, stars, settings(100), full_resolution=True)
+    combined = settings(100)
+    combined = replace(combined, soft=replace(combined.soft, diffusion=85))
+    service.export(path, frame, stars, combined, False, None)
+    p = render_preview(frame, stars, combined, full_resolution=True)
     np.testing.assert_allclose(
         read_tiff(path).pixels,
-        composite(p.frame, p.effects, reduction=p.reduction, enlargement=p.enlargement),
+        composite(
+            p.frame,
+            p.effects,
+            reduction=p.reduction,
+            enlargement=p.enlargement,
+            diffusion=p.diffusion,
+        ),
         atol=2e-5,
     )
-    service.export(path, frame, stars, settings(100), True, None)
+    service.export(path, frame, stars, combined, True, None)
     np.testing.assert_allclose(read_tiff(path).pixels, p.effects, atol=2e-5)
 
 

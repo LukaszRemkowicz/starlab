@@ -8,6 +8,7 @@ import hashlib
 import os
 import platform
 import sys
+from collections.abc import Callable
 from importlib import import_module
 from importlib.metadata import version
 from pathlib import Path
@@ -18,25 +19,47 @@ PACKAGE = Path(__file__).resolve().parent
 
 
 def code_signature() -> str:
-    """Identify this program build: its sources plus the interpreter, Numba and CPU."""
+    """Fingerprint compiled kernels and their shared numerical inputs."""
     digest = hashlib.sha256()
-    for source in sorted(PACKAGE.rglob("*.py")):
+    numerical_sources = (
+        source
+        for folder in ("domain", "infrastructure")
+        for source in (PACKAGE / folder).rglob("*.py")
+    )
+    for source in sorted(numerical_sources):
+        # Numba may embed helpers and constants from undecorated modules.
         digest.update(source.relative_to(PACKAGE).as_posix().encode())
         digest.update(source.read_bytes())
     numba: str = version("numba")
-    digest.update(f"{sys.version}|{numba}|{platform.machine()}".encode())
+    abi = getattr(sys, "abiflags", "")
+    digest.update(
+        f"{sys.implementation.cache_tag}|{abi}|{numba}|{platform.system()}|{platform.machine()}".encode()
+    )
     return digest.hexdigest()
+
+
+def cache_folder(relative: str) -> str:
+    """Name the external Numba cache directory for one installed StarLab package."""
+    from numba.core.caching import UserProvidedCacheLocator
+
+    source = str(PACKAGE / relative / "__init__.py")
+    return str(UserProvidedCacheLocator.get_suitable_cache_subpath(source))  # type: ignore[no-untyped-call]
 
 
 def compiled_files() -> list[Path]:
     """StarLab's Numba compiled-code files where this process will look for them."""
     configured: str | None = os.environ.get("NUMBA_CACHE_DIR")
-    root: Path = Path(configured) if configured else PACKAGE
+    folders = (
+        Path(configured) / cache_folder(init.parent.relative_to(PACKAGE).as_posix())
+        if configured
+        else init.parent / "__pycache__"
+        for init in PACKAGE.rglob("__init__.py")
+    )
     return [
         path
+        for folder in folders
         for pattern in ("*.nbi", "*.nbc")
-        for path in root.rglob(pattern)
-        if configured is None or "starlab" in path.as_posix()
+        for path in folder.glob(pattern)
     ]
 
 
@@ -50,25 +73,24 @@ def clear_compiled_code() -> None:
         path.unlink(missing_ok=True)
 
 
-def prepare(stamp: Path | None) -> None:
+def prepare(stamp: Path | None, detector_ready: Callable[[], None] | None = None) -> None:
     """Compile and warm the image code unless this build is already prepared."""
     signature: str = code_signature()
-    if (
-        stamp is not None
-        and stamp.is_file()
-        and stamp.read_text(encoding="utf-8") == signature
-        and any(path.suffix == ".nbi" for path in compiled_files())
-    ):
-        return
     if stamp is not None:
-        clear_compiled_code()  # new or changed build: never mix old and new machine code
+        saved = stamp.read_text(encoding="utf-8") if stamp.is_file() else ""
+        if saved == signature and any(path.suffix == ".nbi" for path in compiled_files()):
+            return
+        pending = f"preparing {signature}"
+        if saved not in (signature, pending):
+            clear_compiled_code()
+        stamp.parent.mkdir(parents=True, exist_ok=True)
+        stamp.write_text(pending, encoding="utf-8")
     from .application.warmup import warm_up
     from .bootstrap import create_services
     from .infrastructure.tiff_io import write_samples
 
-    warm_up(create_services(sky_mask=True), write_samples)
+    warm_up(create_services(sky_mask=True), write_samples, detector_ready)
     if stamp is not None:
-        stamp.parent.mkdir(parents=True, exist_ok=True)
         stamp.write_text(signature, encoding="utf-8")
 
 
@@ -103,4 +125,9 @@ def main(arguments: list[str]) -> None:
             Thread(target=exit_with_parent_windows, args=(int(parent),), daemon=True).start()
         else:
             Thread(target=exit_with_parent, daemon=True).start()
-    prepare(Path(arguments[0]) if arguments else None)
+
+    def detector_ready() -> None:
+        """Release the desktop worker before the remaining layouts and export compile."""
+        print("ready", flush=True)
+
+    prepare(Path(arguments[0]) if arguments else None, detector_ready if parent else None)

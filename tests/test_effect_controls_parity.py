@@ -60,6 +60,8 @@ from starlab.presentation.qt.theme import STYLE
                 "Intensity",
                 "Size",
                 "Soft filter",
+                "Optical diffusion",
+                "Wide halo share",
                 "Color saturation",
                 "Color hue",
                 "Edge falloff",
@@ -127,6 +129,7 @@ def test_basic_and_advanced_keep_all_group_values_and_restore_sliders(qtbot):
     assert panel.basic.isVisible()
     qtbot.mouseClick(panel.basic, Qt.MouseButton.LeftButton)
     assert all(controls["saturation"].isHidden() for controls in panel.controls.values())
+    assert panel.controls["soft"]["wide_halo_share"].isHidden()
     assert all(not controls["intensity"].isHidden() for controls in panel.controls.values())
     qtbot.mouseClick(panel.advanced, Qt.MouseButton.LeftButton)
     assert all(

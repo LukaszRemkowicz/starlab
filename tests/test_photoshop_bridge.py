@@ -357,12 +357,9 @@ def test_repeat_runs_headless_end_to_end(make_block, monkeypatch, tmp_path):
     bridge = make_block.attach(block)
     assert bridge.mode == 1
     shown = []
-    monkeypatch.setattr(entry, "MainWindow", lambda *a, **k: shown.append(1))
-    monkeypatch.setattr(
-        entry,
-        "start_preparation",
-        lambda *a, **k: (type("P", (), {"terminate": lambda self: None})(), lambda cancel: None),
-    )
+    from starlab import bootstrap
+
+    monkeypatch.setattr(bootstrap, "create_window", lambda *a, **k: shown.append(1))
     monkeypatch.setattr(entry.QMessageBox, "critical", lambda *a: shown.append("dialog"))
     app = type(
         "A",
@@ -372,7 +369,7 @@ def test_repeat_runs_headless_end_to_end(make_block, monkeypatch, tmp_path):
             "aboutToQuit": type("S", (), {"connect": lambda self, f: None})(),
         },
     )()
-    assert entry._run_repeat(app, bridge, tmp_path, entry.logging.getLogger("starlab")) == 0
+    assert entry._run_repeat(app, bridge, tmp_path, entry.logging.getLogger("starlab"), True) == 0
     assert seen == [detection] and not shown
     assert bridge.status == 1 and np.any(_codes(block, samples) > samples)
 
@@ -384,11 +381,6 @@ def test_repeat_failure_shows_dialog_and_reports_cancelled(make_block, monkeypat
     bridge = make_block.attach(block)
     block.buf[64 + samples.nbytes : 64 + samples.nbytes + 4] = b"nope"  # corrupt settings
     shown = []
-    monkeypatch.setattr(
-        entry,
-        "start_preparation",
-        lambda *a, **k: (type("P", (), {"terminate": lambda self: None})(), lambda cancel: None),
-    )
     monkeypatch.setattr(entry.QMessageBox, "critical", lambda *a: shown.append(a[2]))
     app = type(
         "A",
@@ -398,6 +390,6 @@ def test_repeat_failure_shows_dialog_and_reports_cancelled(make_block, monkeypat
             "aboutToQuit": type("S", (), {"connect": lambda self, f: None})(),
         },
     )()
-    assert entry._run_repeat(app, bridge, tmp_path, entry.logging.getLogger("starlab")) == 2
+    assert entry._run_repeat(app, bridge, tmp_path, entry.logging.getLogger("starlab"), True) == 2
     assert shown and bridge.status == 0
     assert np.array_equal(_codes(block, samples), samples)

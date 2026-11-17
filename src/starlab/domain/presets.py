@@ -24,6 +24,8 @@ class ParameterData(TypedDict):
     phase: float
     size: float
     soft_filter: float
+    diffusion: float
+    wide_halo_share: float
     falloff: float
     inner_width: float
     inner_falloff: float
@@ -47,7 +49,7 @@ def preset_data(settings: EffectSettings) -> PresetData:
 
 
 def parse_preset(data: object) -> EffectSettings:
-    """Read one supported schema, accepting legacy presets without soft_filter."""
+    """Read one supported schema, defaulting missing source filters to zero."""
     try:
         if not isinstance(data, dict) or set(data) != {"schema_version", "settings"}:
             raise ValueError("Invalid preset structure.")
@@ -57,7 +59,9 @@ def parse_preset(data: object) -> EffectSettings:
         if not isinstance(groups, dict) or set(groups) != set(KINDS):
             raise ValueError("Preset must contain all four groups.")
         groups = {
-            kind: {"soft_filter": 0, **parameters} if isinstance(parameters, dict) else parameters
+            kind: {"soft_filter": 0, "diffusion": 0, "wide_halo_share": 30, **parameters}
+            if isinstance(parameters, dict)
+            else parameters
             for kind, parameters in groups.items()
         }
         keys: set[str] = {parameter_field.name for parameter_field in fields(EffectParameters)}
