@@ -110,10 +110,7 @@ uv run star-effects-lab 'D:\photos\night-sky.tif'
 
 On macOS, a path looks like `~/Pictures/night-sky.tif`.
 
-The first start after installing or updating prepares the app's image code in
-the background, which takes up to about a minute once. The window is usable
-straight away; a photo you open during that time simply waits for it. After that,
-finding stars usually takes about a second.
+The installation includes compiled image-processing code for your platform. You can open a photo on the first launch.
 
 ## Update or remove the app
 
@@ -302,11 +299,6 @@ done in your photo editor:
 
 **The window is black or the app closes right after starting.**
 Update your graphics card driver. The preview needs OpenGL 3.3.
-
-**Finding stars takes up to a minute the first time.**
-This happens once after installing or updating, while the app prepares its image
-code in the background. Later, detection usually takes about a second. Large
-panoramas need more time and memory, so close other memory-hungry programs.
 
 **The app says it cannot start because of log files.**
 The app always writes a log and refuses to start if it cannot. Check that the

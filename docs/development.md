@@ -92,11 +92,8 @@ Pixel regressions compare numerical output with captured expected images. They e
 
 ## Numba compiled-code cache
 
-Kernels use `cache=True`, so Numba stores machine code in `__pycache__`. Numba
-checks only the source file of each kernel: after editing a helper or constant
-that a kernel imports from another module (for example `numeric.py` or
-`rays.py`), delete the `__pycache__` folders under `src/starlab` before testing,
-or the old machine code may be reused. The app protects users from this: its
-background preparation stamp (`prepared-code`) includes a hash of every source
-file, and when it changes the app deletes StarLab's compiled code before
-compiling again.
+The wheel build hook runs the production image pipeline against synthetic images in an
+isolated cache. Normal and editable wheels include the compiled kernels. The desktop
+app checks their fingerprint before loading them. After changing numerical code, the
+next `uv sync` rebuilds the bundle. Tests that import individual kernels directly
+continue to use Numba's regular cache.
