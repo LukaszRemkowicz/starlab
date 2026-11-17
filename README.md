@@ -110,10 +110,7 @@ uv run star-effects-lab 'D:\photos\night-sky.tif'
 
 On macOS, a path looks like `~/Pictures/night-sky.tif`.
 
-The first start after installing or updating prepares the app's image code in
-the background, which takes up to about a minute once. The window is usable
-straight away; a photo you open during that time simply waits for it. After that,
-finding stars usually takes about a second.
+The installation includes compiled image-processing code for your platform. You can open a photo on the first launch.
 
 ## Update or remove the app
 
@@ -182,6 +179,7 @@ to see the main sliders only. Switching between the two keeps your values.
 | **Spike sharpness**, **Spike spread** | How thin and how fanned out the spikes are. |
 | **Size** | How large the glow or ring is. |
 | **Soft filter** | Shrinks small stars and enlarges big ones, noticeably at high values (Soft Flare tab). At 0 the stars stay as they are. |
+| **Optical diffusion** | Spreads part of the original light around each bright detail. Stars keep a sharp core with wings in their own color. **Size** controls the spread. |
 | **Edge falloff**, **Inner/Outer edge width and falloff** | How softly the glow or ring fades at its edges. |
 | **Color saturation**, **Color hue** | Change the effect's color. At saturation 0 each effect keeps its star's natural color. |
 | **Rainbow intensity**, **frequency**, **phase** | Add a rainbow tint along the spikes and control how it repeats. |
@@ -193,6 +191,13 @@ changes the glow. So you can use Soft filter on its own: set **Intensity** to 0
 in **Soft Flare** and keep **Soft filter** above 0. With **Quantity** at 0 it
 changes no stars. Turning off the whole **Soft Flare** tab also
 turns Soft filter off.
+
+For a night-sky diffusion filter look, enable **Soft Flare**, set **Intensity**
+and **Soft filter** to 0, then try **Optical diffusion** at 50 and **Size** at 12.
+Disable the spike and ring groups to see the glass effect alone. Use **Compare**
+at 100% zoom to judge the glow around a bright star and the nearby faint stars.
+Optical diffusion is included in the composite TIFF. The effects-only TIFF
+contains the synthetic emission layers.
 
 ## Viewing your image
 
@@ -294,11 +299,6 @@ done in your photo editor:
 
 **The window is black or the app closes right after starting.**
 Update your graphics card driver. The preview needs OpenGL 3.3.
-
-**Finding stars takes up to a minute the first time.**
-This happens once after installing or updating, while the app prepares its image
-code in the background. Later, detection usually takes about a second. Large
-panoramas need more time and memory, so close other memory-hungry programs.
 
 **The app says it cannot start because of log files.**
 The app always writes a log and refuses to start if it cannot. Check that the

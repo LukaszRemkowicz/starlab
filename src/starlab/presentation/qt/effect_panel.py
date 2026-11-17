@@ -34,6 +34,8 @@ LABELS = {
     "phase": "Rainbow phase",
     "size": "Size",
     "soft_filter": "Soft filter",
+    "diffusion": "Optical diffusion",
+    "wide_halo_share": "Wide halo share",
     "falloff": "Edge falloff",
     "inner_width": "Inner edge width",
     "inner_falloff": "Inner edge falloff",
@@ -46,7 +48,7 @@ TITLES = {
     "soft": "Soft flare",
     "ring": "Ring flare",
 }
-BASIC = {"quantity", "intensity", "length", "angle", "points", "size", "soft_filter"}
+BASIC = {"quantity", "intensity", "length", "angle", "points", "size", "soft_filter", "diffusion"}
 
 
 class ParameterControl(QWidget):
@@ -64,7 +66,9 @@ class ParameterControl(QWidget):
             "quantity": "Brightness threshold for this effect. Higher values include fainter detected sources across the image.",
             "saturation": "0 preserves the source color. Positive values add saturation to this effect.",
             "rainbow": "0 adds no rainbow modulation. Increase to color the rays.",
-            "soft_filter": "Shrink small stars and enlarge large stars in the original image before effects. Also fade Soft Flare halos on small measured stars and strengthen them on large stars. The source correction is independent of halo Quantity, Intensity and Size; 0 disables both filter operations.",
+            "soft_filter": "Shrink small measured stars and enlarge large ones. Quantity selects the stars and Size sets the halo width.",
+            "diffusion": "Scatter a fraction of the original light into soft, colored wings. Size controls their width. Set Intensity and Soft filter to 0 to see diffusion on its own.",
+            "wide_halo_share": "Share of optical diffusion in the wide halo. At 0% all scattered light stays in the narrow halo. At 100% it all goes into the wide halo.",
         }
         if key in tips:
             self.setToolTip(tips[key])
@@ -83,6 +87,8 @@ class ParameterControl(QWidget):
         self.spin.setAccessibleName(LABELS[key])
         if key == "angle":
             self.spin.setSuffix("°")
+        elif key == "wide_halo_share":
+            self.spin.setSuffix("%")
         label.setBuddy(self.spin)
         row.addWidget(label)
         row.addStretch()
@@ -189,11 +195,7 @@ class EffectPanel(QWidget):
         count.setObjectName("muted")
         count.setToolTip(
             "Sources receiving this effect / total detected sources. Quantity changes the brightness cutoff."
-            + (
-                " Soft filter processes measured source stars independently of this halo count."
-                if kind == "soft"
-                else ""
-            )
+            + (" Optical diffusion works directly on image pixels." if kind == "soft" else "")
         )
         header.addWidget(count)
         self.source_counts[kind] = count

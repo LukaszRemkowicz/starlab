@@ -7,13 +7,14 @@ license-files = ["LICENSE"]
 requires-python = ">=3.14,<3.15"
 dependencies = [
     "PySide6>=6.8,<7",
-    "numpy>=2.2,<3",
+    "numpy==2.5.4",
     "scipy>=1.15,<2",
     "tifffile>=2025.1",
     "imagecodecs>=2025.3",
     "Pillow>=11,<13",
     "opencv-python-headless>=4.13,<6",
-    "numba>=0.68,<0.69",
+    "numba==0.68.1",
+    "llvmlite==0.50.0",
 ]
 
 [project.scripts]
@@ -25,6 +26,12 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/starlab"]
+
+[tool.hatch.build.targets.wheel.hooks.custom]
+require-runtime-dependencies = true
+
+[tool.uv]
+cache-keys = [{ file = "pyproject.toml" }, { file = "hatch_build.py" }, { file = "src/starlab/domain/**/*.py" }, { file = "src/starlab/infrastructure/**/*.py" }, { file = "src/starlab/application/warmup.py" }, { file = "src/starlab/kernel_bundle.py" }, { file = "src/starlab/preparation.py" }]
 
 [dependency-groups]
 dev = [

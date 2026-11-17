@@ -8,11 +8,10 @@ from pathlib import Path
 from PySide6.QtCore import QStandardPaths
 from PySide6.QtWidgets import QApplication, QMessageBox
 
-from .bootstrap import create_window, start_preparation
 from .infrastructure.desktop_identity import set_process_identity
 from .infrastructure.diagnostics import DiagnosticsUnavailable, application_diagnostics
+from .kernel_bundle import install
 from .presentation.qt.branding import APPLICATION_ID, configure_application
-from .presentation.qt.main_window import MainWindow
 
 
 def _run(app: QApplication, image: str | None, data: Path, logger: logging.Logger) -> int:
@@ -20,17 +19,22 @@ def _run(app: QApplication, image: str | None, data: Path, logger: logging.Logge
     logger.info("Application version: %s", app.applicationVersion())
     app.lastWindowClosed.connect(lambda: logger.info("Qt lastWindowClosed"))
     app.aboutToQuit.connect(lambda: logger.info("Qt aboutToQuit"))
-    window: MainWindow = create_window()
-    try:
-        preparation, ready = start_preparation(
-            data / "logs" / "preparation.log", data / "prepared-code"
-        )
-    except OSError as exc:
-        raise DiagnosticsUnavailable(f"Cannot create {data / 'logs'}: {exc}") from exc
-    logger.info("Compiling image code in background: PID %d", preparation.pid)
-    app.aboutToQuit.connect(preparation.terminate)
+    packaged = install(data)
+    from .bootstrap import create_window, start_preparation
+
+    window = create_window()
+    if not packaged:
+        try:
+            preparation, ready = start_preparation(
+                data / "logs" / "preparation.log", data / "prepared-code"
+            )
+        except OSError as exc:
+            raise DiagnosticsUnavailable(f"Cannot create {data / 'logs'}: {exc}") from exc
+        logger.info("Preparing local image kernels: PID %d", preparation.pid)
+        app.aboutToQuit.connect(preparation.terminate)
+        if window.controller is not None:
+            window.controller.services.ready = ready
     if window.controller is not None:
-        window.controller.services.ready = ready
         window.controller.runner.activity.connect(lambda kind: logger.info("Job started: %s", kind))
         window.controller.runner.failed.connect(
             lambda message: logger.error("Job failed: %s", message)

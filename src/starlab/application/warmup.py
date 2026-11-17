@@ -77,7 +77,11 @@ def _detect(
     return stars
 
 
-def warm_up(services: ImageServices, write_samples: SampleWriter | None = None) -> int:
+def warm_up(
+    services: ImageServices,
+    write_samples: SampleWriter | None = None,
+    detector_ready: Callable[[], None] | None = None,
+) -> int:
     """Run the production open, detect, preview and export paths; return the star count.
 
     Numba compiles each kernel on first use for each input layout and stores the
@@ -94,21 +98,22 @@ def warm_up(services: ImageServices, write_samples: SampleWriter | None = None) 
     with TemporaryDirectory(prefix="star-effects-lab-") as directory:
         source: Path = Path(directory) / "warm-up.tif"
         services.write(source, synthetic, synthetic.pixels)
+        frame, sky_mask = _open(services, source)
+        stars = _detect(services, source, (frame, sky_mask))
+        if detector_ready is not None:
+            detector_ready()
         tiled: Path = Path(directory) / "tiled.tif"
         large: ImageFrame = _synthetic_sky(1100, 1300, 1600)
         services.write(tiled, large, large.pixels)
-        files: list[Path] = [source, tiled]
+        files: list[Path] = [tiled]
         if write_samples is not None:
             for name, (samples, compress) in _encoded_variants(synthetic).items():
                 variant: Path = Path(directory) / f"{name}.tif"
                 write_samples(variant, samples, compress)
                 files.append(variant)
-        # Opening first: it is what a user waits for, so its kernels are cached soonest.
-        opened = {path: _open(services, path) for path in files}
-        for path in files[1:]:
-            _detect(services, path, opened[path])
-        frame, sky_mask = opened[source]
-        stars = _detect(services, source, opened[source], ("multiscale", "native"))
+        for path in files:
+            _detect(services, path, _open(services, path))
+        _detect(services, source, (frame, sky_mask), ("multiscale",))
         for full_resolution in (False, True):
             render_preview(
                 frame, stars, settings, full_resolution=full_resolution, sky_mask=sky_mask
