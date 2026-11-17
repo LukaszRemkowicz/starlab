@@ -109,7 +109,7 @@ bool run(const std::string &exe, const std::vector<std::string> &args, int &exit
     for (const auto &a : args) cmd += L" " + quote(a);
     STARTUPINFOW si{}; si.cb = sizeof si;
     PROCESS_INFORMATION pi{};
-    if (!CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, 0, nullptr, nullptr, &si, &pi)) {
+    if (!CreateProcessW(nullptr, &cmd[0], nullptr, nullptr, FALSE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi)) {
         err = "Could not start Star Effects Lab (" + exe + "). Is it installed?";
         return false;
     }

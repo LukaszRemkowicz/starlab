@@ -35,8 +35,12 @@ if ($LASTEXITCODE) { exit $LASTEXITCODE }
 
 $python = Join-Path $repo ".venv\Scripts\python.exe"
 if (Test-Path $python) {
+    # Run from the repo: python -c puts the current folder first on sys.path, so stray .py files there would shadow modules.
+    Push-Location $repo
     & (Join-Path $build "Release\bridge_selftest.exe") $python
-    if ($LASTEXITCODE) { exit $LASTEXITCODE }
+    $code = $LASTEXITCODE
+    Pop-Location
+    if ($code) { exit $code }
 } else {
     Write-Warning "Skipping bridge self-test: $python not found (run uv sync)."
 }

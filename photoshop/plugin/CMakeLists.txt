@@ -14,6 +14,9 @@ else()
 endif()
 # shortcut: dev default; the installer will set the real launcher path.
 set(STARLAB_COMMAND "${_default_cmd}" CACHE STRING "Absolute path of the Star Effects Lab launcher")
+if(WIN32)
+  add_compile_definitions(NOMINMAX)  # windows.h min/max macros break std::min
+endif()
 
 add_library(selb_bridge STATIC bridge.cpp)
 if(APPLE)

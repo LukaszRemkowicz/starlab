@@ -37,7 +37,7 @@ static void variant(const char *python, int mode, uint32_t expectStatus, bool ex
     int code = -2;
     bool ok;
     if (mode == 2)
-        ok = selb::run("/usr/bin/true", {}, code, err);
+        ok = selb::run(python, {"-c", "pass"}, code, err);
     else
         ok = selb::run(python, {"-c", mode == 0 ? kApply : kCancel, b.name}, code, err);
     CHECK(ok);
