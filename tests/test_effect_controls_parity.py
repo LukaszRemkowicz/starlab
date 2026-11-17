@@ -60,6 +60,7 @@ from starlab.presentation.qt.theme import STYLE
                 "Intensity",
                 "Size",
                 "Soft filter",
+                "Optical diffusion",
                 "Color saturation",
                 "Color hue",
                 "Edge falloff",

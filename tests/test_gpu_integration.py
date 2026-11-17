@@ -163,6 +163,7 @@ def test_groups_compose_with_both_source_corrections(gpu, channels):
     render, _ = gpu
     frame, stars = _scene(channels)
     settings = _all_settings()
+    settings = replace(settings, soft=replace(settings.soft, diffusion=55))
     expected = render_preview(frame, stars, settings, full_resolution=True)
     actual = render(frame, stars, settings, full_resolution=True)
     assert set(actual.groups) == set(KINDS)
@@ -173,19 +174,51 @@ def test_groups_compose_with_both_source_corrections(gpu, channels):
     assert np.max(actual.reduction) > 0 and np.max(actual.enlargement) > 0
     np.testing.assert_allclose(actual.reduction, expected.reduction, rtol=1e-5, atol=3e-7)
     np.testing.assert_allclose(actual.enlargement, expected.enlargement, rtol=1e-5, atol=3e-7)
+    np.testing.assert_allclose(actual.diffusion, expected.diffusion, rtol=2e-7)
     _assert_parity(actual.effects, expected.effects, secondary=True)
     _assert_parity(
         composite(
-            actual.frame, actual.effects, reduction=actual.reduction, enlargement=actual.enlargement
+            actual.frame,
+            actual.effects,
+            reduction=actual.reduction,
+            enlargement=actual.enlargement,
+            diffusion=actual.diffusion,
         ),
         composite(
             expected.frame,
             expected.effects,
             reduction=expected.reduction,
             enlargement=expected.enlargement,
+            diffusion=expected.diffusion,
         ),
         secondary=True,
     )
+
+
+def test_diffusion_cache_tracks_frame_crop_size_and_mask(gpu):
+    render, renderer = gpu
+    frame, _ = _scene(3)
+    base = EffectSettings.disabled()
+    settings = replace(base, soft=replace(base.soft, enabled=True, diffusion=50))
+    options = {"region": (10, 9, 159, 93), "region_sampling": 2}
+    first = render(frame, (), settings, **options)
+    cached = renderer.diffusion_cache
+    settings = replace(settings, soft=replace(settings.soft, diffusion=100))
+    second = render(frame, (), settings, **options)
+    assert cached is renderer.diffusion_cache
+    np.testing.assert_array_equal(first.diffusion * 2, second.diffusion)
+    mask = _sky_mask()
+    for current_frame, size, region, sky in (
+        (frame, 35, options["region"], None),
+        (frame, 35, options["region"], mask),
+        (frame, 35, (17, 17, 145, 88), mask),
+        (ImageFrame(frame.pixels * 0.25), 35, (17, 17, 145, 88), mask),
+    ):
+        settings = replace(settings, soft=replace(settings.soft, size=size))
+        options = {"region": region, "region_sampling": 2, "sky_mask": sky}
+        actual = render(current_frame, (), settings, **options)
+        expected = render_preview(current_frame, (), settings, **options)
+        np.testing.assert_array_equal(actual.diffusion, expected.diffusion)
 
 
 @pytest.mark.parametrize("channels", [1, 3], ids=["gray", "rgb"])

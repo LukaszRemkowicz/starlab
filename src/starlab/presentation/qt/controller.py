@@ -582,6 +582,7 @@ class Controller(QObject):
             preview.effects,
             reduction=preview.reduction,
             enlargement=preview.enlargement,
+            diffusion=preview.diffusion,
         )
         if self.window.mode == "compare":
             result = result.copy()
@@ -674,6 +675,10 @@ class Controller(QObject):
 
     def _enabled_preview(self, preview: Preview) -> Preview:
         """Remove newly disabled groups and source corrections from a retained preview."""
+        if preview.diffusion is not None and (
+            not self.session.settings.soft.enabled or not self.session.settings.soft.diffusion
+        ):
+            preview = replace(preview, diffusion=None)
         if (preview.reduction is not None or preview.enlargement is not None) and (
             not self.session.settings.soft.enabled or not self.session.settings.soft.soft_filter
         ):
@@ -897,6 +902,7 @@ class Controller(QObject):
             groups={},
             reduction=None,
             enlargement=None,
+            diffusion=None,
         )
         self.preview = self.overview
         frame: ImageFrame | None = self.session.frame

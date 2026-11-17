@@ -24,6 +24,7 @@ RANGES = {
     "phase": (0, 100),
     "size": (1, 100),
     "soft_filter": (0, 100),
+    "diffusion": (0, 100),
     "falloff": (0, 100),
     "inner_width": (1, 100),
     "inner_falloff": (0, 100),
@@ -58,7 +59,16 @@ PARAMETERS = {
         "frequency",
         "phase",
     ),
-    "soft": ("quantity", "intensity", "size", "soft_filter", "saturation", "hue", "falloff"),
+    "soft": (
+        "quantity",
+        "intensity",
+        "size",
+        "soft_filter",
+        "diffusion",
+        "saturation",
+        "hue",
+        "falloff",
+    ),
     "ring": (
         "quantity",
         "intensity",
@@ -97,6 +107,7 @@ class EffectParameters:
     inner_falloff: float = 50
     outer_width: float = 25
     outer_falloff: float = 50
+    diffusion: float = 0
 
     def __post_init__(self) -> None:
         """Reject nonfinite, out-of-range, or nonintegral point-count inputs."""

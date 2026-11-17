@@ -15,13 +15,23 @@ Photometry estimates local background planes and signed aperture flux on origina
 ## Render order
 
 1. Derive bounded reduction of small measured source wings and expansion of larger source profiles when Soft filter is enabled.
-2. Form the working base as `original - reduction + enlargement`.
+2. Apply the optional optical diffusion correction to the original linear pixels alongside the measured-source corrections. The combined base is bounded below by zero.
 3. Combine enabled Primary, Secondary, Soft Flare and Ring Flare layers with Screen composition. Each source's light is first limited to the display range along a path to white (hue and luminance kept, saturation reduced), on both CPU and GPU.
 4. Compose those layers over the corrected base and convert to display or export encoding.
 
 The CPU and GPU may calculate independent layer buffers in a different scheduling order; the final composition always follows the order above. Soft Flare Quantity, Size, Edge falloff, Saturation and Hue shape the source prefilter; Intensity does not. Soft filter also biases the Soft Flare emission layer using the same fixed source-size preference: it suppresses small-source halos and strengthens large-source halos. Other emission groups remain unchanged. The catalogue is not detected again when a slider moves. Missing or uncertain measurements receive no source-profile correction.
 
-Source corrections preserve the exact central sample of a centered source model and taper at their support boundary. Overlapping corrections of the same kind use a per-channel maximum, avoiding stacked subtraction. This is a digital approximation of source-wing editing, not a complete optical or deblending model.
+The catalogue-based Soft filter preserves the central sample of a centered source model and tapers at its support boundary. Overlapping edits of the same kind use a per-channel maximum.
+
+### Optical diffusion
+
+Kenko's nightscape comparison shows how a light diffusion filter makes bright stars and their colors more conspicuous. Tiffen describes diffusion grades that retain apparent sharpness while spreading highlights. These are qualitative appearance references. [Kenko PRO1D PROSOFTON Clear](https://kenkoglobal.com/product/pro1d_prosofton_clear/) · [Tiffen diffusion guide](https://tiffen.com/pages/diffusion-guide)
+
+We model a direct component plus scattered light in linear RGB. Measuring the spread of light from an isolated source is one way to characterize a real optical system. The following kernel widths and mixing weights are design choices for this application. Matching a particular filter and lens would require paired linear exposures with unsaturated stars. [Talvala et al., *Veiling Glare in High Dynamic Range Imaging*](https://graphics.stanford.edu/papers/glare_removal/)
+
+The slider transfers up to 55% of each pixel's light to two normalized Gaussian kernels. The narrower kernel receives 70% of the scattered light and the wider kernel receives 30%. The wider kernel has four times the standard deviation. Size scales both widths. This linear mixture preserves a flat field and total per-channel light. Brighter stars produce brighter wings naturally. A clipped white source carries only the color recorded in the TIFF.
+
+The sky mask allows light exchange only between eligible pixels. At a boundary, light that would scatter into a protected pixel stays at the source. Preview crops and export bands read neighboring native pixels out to the kernel radius before sampling the result.
 
 ## Regions and cancellation
 

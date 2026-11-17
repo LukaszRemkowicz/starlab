@@ -27,6 +27,7 @@ from shiboken6 import VoidPtr
 from ..application.use_cases import Preview
 from ..domain.array_types import BoolArray, FloatArray
 from ..domain.effects.constants import SECONDARY_RAY_COUNT
+from ..domain.effects.diffusion import optical_diffusion
 from ..domain.effects.profiles import (
     directions,
     gain,
@@ -47,6 +48,7 @@ type FrameIdentity = weakref.ReferenceType[ImageFrame] | ImageFrame
 type CropKey = tuple[FrameIdentity, Bounds, int]
 type GroupKey = tuple[EffectParameters, Bounds, int, int, int, SkyMask | None]
 type SourceFilterKey = tuple[tuple[float, ...], CropKey | None, SkyMask | None]
+type DiffusionKey = tuple[CropKey | None, float, SkyMask | None]
 type BufferKey = int | tuple[float, ...]
 type UniformComparable = float | int | tuple[float, float]
 
@@ -102,6 +104,7 @@ class GpuPreviewRenderer:
         self.source_texture: QOpenGLTexture | None = None
         self.texture_key: CropKey | None = None
         self.reduction_cache: tuple[SourceFilterKey, Pixels, Pixels] | None = None
+        self.diffusion_cache: tuple[DiffusionKey, Pixels] | None = None
 
     @property
     def _gpu(self) -> QOpenGLFunctions_3_3_Core:
@@ -371,7 +374,9 @@ class GpuPreviewRenderer:
     ) -> Pixels | None:
         """Reuse or draw one effect layer, independently of source correction."""
         key: GroupKey = (
-            parameters if kind == "soft" else replace(parameters, soft_filter=0),
+            replace(
+                parameters, diffusion=0, soft_filter=parameters.soft_filter if kind == "soft" else 0
+            ),
             region,
             sampling,
             diagonal,
@@ -507,6 +512,28 @@ class GpuPreviewRenderer:
         self.reduction_cache = key, reduction, enlargement
         return reduction, enlargement
 
+    def _diffusion(
+        self,
+        frame: ImageFrame,
+        parameters: EffectParameters,
+        region: Bounds,
+        sampling: int,
+        sky_mask: SkyMask | None,
+        cancel: Event | None,
+    ) -> Pixels | None:
+        """Reuse the native-resolution convolution while the user adjusts strength."""
+        if not parameters.enabled or not parameters.diffusion:
+            self.diffusion_cache = None
+            return None
+        key: DiffusionKey = self.crop_key, parameters.size, sky_mask
+        if self.diffusion_cache is None or self.diffusion_cache[0] != key:
+            response = optical_diffusion(
+                frame, replace(parameters, diffusion=100), region, sampling, sky_mask, cancel
+            )
+            assert response is not None
+            self.diffusion_cache = key, response
+        return self.diffusion_cache[1] * (parameters.diffusion / 100)
+
     def __call__(
         self,
         frame: ImageFrame,
@@ -561,6 +588,7 @@ class GpuPreviewRenderer:
                 groups=groups,
                 reduction=reduction,
                 enlargement=enlargement,
+                diffusion=self._diffusion(frame, settings.soft, region, sampling, sky_mask, cancel),
             )
         finally:
             if self.target is not None:
@@ -588,6 +616,7 @@ class GpuPreviewRenderer:
         self.buffer_keys.clear()
         self.group_cache.clear()
         self.reduction_cache = None
+        self.diffusion_cache = None
         self.catalog = self.catalog_mask = self.texture_key = None
         self.program = self.vao = self.gl = None
         if current:

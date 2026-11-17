@@ -182,6 +182,7 @@ to see the main sliders only. Switching between the two keeps your values.
 | **Spike sharpness**, **Spike spread** | How thin and how fanned out the spikes are. |
 | **Size** | How large the glow or ring is. |
 | **Soft filter** | Shrinks small stars and enlarges big ones, noticeably at high values (Soft Flare tab). At 0 the stars stay as they are. |
+| **Optical diffusion** | Spreads part of the original light around each bright detail. Stars keep a sharp core with wings in their own color. **Size** controls the spread. |
 | **Edge falloff**, **Inner/Outer edge width and falloff** | How softly the glow or ring fades at its edges. |
 | **Color saturation**, **Color hue** | Change the effect's color. At saturation 0 each effect keeps its star's natural color. |
 | **Rainbow intensity**, **frequency**, **phase** | Add a rainbow tint along the spikes and control how it repeats. |
@@ -193,6 +194,13 @@ changes the glow. So you can use Soft filter on its own: set **Intensity** to 0
 in **Soft Flare** and keep **Soft filter** above 0. With **Quantity** at 0 it
 changes no stars. Turning off the whole **Soft Flare** tab also
 turns Soft filter off.
+
+For a night-sky diffusion filter look, enable **Soft Flare**, set **Intensity**
+and **Soft filter** to 0, then try **Optical diffusion** at 50 and **Size** at 12.
+Disable the spike and ring groups to see the glass effect alone. Use **Compare**
+at 100% zoom to judge the glow around a bright star and the nearby faint stars.
+Optical diffusion is included in the composite TIFF. The effects-only TIFF
+contains the synthetic emission layers.
 
 ## Viewing your image
 

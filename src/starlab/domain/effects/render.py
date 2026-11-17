@@ -430,9 +430,12 @@ def composite(
     *,
     reduction: Pixels | None = None,
     enlargement: Pixels | None = None,
+    diffusion: Pixels | None = None,
 ) -> Pixels:
     """Screen in linear working space, preserving exact identity at zero effects."""
     pixels: Pixels = frame.pixels if reduction is None else np.maximum(frame.pixels - reduction, 0)
     if enlargement is not None:
         pixels = pixels + enlargement
+    if diffusion is not None:
+        pixels = np.maximum(pixels + diffusion, 0)
     return pixels + (1 - pixels) * effects
