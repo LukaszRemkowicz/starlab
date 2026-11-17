@@ -18,3 +18,9 @@ docs/evidence/
 superpowers/
 .numba-cache/
 .DS_Store
+
+# Adobe Photoshop SDK (licence forbids redistribution)
+photoshop/sdk/
+
+# Photoshop plug-in build output
+photoshop/build/
