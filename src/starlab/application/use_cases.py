@@ -7,7 +7,10 @@ from pathlib import Path
 from threading import Event
 from typing import TypedDict
 
+import numpy as np
+
 from ..domain.array_types import Bounds, DoubleArray, FloatArray
+from ..domain.effects.diffusion import export_diffusion_bands, preview_diffusion
 from ..domain.effects.profiles import image_diagonal, radial_extent
 from ..domain.effects.render import render_effects
 from ..domain.effects.settings import KINDS, EffectKind, EffectParameters, EffectSettings
@@ -49,6 +52,7 @@ class Preview:
     groups: dict[EffectKind, Pixels] | None = None
     reduction: Pixels | None = None
     enlargement: Pixels | None = None
+    diffusion: Pixels | None = None
 
 
 class _MaskOption(TypedDict, total=False):
@@ -195,6 +199,9 @@ def _render_region(
         is_region=True,
         reduction=reduction,
         enlargement=enlargement,
+        diffusion=preview_diffusion(
+            frame, settings.soft, (left, top, right, bottom), sampling, sky_mask, cancel
+        ),
     )
 
 
@@ -237,7 +244,17 @@ def render_preview(
     reduction, enlargement = preview_source_filter(
         preview_frame.pixels, stars, settings, cancel, sampling=scale, sky_mask=sky_mask
     )
-    return Preview(preview_frame, effects, scale, reduction=reduction, enlargement=enlargement)
+    diffusion = preview_diffusion(
+        frame, settings.soft, (0, 0, frame.width, frame.height), scale, sky_mask, cancel
+    )
+    return Preview(
+        preview_frame,
+        effects,
+        scale,
+        reduction=reduction,
+        enlargement=enlargement,
+        diffusion=diffusion,
+    )
 
 
 def _apply_export_source_filter(
@@ -249,6 +266,7 @@ def _apply_export_source_filter(
     settings: EffectSettings,
     cancel: Event | None,
     sky_mask: SkyMask | None,
+    diffusion: Pixels | None = None,
 ) -> None:
     """Apply original-pixel corrections in bounded strips; ``source`` starts at row ``top``."""
     sources: tuple[Star, ...] = soft_filter_sources(filter_stars(stars, sky_mask), settings.soft)
@@ -276,9 +294,11 @@ def _apply_export_source_filter(
             sky_mask=sky_mask,
             cancel=cancel,
         )
-        output[start : start + 128] += (enlargement - reduction) * (
-            1 - effects[start : start + 128]
-        )
+        rows = slice(start, start + 128)
+        correction: Pixels = enlargement - reduction
+        if diffusion is not None:
+            correction = np.maximum(correction + diffusion[rows], -source[rows])
+        output[rows] += correction * (1 - effects[rows])
 
 
 def _export_bands(
@@ -292,6 +312,11 @@ def _export_bands(
     """Yield the final linear pixels one full-width band at a time."""
     diagonal: int = image_diagonal(frame.width, frame.height)
     visible: tuple[Star, ...] = filter_stars(stars, sky_mask)
+    corrections = (
+        export_diffusion_bands(frame, settings.soft, EXPORT_BAND_ROWS, sky_mask, cancel)
+        if not effects_only and settings.soft.enabled and settings.soft.diffusion
+        else None
+    )
     for top in range(0, frame.height, EXPORT_BAND_ROWS):
         check_cancel(cancel)
         bottom: int = min(top + EXPORT_BAND_ROWS, frame.height)
@@ -308,10 +333,13 @@ def _export_bands(
             yield effects
             continue
         output: FloatArray = source + (1 - source) * effects
+        diffusion = next(corrections) if corrections is not None else None
         if settings.soft.enabled and settings.soft.soft_filter:
             _apply_export_source_filter(
-                output, effects, source, top, stars, settings, cancel, sky_mask
+                output, effects, source, top, stars, settings, cancel, sky_mask, diffusion
             )
+        elif diffusion is not None:
+            output += diffusion * (1 - effects)
         yield output
 
 

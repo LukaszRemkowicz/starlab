@@ -669,9 +669,12 @@ def read_tiff_preview(
 
 
 def _encoded_rows(
-    pixels: Pixels | Iterable[Pixels], shape: tuple[int, ...], cancel: Event | None
+    pixels: Pixels | Iterable[Pixels],
+    shape: tuple[int, ...],
+    cancel: Event | None,
+    maximum: int = 65535,
 ) -> Iterator[NDArray[np.uint16]]:
-    """Validate and encode float bands, yielding one uint16 row at a time."""
+    """Validate and encode float bands, yielding one uint16 row (codes 0..maximum) at a time."""
     bands: Iterable[Pixels] = (
         (pixels[row : row + ROWS_PER_BLOCK] for row in range(0, shape[0], ROWS_PER_BLOCK))
         if isinstance(pixels, np.ndarray)
@@ -687,7 +690,7 @@ def _encoded_rows(
             raise ValueError("Invalid output pixels.")
         for start in range(0, band.shape[0], ROWS_PER_BLOCK):
             encoded: FloatArray = linear_to_srgb(band[start : start + ROWS_PER_BLOCK])
-            block: NDArray[np.uint16] = np.rint(np.clip(encoded, 0, 1) * 65535).astype(np.uint16)
+            block: NDArray[np.uint16] = np.rint(np.clip(encoded, 0, 1) * maximum).astype(np.uint16)
             yield from (block if shape[2] == 3 else block[..., 0])
         written += band.shape[0]
     if written != shape[0]:

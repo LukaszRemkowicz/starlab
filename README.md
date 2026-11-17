@@ -8,9 +8,11 @@ file is never changed.
 The app is free for everyone under the [MIT License](LICENSE).
 
 - [What it does](#what-it-does)
+- [How it looks](#how-it-looks)
 - [Before you start](#before-you-start)
 - [Install](#install)
 - [Start the app](#start-the-app)
+- [Use it from Photoshop](#use-it-from-photoshop)
 - [Update or remove the app](#update-or-remove-the-app)
 - [Your first edit in five steps](#your-first-edit-in-five-steps)
 - [The controls](#the-controls)
@@ -39,6 +41,26 @@ The app is free for everyone under the [MIT License](LICENSE).
 - **Live preview.** See every change straight away, compare it with the
   original, and zoom in to check single pixels.
 - **Fix the detection by hand.** Move, add, hide or recolor individual stars.
+
+## How it looks
+
+The **Dramatic Diffraction** preset on a Milky Way panorama over Castillo de
+Zafra, Spain:
+
+![Star Effects Lab window with diffraction spikes added to the stars](docs/images/app-result.jpg)
+
+**Compare** shows the original on the left and the result on the right:
+
+![Compare view: original and result side by side](docs/images/app-compare.jpg)
+
+The **Sky mask** view shows where effects are allowed: blue is sky, red is
+protected foreground.
+
+![Sky mask view: sky in blue, foreground in red](docs/images/app-sky-mask.jpg)
+
+At **100%** you see real pixels, so you can judge each spike:
+
+![The Milky Way core at 100% zoom with spikes on bright stars](docs/images/app-detail.jpg)
 
 ## Before you start
 
@@ -110,10 +132,34 @@ uv run star-effects-lab 'D:\photos\night-sky.tif'
 
 On macOS, a path looks like `~/Pictures/night-sky.tif`.
 
-The first start after installing or updating prepares the app's image code in
-the background, which takes up to about a minute once. The window is usable
-straight away; a photo you open during that time simply waits for it. After that,
-finding stars usually takes about a second.
+The installation includes compiled image-processing code for your platform. You can open a photo on the first launch.
+
+## Use it from Photoshop
+
+Star Effects Lab can also run as a Photoshop filter, like other astro plug-ins.
+Choose **Filter → Star Effects Lab → Star Effects Lab…** and the active layer
+opens in the usual Star Effects Lab window. Click **Apply** to put the result
+back into the layer, or **Cancel** to leave it unchanged. The layer is passed
+through memory only; no temporary files are written.
+
+- **Repeat with Ctrl+F (Cmd+F on a Mac).** Photoshop's **Last Filter** applies
+  your last settings again without opening the window. Stars are found again on
+  the new image; stars you edited by hand are not repeated. The settings are
+  kept until you quit Photoshop.
+- **What works:** RGB or Grayscale, 8 or 16 bits per channel, the whole layer
+  or a selection. Select the composite RGB or Gray channel, not a single color
+  channel or a layer mask.
+- **In this mode** the window has **Apply** and **Cancel** instead of
+  **Export**, the old **Apply** button is called **Update preview**, and
+  opening other files is disabled.
+
+Until the installer is ready, you build the plug-in yourself from the
+`starlab` folder. You need [CMake](https://cmake.org/download/), the free
+[Photoshop Plug-In SDK](https://developer.adobe.com/console) from Adobe, and a
+C++ compiler: the Xcode Command Line Tools on a Mac
+(`xcode-select --install`) or Visual Studio Build Tools with C++ on Windows.
+The steps are in [photoshop/README.md](photoshop/README.md). Tested with
+Photoshop 2026 on macOS and Windows.
 
 ## Update or remove the app
 
@@ -182,6 +228,8 @@ to see the main sliders only. Switching between the two keeps your values.
 | **Spike sharpness**, **Spike spread** | How thin and how fanned out the spikes are. |
 | **Size** | How large the glow or ring is. |
 | **Soft filter** | Shrinks small stars and enlarges big ones, noticeably at high values (Soft Flare tab). At 0 the stars stay as they are. |
+| **Optical diffusion** | Spreads part of the original light around each bright detail. Stars keep a sharp core with wings in their own color. **Size** controls the spread. |
+| **Wide halo share** | How much of the optical diffusion goes into a wide halo instead of a narrow one. At 0% all of it stays close to the stars; at 100% it all spreads wide. |
 | **Edge falloff**, **Inner/Outer edge width and falloff** | How softly the glow or ring fades at its edges. |
 | **Color saturation**, **Color hue** | Change the effect's color. At saturation 0 each effect keeps its star's natural color. |
 | **Rainbow intensity**, **frequency**, **phase** | Add a rainbow tint along the spikes and control how it repeats. |
@@ -193,6 +241,13 @@ changes the glow. So you can use Soft filter on its own: set **Intensity** to 0
 in **Soft Flare** and keep **Soft filter** above 0. With **Quantity** at 0 it
 changes no stars. Turning off the whole **Soft Flare** tab also
 turns Soft filter off.
+
+For a night-sky diffusion filter look, enable **Soft Flare**, set **Intensity**
+and **Soft filter** to 0, then try **Optical diffusion** at 50 and **Size** at 12.
+Disable the spike and ring groups to see the glass effect alone. Use **Compare**
+at 100% zoom to judge the glow around a bright star and the nearby faint stars.
+Optical diffusion is included in the composite TIFF. The effects-only TIFF
+contains the synthetic emission layers.
 
 ## Viewing your image
 
@@ -294,11 +349,6 @@ done in your photo editor:
 
 **The window is black or the app closes right after starting.**
 Update your graphics card driver. The preview needs OpenGL 3.3.
-
-**Finding stars takes up to a minute the first time.**
-This happens once after installing or updating, while the app prepares its image
-code in the background. Later, detection usually takes about a second. Large
-panoramas need more time and memory, so close other memory-hungry programs.
 
 **The app says it cannot start because of log files.**
 The app always writes a log and refuses to start if it cannot. Check that the

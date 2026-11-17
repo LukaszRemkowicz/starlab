@@ -591,10 +591,11 @@ wheels = [
 
 [[package]]
 name = "star-effects-lab"
-version = "0.1.0"
+version = "0.2.0"
 source = { editable = "." }
 dependencies = [
     { name = "imagecodecs" },
+    { name = "llvmlite" },
     { name = "numba" },
     { name = "numpy" },
     { name = "opencv-python-headless" },
@@ -616,8 +617,9 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "imagecodecs", specifier = ">=2025.3" },
-    { name = "numba", specifier = ">=0.68,<0.69" },
-    { name = "numpy", specifier = ">=2.2,<3" },
+    { name = "llvmlite", specifier = "==0.50.0" },
+    { name = "numba", specifier = "==0.68.1" },
+    { name = "numpy", specifier = "==2.5.4" },
     { name = "opencv-python-headless", specifier = ">=4.13,<6" },
     { name = "pillow", specifier = ">=11,<13" },
     { name = "pyside6", specifier = ">=6.8,<7" },

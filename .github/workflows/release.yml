@@ -1,0 +1,12 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  tag-main:
+    uses: LukaszRemkowicz/ci-cd/.github/workflows/pyproject-release-tag.yml@main

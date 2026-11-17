@@ -1,6 +1,7 @@
 import sys
 import tempfile
 from pathlib import Path
+from threading import Event, Timer
 
 import pytest
 
@@ -57,6 +58,26 @@ def test_background_preparation_process_succeeds(tmp_path, caplog):
     assert "Background preparation" not in caplog.text
 
 
+def test_interrupted_preparation_reuses_completed_kernels(tmp_path, monkeypatch):
+    from starlab import preparation
+    from starlab.application import warmup
+
+    cleared = []
+    monkeypatch.setattr(preparation, "clear_compiled_code", lambda: cleared.append(True))
+
+    def interrupted(*args):
+        raise InterruptedError
+
+    monkeypatch.setattr(warmup, "warm_up", interrupted)
+    stamp = tmp_path / "prepared-code"
+    with pytest.raises(InterruptedError):
+        preparation.prepare(stamp)
+    monkeypatch.setattr(warmup, "warm_up", lambda *args: 0)
+    preparation.prepare(stamp)
+    assert cleared == [True]
+    assert stamp.read_text() == preparation.code_signature()
+
+
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows watches the parent PID instead")
 def test_background_preparation_stops_when_the_app_goes_away(tmp_path, monkeypatch):
     from starlab.bootstrap import start_preparation
@@ -78,6 +99,44 @@ def test_failed_background_preparation_is_logged(tmp_path, monkeypatch, caplog):
     assert "exit code 3" in caplog.text and str(log) in caplog.text
 
 
+def test_detection_can_start_while_remaining_layouts_are_preparing(tmp_path, monkeypatch):
+    from starlab import bootstrap
+
+    monkeypatch.setattr(
+        bootstrap, "PREPARE", "import sys; print('ready', flush=True); sys.stdin.read()"
+    )
+    process, ready = bootstrap.start_preparation(tmp_path / "preparation.log")
+    cancel = Event()
+    timer = Timer(4, cancel.set)
+    timer.start()
+    try:
+        ready(cancel)
+        assert process.poll() is None
+    finally:
+        timer.cancel()
+        process.stdin.close()
+        process.wait(timeout=5)
+
+
+@pytest.mark.parametrize("folder", ["domain/detection", "domain/effects", "infrastructure"])
+def test_ui_edits_preserve_detector_cache_but_shared_math_invalidates_it(
+    tmp_path, monkeypatch, folder
+):
+    from starlab import preparation
+
+    monkeypatch.setattr(preparation, "PACKAGE", tmp_path)
+    ui = tmp_path / "presentation" / "qt" / "controls.py"
+    helper = tmp_path / folder / "numeric.py"
+    for path in (ui, helper):
+        path.parent.mkdir(parents=True)
+        path.write_text("value = 1")
+    signature = preparation.code_signature()
+    ui.write_text("value = 2")
+    assert preparation.code_signature() == signature
+    helper.write_text("value = 2")
+    assert preparation.code_signature() != signature
+
+
 def test_unwritable_preparation_log_raises(tmp_path):
     from starlab.bootstrap import start_preparation
 
@@ -91,8 +150,8 @@ def test_new_build_clears_stale_compiled_code(tmp_path, monkeypatch):
     from starlab import preparation
 
     cache = tmp_path / "cache"
-    stale = cache / "Users" / "starlab" / "domain" / "kernel.f-1.py314.nbi"
-    other = cache / "Users" / "otherapp" / "kernel.f-1.py314.nbi"
+    stale = cache / preparation.cache_folder("domain") / "kernel.f-1.py314.nbi"
+    other = cache / "starlab_other_checkout" / "kernel.f-1.py314.nbi"
     for path in (stale, other):
         path.parent.mkdir(parents=True)
         path.write_bytes(b"old machine code")

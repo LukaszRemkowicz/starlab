@@ -64,6 +64,8 @@ class Controller(QObject):
         self.window, self.services = window, services
         self.load_preset, self.save_preset = load_preset, save_preset
         self.session = Session()
+        # Photoshop mode: remembers the settings of an applied result for "Last Filter".
+        self.store_settings: Callable[[DetectionSettings, EffectSettings], None] | None = None
         self.source: Path | None = None
         self.preview: Preview | None = None
         self.overview: Preview | None = None
@@ -147,19 +149,26 @@ class Controller(QObject):
         )
 
     def open_path(self, path: str | Path) -> None:
+        """Open a user-chosen file; Photoshop mode edits one fixed layer and refuses others."""
+        if not self.window.bridge_mode:
+            self._open(Path(path))
+
+    def open_layer(self) -> None:
+        """Open the Photoshop layer; the reader ignores this placeholder path."""
+        self._open(Path("Photoshop layer"))
+
+    def _open(self, path: Path) -> None:
         """Read an image asynchronously while retaining the current document until commit."""
         if self.exclusive:
             return
         self.debounce.stop()
         self.mask_preview = None
         self.window.show_error("")
-        path = Path(path)
-        settings: EffectSettings = self.session.settings
 
         def read(cancel: Event) -> OpenResult:
             """Decode a full image and construct its initial effect-free overview."""
             frame, mask = self.services.open_image(path, cancel)
-            preview: Preview = render_preview(frame, (), settings, cancel)
+            preview: Preview = render_preview(frame, (), EffectSettings.disabled(), cancel)
             return OpenResult(path, frame, preview, mask)
 
         self.activity("open")
@@ -257,6 +266,8 @@ class Controller(QObject):
             case "export":
                 self.saved_message = f"Saved: {result}"
                 self.window.status_text.setText(self.saved_message)
+                if self.window.bridge_mode:
+                    self.window.close()  # the result is in the plug-in's block; hand control back
 
     def _complete_open_preview(
         self,
@@ -293,7 +304,9 @@ class Controller(QObject):
         mask: SkyMask | None,
     ) -> None:
         """Commit a fully decoded document, then prepare its detection and effects."""
-        self.source, self.preview, self.overview = path, preview, preview
+        # No encoded file exists in Photoshop mode, so masks and export must never see a path.
+        self.source = None if self.window.bridge_mode else path
+        self.preview, self.overview = preview, preview
         self.detail_region = None
         self.session.open(frame)
         if mask is not None:
@@ -582,6 +595,7 @@ class Controller(QObject):
             preview.effects,
             reduction=preview.reduction,
             enlargement=preview.enlargement,
+            diffusion=preview.diffusion,
         )
         if self.window.mode == "compare":
             result = result.copy()
@@ -674,6 +688,10 @@ class Controller(QObject):
 
     def _enabled_preview(self, preview: Preview) -> Preview:
         """Remove newly disabled groups and source corrections from a retained preview."""
+        if preview.diffusion is not None and (
+            not self.session.settings.soft.enabled or not self.session.settings.soft.diffusion
+        ):
+            preview = replace(preview, diffusion=None)
         if (preview.reduction is not None or preview.enlargement is not None) and (
             not self.session.settings.soft.enabled or not self.session.settings.soft.soft_filter
         ):
@@ -817,10 +835,15 @@ class Controller(QObject):
             self.source,
             self.session.sky_mask,
         )
+        detection: DetectionSettings = self.session.detection_settings or DetectionSettings(
+            sky_only=sky_mask is not None
+        )
         self.window.show_error("")
 
         def export(cancel: Event) -> Path:
             """Export the captured session snapshot without accessing mutable GUI state."""
+            if self.store_settings is not None:
+                self.store_settings(detection, settings)  # before the pixels publish status 1
             self.services.export(
                 target_path, frame, stars, settings, effects_only, source, cancel, sky_mask=sky_mask
             )
@@ -897,6 +920,7 @@ class Controller(QObject):
             groups={},
             reduction=None,
             enlargement=None,
+            diffusion=None,
         )
         self.preview = self.overview
         frame: ImageFrame | None = self.session.frame
