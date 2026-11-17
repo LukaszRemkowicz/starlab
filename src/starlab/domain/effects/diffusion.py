@@ -10,15 +10,35 @@ import numpy as np
 
 from ..array_types import Bounds
 from ..imaging import ImageFrame, Pixels, check_cancel
-from ..sky_mask import SkyMask
+from ..sky_mask import FOREGROUND, SkyMask
 from .settings import EffectParameters
 
 
-def _blur(pixels: Pixels, sigma: float) -> Pixels:
+def _blur(pixels: Pixels, sigma: float, rows: slice, cols: slice) -> Pixels:
     radius: int = math.ceil(3 * sigma)
     kernel: int = 2 * radius + 1
-    blurred = cv2.GaussianBlur(pixels, (kernel, kernel), sigma, borderType=cv2.BORDER_REFLECT)
-    return cast(Pixels, blurred.reshape(pixels.shape))
+    if rows.step < 4:
+        blurred = cv2.GaussianBlur(pixels, (kernel, kernel), sigma, borderType=cv2.BORDER_REFLECT)
+        return cast(Pixels, blurred.reshape(pixels.shape)[rows, cols])
+
+    # A zoomed-out preview only needs selected output rows. Apply the same
+    # separable Gaussian to those rows, retaining every contributing input pixel.
+    weights = cv2.getGaussianKernel(kernel, sigma, cv2.CV_32F).ravel()
+    height, width, channels = pixels.shape
+    centers = np.arange(rows.start, rows.stop, rows.step)
+    taps = (centers[:, None] + np.arange(-radius, radius + 1)) % (2 * height)
+    taps = np.minimum(taps, 2 * height - 1 - taps)
+    start, stop = int(taps.min()), int(taps.max()) + 1
+    matrix = np.zeros((len(centers), stop - start), np.float32)
+    np.add.at(matrix, (np.arange(len(centers))[:, None], taps - start), weights)
+    vertical = (matrix @ pixels[start:stop].reshape(stop - start, width * channels)).reshape(
+        len(centers), width, channels
+    )
+    # Reflect only at the patch edge. Its halo covers the entire native kernel.
+    planar = np.ascontiguousarray(vertical.transpose(0, 2, 1))
+    padded = np.pad(planar, ((0, 0), (0, 0), (radius, radius)), mode="symmetric")
+    neighbors = np.lib.stride_tricks.sliding_window_view(padded, kernel, axis=2)[:, :, cols]
+    return cast(Pixels, np.einsum("ycxk,k->ycx", neighbors, weights).transpose(0, 2, 1))
 
 
 def _diffuse_band(
@@ -36,18 +56,25 @@ def _diffuse_band(
     original: Pixels = patch[rows, cols]
     mask: Pixels | None = None
     if sky_mask is not None:
-        allowed = sky_mask.region((x, y, end_x, end_y))
-        if not allowed[rows, cols].any():
+        cell = sky_mask.cell_px
+        cells = sky_mask.classes[
+            y // cell : (end_y - 1) // cell + 1, x // cell : (end_x - 1) // cell + 1
+        ]
+        if cells.max() == FOREGROUND:
             empty = np.zeros_like(original)
             return empty, empty
-        if not allowed.all():
+        if cells.min() == FOREGROUND:
+            allowed = sky_mask.region((x, y, end_x, end_y))
+            if not allowed[rows, cols].any():
+                empty = np.zeros_like(original)
+                return empty, empty
             mask = allowed.astype(np.float32)[..., None]
-            patch = patch * mask
+            patch = cast(Pixels, cv2.copyTo(patch, allowed.view(np.uint8)).reshape(patch.shape))
 
     def wing(width: float) -> Pixels:
-        incoming: Pixels = _blur(patch, width)[rows, cols]
+        incoming: Pixels = _blur(patch, width, rows, cols)
         # Only exchange light between eligible pixels, in both directions.
-        outgoing: Pixels = original if mask is None else original * _blur(mask, width)[rows, cols]
+        outgoing: Pixels = original if mask is None else original * _blur(mask, width, rows, cols)
         delta = incoming - outgoing
         if mask is not None:
             delta *= mask[rows, cols]

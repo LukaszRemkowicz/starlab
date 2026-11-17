@@ -154,12 +154,11 @@ class Controller(QObject):
         self.mask_preview = None
         self.window.show_error("")
         path = Path(path)
-        settings: EffectSettings = self.session.settings
 
         def read(cancel: Event) -> OpenResult:
             """Decode a full image and construct its initial effect-free overview."""
             frame, mask = self.services.open_image(path, cancel)
-            preview: Preview = render_preview(frame, (), settings, cancel)
+            preview: Preview = render_preview(frame, (), EffectSettings.disabled(), cancel)
             return OpenResult(path, frame, preview, mask)
 
         self.activity("open")

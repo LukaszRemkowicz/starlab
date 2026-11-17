@@ -75,6 +75,22 @@ def test_mask_protects_both_sides_of_the_horizon_and_preserves_flat_sky():
     np.testing.assert_allclose(displayed(preview), pixels, atol=1e-7)
 
 
+@pytest.mark.parametrize("channels", [1, 3])
+def test_sampled_masked_wings_match_native_at_crop_and_frame_edges(channels):
+    pixels = np.random.default_rng(3).random((455, 379, channels), dtype=np.float32)
+    mask = SkyMask(
+        1, (np.indices(pixels.shape[:2]).sum(axis=0) > 140).astype(np.uint8), pixels.shape[:2]
+    )
+    frame = ImageFrame(pixels)
+    settings = optical_settings(90)
+    settings = replace(settings, soft=replace(settings.soft, size=100))
+    full = render_preview(frame, (), settings, sky_mask=mask)
+    crop = render_preview(
+        frame, (), settings, sky_mask=mask, region=(7, 0, 379, 455), region_sampling=9
+    )
+    np.testing.assert_allclose(crop.diffusion, full.diffusion[::9, 7::9], atol=6e-7)
+
+
 def test_older_presets_default_to_clear_glass():
     data = preset_data(optical_settings(66))
     assert parse_preset(data).soft.diffusion == 66

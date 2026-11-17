@@ -125,7 +125,12 @@ class SkyMask:
         columns: IntArray = np.clip(
             np.arange(left, right, sampling) // self.cell_px, 0, self.classes.shape[1] - 1
         ).astype(np.int64)
-        return self.classes[np.ix_(rows, columns)]
+        # Expand each distinct cell row horizontally before duplicating pixel rows.
+        # The row indices are monotonic even when the requested bounds are clipped.
+        if sampling >= self.cell_px or not len(rows):
+            return self.classes[np.ix_(rows, columns)]
+        first, last = int(rows[0]), int(rows[-1])
+        return self.classes[first : last + 1].take(columns, axis=1).take(rows - first, axis=0)
 
     def region(self, bounds: Bounds, sampling: int = 1) -> BoolArray:
         """Return the sky/unknown keep plane on a sampled image region."""
