@@ -78,7 +78,26 @@ You need:
 
 ## Install
 
-Star Effects Lab does not have an installer yet. You install it with
+Download the installer for your system from the
+[latest release](https://github.com/LukaszRemkowicz/starlab/releases/latest).
+It contains the app and the Photoshop filter; you do not need Python or
+anything else.
+
+- **Windows (64-bit):** run `StarEffectsLab-<version>-Windows-x64-Setup.exe`.
+  The installer is not signed, so Windows SmartScreen may warn you. Click
+  **More info → Run anyway**. Leave **Photoshop filter** ticked if you use
+  Photoshop.
+- **macOS (Apple Silicon, M1 or newer):** open
+  `StarEffectsLab-<version>-macOS-arm64.pkg`. The package is not signed, so
+  macOS may refuse to open it. Then open **System Settings → Privacy &
+  Security**, scroll down and click **Open Anyway**. Intel Macs are not
+  supported by the installer; use the steps below.
+
+The app appears as **Star Effects Lab** in the Start menu or in Applications.
+
+### Install from source
+
+To run the newest development version, or on Linux, install it with
 [uv](https://docs.astral.sh/uv/), a small tool that downloads the right Python
 version and everything else the app needs. You do not have to install Python
 yourself.
@@ -118,7 +137,10 @@ yourself.
 
 ## Start the app
 
-From the `starlab` folder, run:
+If you used the installer, start **Star Effects Lab** like any other app and
+drag a TIFF into its window.
+
+From source, run this in the `starlab` folder:
 
 ```powershell
 uv run star-effects-lab
@@ -153,7 +175,8 @@ through memory only; no temporary files are written.
   **Export**, the old **Apply** button is called **Update preview**, and
   opening other files is disabled.
 
-Until the installer is ready, you build the plug-in yourself from the
+The installer adds the filter for you; restart Photoshop afterwards. If you
+installed from source, you build the plug-in yourself from the
 `starlab` folder. You need [CMake](https://cmake.org/download/), the free
 [Photoshop Plug-In SDK](https://developer.adobe.com/console) from Adobe, and a
 C++ compiler: the Xcode Command Line Tools on a Mac
@@ -163,7 +186,14 @@ Photoshop 2026 on macOS and Windows.
 
 ## Update or remove the app
 
-To update, open PowerShell or Terminal in the `starlab` folder and run:
+**Installer:** to update, run the installer of the new version. To remove the
+app on Windows, use **Settings → Apps → Installed apps → Star Effects Lab →
+Uninstall**. On macOS, delete **Star Effects Lab** from Applications and the
+folder `/Library/Application Support/Adobe/Plug-Ins/CC/Star Effects Lab`.
+Your settings and logs stay in the app's data folder (listed under
+[Troubleshooting](#troubleshooting)); delete it too if you want.
+
+**From source:** to update, open PowerShell or Terminal in the `starlab` folder and run:
 
 ```powershell
 git pull
