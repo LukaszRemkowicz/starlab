@@ -13,15 +13,25 @@ $repo = Split-Path $here -Parent
 $stage = Join-Path $here "build"
 $app = Join-Path $stage "app"
 $py = Join-Path $app "python"
-if (-not $Sdk) { $Sdk = Join-Path $repo "photoshop\sdk\win" }
+# The SDK headers are the same for both systems: use whichever copy is present.
+if (-not $Sdk) { $Sdk = @("win", "mac") | ForEach-Object { Join-Path $repo "photoshop\sdk\$_" } | Where-Object { Test-Path $_ } | Select-Object -First 1 }
 $ver = ((Select-String -Path (Join-Path $repo "pyproject.toml") -Pattern '^version\s*=\s*"(.*)"')[0]).Matches[0].Groups[1].Value
+# cmake ships with VS Build Tools but is not on PATH outside a developer prompt.
+if (-not (Get-Command cmake -ErrorAction SilentlyContinue)) {
+    $vswhere = "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe"
+    $cmake = if (Test-Path $vswhere) { & $vswhere -latest -products * -find "**\CMake\bin\cmake.exe" | Select-Object -First 1 }
+    if (-not $cmake) { throw "cmake not found: install CMake or the C++ CMake tools of VS Build Tools" }
+    $env:PATH = (Split-Path $cmake) + ";" + $env:PATH
+}
 # Windows PowerShell 5.1 turns native stderr into errors under "Stop" when output is redirected: relax it for native calls.
 function Run {
+    if (-not (Get-Command $args[0] -ErrorAction SilentlyContinue)) { throw "not found: $($args[0])" }
     $ErrorActionPreference = "Continue"
     & $args[0] $args[1..($args.Count - 1)]
     if ($LASTEXITCODE) { throw "failed: $args" }
 }
 function Capture {
+    if (-not (Get-Command $args[0] -ErrorAction SilentlyContinue)) { throw "not found: $($args[0])" }
     $ErrorActionPreference = "Continue"
     $r = & $args[0] $args[1..($args.Count - 1)] 2>$null
     if ($LASTEXITCODE) { throw "failed: $args" }
