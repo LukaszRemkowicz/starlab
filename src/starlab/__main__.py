@@ -12,6 +12,7 @@ from threading import Event
 from typing import TYPE_CHECKING
 
 from PySide6.QtCore import QStandardPaths
+from PySide6.QtGui import QColorSpace, QSurfaceFormat
 from PySide6.QtWidgets import QApplication, QMessageBox
 
 from .infrastructure.desktop_identity import set_process_identity
@@ -145,6 +146,10 @@ def main() -> int:
     )
     args: argparse.Namespace = parser.parse_args()
     set_process_identity(APPLICATION_ID)
+    # Previews hold sRGB pixels; tag windows so wide-gamut displays (Display P3) convert them.
+    surface: QSurfaceFormat = QSurfaceFormat.defaultFormat()
+    surface.setColorSpace(QColorSpace(QColorSpace.NamedColorSpace.SRgb))
+    QSurfaceFormat.setDefaultFormat(surface)
     app: QApplication = QApplication(sys.argv[:1])
     configure_application(app)
     data: Path = Path(
