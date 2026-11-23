@@ -1,11 +1,12 @@
 #!/usr/bin/env bash
-# Build dist/Star Effects Lab <ver>.pkg (arm64, unsigned) from a clean checkout.
+# Build dist/StarEffectsLab-<ver>-macOS-arm64.pkg (arm64, unsigned) from a clean checkout.
 # Needs: uv, cmake, Xcode CLT, Photoshop SDK in photoshop/sdk/mac.
 set -euo pipefail
 
 here="$(cd "$(dirname "$0")" && pwd)"
 repo="$(dirname "$here")"
-stage="$here/build"
+# Build outside the home folder: tools record build paths (script shebangs, bytecode, compiled kernels).
+stage="/tmp/star-effects-lab-build"
 app="$stage/Star Effects Lab.app"
 res="$app/Contents/Resources"
 ver="$(sed -n 's/^version *= *"\(.*\)"/\1/p' "$repo/pyproject.toml" | head -1)"
@@ -16,9 +17,10 @@ cd "$repo"
 rm -rf "$stage"; mkdir -p "$stage" "$app/Contents/MacOS" "$res"
 
 echo "== wheel"
-rm -f dist/star_effects_lab-*.whl
-uv build --wheel
-wheel="$(ls dist/star_effects_lab-*.whl)"
+src="$stage/source"; mkdir -p "$src"
+rsync -a --exclude __pycache__ pyproject.toml hatch_build.py LICENSE src "$src/"
+UV_CACHE_DIR="$stage/uv-cache" uv build --wheel --directory "$src"   # kernels record their build env path
+wheel="$(ls "$src"/dist/star_effects_lab-*.whl)"
 
 echo "== bundled Python"
 uv python install 3.14
@@ -26,6 +28,8 @@ pyhome="$("$(uv python find --no-project --managed-python 3.14)" -c 'import sys;
 [ -f "$pyhome/lib/libpython3.14.dylib" ] || { echo "libpython missing in $pyhome" >&2; exit 1; }
 ditto --noextattr --noqtn "$pyhome" "$res/python"
 install_name_tool -id @rpath/libpython3.14.dylib "$res/python/lib/libpython3.14.dylib"
+# uv rewrote the build config to its own folder in the home directory; put back the neutral default.
+perl -pi -e "s#\Q$pyhome\E#/install#g" "$res"/python/lib/python3.14/_sysconfigdata_*.py
 rm -f "$res/python/EXTERNALLY-MANAGED" "$res/python/lib/python3.14/EXTERNALLY-MANAGED"
 # The app only uses PySide6 essentials: skip addons/webengine/pdf (~330 MB). The export is the full
 # locked closure, so --no-deps installs exactly the locked versions.
@@ -71,6 +75,6 @@ pkgbuild --root "$pay/app" --component-plist "$stage/app.plist" --identifier "$b
 pkgbuild --root "$pay/plugin" --identifier "$bundle_id.plugin" --version "$ver" \
     --install-location "/Library/Application Support/Adobe/Plug-Ins/CC" "$stage/plugin.pkg"
 sed "s/@VERSION@/$ver/g" "$here/distribution.xml.in" > "$stage/distribution.xml"
-out="$repo/dist/Star Effects Lab $ver.pkg"
+out="$repo/dist/StarEffectsLab-$ver-macOS-arm64.pkg"
 productbuild --distribution "$stage/distribution.xml" --package-path "$stage" "$out"
 echo; echo "Built: $out ($(du -h "$out" | cut -f1))"

@@ -1,4 +1,4 @@
-# Build dist\Star Effects Lab <ver> Setup.exe (x64, unsigned). Run from anywhere; needs uv, cmake (VS Build Tools),
+# Build dist\StarEffectsLab-<ver>-Windows-x64-Setup.exe (x64, unsigned). Run from anywhere; needs uv, cmake (VS Build Tools),
 # Inno Setup 6 (ISCC) and the Photoshop SDK headers.
 # Usage: installer\build-windows.ps1 [-Sdk DIR] [-Iscc PATH]
 param(
@@ -10,7 +10,8 @@ $ErrorActionPreference = "Stop"
 
 $here = $PSScriptRoot
 $repo = Split-Path $here -Parent
-$stage = Join-Path $here "build"
+# Build outside the home folder: tools record build paths (script launchers, bytecode, compiled kernels).
+$stage = Join-Path $env:PUBLIC "star-effects-lab-build"
 $app = Join-Path $stage "app"
 $py = Join-Path $app "python"
 # The SDK headers are the same for both systems: use whichever copy is present.
@@ -43,9 +44,14 @@ if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
 New-Item -ItemType Directory -Force $app | Out-Null
 
 Write-Host "== wheel"
-Get-ChildItem dist -Filter "star_effects_lab-*.whl" -ErrorAction SilentlyContinue | Remove-Item
-Run uv build --wheel
-$wheel = (Get-ChildItem dist -Filter "star_effects_lab-*.whl")[0].FullName
+$src = Join-Path $stage "source"
+New-Item -ItemType Directory -Force $src | Out-Null
+Copy-Item pyproject.toml, hatch_build.py, LICENSE, src $src -Recurse
+Get-ChildItem $src -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
+$env:UV_CACHE_DIR = Join-Path $stage "uv-cache"   # kernels record their build env path
+Run uv build --wheel --directory $src
+Remove-Item Env:UV_CACHE_DIR
+$wheel = (Get-ChildItem (Join-Path $src "dist") -Filter "star_effects_lab-*.whl")[0].FullName
 
 Write-Host "== bundled Python"
 Run uv python install 3.14
@@ -81,5 +87,5 @@ $plugin = Join-Path $repo "photoshop\build\Release\StarEffectsLab.8bf"
 Write-Host "== setup"
 $out = Join-Path $repo "dist"
 Run $Iscc "/DAppVersion=$ver" "/DStageDir=$app" "/DPluginFile=$plugin" "/DOutDir=$out" "/DIconFile=$ico" (Join-Path $here "windows\star-effects-lab.iss")
-$setup = Join-Path $out "Star Effects Lab $ver Setup.exe"
+$setup = Join-Path $out "StarEffectsLab-$ver-Windows-x64-Setup.exe"
 "`nBuilt: $setup ({0:N1} MB)" -f ((Get-Item $setup).Length / 1MB)

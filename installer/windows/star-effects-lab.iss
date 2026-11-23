@@ -17,7 +17,7 @@ UninstallDisplayIcon={app}\{#AppName}.exe
 Compression=lzma2/ultra
 SolidCompression=yes
 OutputDir={#OutDir}
-OutputBaseFilename={#AppName} {#AppVersion} Setup
+OutputBaseFilename=StarEffectsLab-{#AppVersion}-Windows-x64-Setup
 WizardStyle=modern
 
 [Components]

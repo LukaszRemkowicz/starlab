@@ -1,8 +1,11 @@
 # Packaging and installers
 
-Star Effects Lab is currently installed with `uv sync` and started with
-`uv run star-effects-lab`. Native installers for Windows and macOS are planned.
-This page records the requirements those installers must meet.
+Star Effects Lab ships as a Windows installer and a macOS package, attached to each
+GitHub release, and can still be installed from source with `uv sync`. Both
+installers are built by hand with `installer/build-macos.sh` and
+`installer/build-windows.ps1`, because the Photoshop SDK may not be stored in the
+repository or CI. The version comes from `pyproject.toml` only. Neither installer
+is signed. This page records the requirements the installers must meet.
 
 ## First launch
 
