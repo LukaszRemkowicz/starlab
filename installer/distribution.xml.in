@@ -1,0 +1,18 @@
+<?xml version="1.0" encoding="utf-8"?>
+<installer-gui-script minSpecVersion="2">
+  <title>Star Effects Lab @VERSION@</title>
+  <options customize="allow" require-scripts="false" hostArchitectures="arm64"/>
+  <domains enable_anywhere="false" enable_localSystem="true"/>
+  <choices-outline>
+    <line choice="app"/>
+    <line choice="plugin"/>
+  </choices-outline>
+  <choice id="app" title="Star Effects Lab" description="The desktop application (Apple silicon).">
+    <pkg-ref id="app.pkg"/>
+  </choice>
+  <choice id="plugin" title="Photoshop filter" description="Adds Filter &gt; Star Effects Lab to Photoshop (restart Photoshop afterwards).">
+    <pkg-ref id="plugin.pkg"/>
+  </choice>
+  <pkg-ref id="app.pkg">app.pkg</pkg-ref>
+  <pkg-ref id="plugin.pkg">plugin.pkg</pkg-ref>
+</installer-gui-script>

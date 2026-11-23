@@ -24,3 +24,5 @@ photoshop/sdk/
 
 # Photoshop plug-in build output
 photoshop/build/
+installer/build/
+.DS_Store

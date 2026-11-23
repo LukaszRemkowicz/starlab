@@ -1,0 +1,75 @@
+# Build dist\Star Effects Lab <ver> Setup.exe (x64, unsigned). Run from anywhere; needs uv, cmake (VS Build Tools),
+# Inno Setup 6 (ISCC) and the Photoshop SDK headers.
+# Usage: installer\build-windows.ps1 [-Sdk DIR] [-Iscc PATH]
+param(
+    [string]$Sdk = "",
+    [string]$Iscc = "$env:LOCALAPPDATA\Programs\Inno Setup 6\ISCC.exe"
+)
+Set-StrictMode -Version Latest
+$ErrorActionPreference = "Stop"
+
+$here = $PSScriptRoot
+$repo = Split-Path $here -Parent
+$stage = Join-Path $here "build"
+$app = Join-Path $stage "app"
+$py = Join-Path $app "python"
+if (-not $Sdk) { $Sdk = Join-Path $repo "photoshop\sdk\win" }
+$ver = ((Select-String -Path (Join-Path $repo "pyproject.toml") -Pattern '^version\s*=\s*"(.*)"')[0]).Matches[0].Groups[1].Value
+# Windows PowerShell 5.1 turns native stderr into errors under "Stop" when output is redirected: relax it for native calls.
+function Run {
+    $ErrorActionPreference = "Continue"
+    & $args[0] $args[1..($args.Count - 1)]
+    if ($LASTEXITCODE) { throw "failed: $args" }
+}
+function Capture {
+    $ErrorActionPreference = "Continue"
+    $r = & $args[0] $args[1..($args.Count - 1)] 2>$null
+    if ($LASTEXITCODE) { throw "failed: $args" }
+    $r
+}
+
+Set-Location $repo
+if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
+New-Item -ItemType Directory -Force $app | Out-Null
+
+Write-Host "== wheel"
+Get-ChildItem dist -Filter "star_effects_lab-*.whl" -ErrorAction SilentlyContinue | Remove-Item
+Run uv build --wheel
+$wheel = (Get-ChildItem dist -Filter "star_effects_lab-*.whl")[0].FullName
+
+Write-Host "== bundled Python"
+Run uv python install 3.14
+$pyhome = (Capture uv run --no-project --managed-python --python 3.14 python -I -c "import sys; print(sys.base_prefix)").Trim()
+if (-not (Test-Path (Join-Path $pyhome "python314.dll"))) { throw "python314.dll missing in $pyhome" }
+Copy-Item $pyhome $py -Recurse
+Remove-Item (Join-Path $py "EXTERNALLY-MANAGED"), (Join-Path $py "Lib\EXTERNALLY-MANAGED") -ErrorAction SilentlyContinue
+# The app only uses PySide6 essentials: skip addons/webengine/pdf. The export is the full locked closure,
+# so --no-deps installs exactly the locked versions.
+(Capture uv export --no-dev --no-hashes --no-emit-project) |
+    Where-Object { $_ -notmatch '^pyside6[-_](addons|webengine|pdf)' } |
+    Set-Content (Join-Path $stage "requirements.txt") -Encoding ascii
+Run uv pip install --python (Join-Path $py "python.exe") --no-deps --break-system-packages `
+    -r (Join-Path $stage "requirements.txt") $wheel
+Get-ChildItem (Join-Path $py "Lib\site-packages\PySide6") -Include designer.exe, assistant.exe, linguist.exe -Recurse -ErrorAction SilentlyContinue | Remove-Item
+Get-ChildItem $py -Recurse -Directory -Filter __pycache__ | Remove-Item -Recurse -Force
+# Program Files is not writable for users: ship bytecode. Exit status ignored (stdlib has deliberately broken test files).
+try { & cmd /c "`"$py\python.exe`" -I -m compileall -q -j 4 `"$py\Lib`" >nul 2>&1" } catch {}
+
+Write-Host "== launcher"
+$ico = Join-Path $repo "src\starlab\presentation\qt\assets\application.ico"
+Run cmake -S (Join-Path $here "launcher") -B (Join-Path $stage "launcher") -A x64 "-DPYTHON_HOME=$py" "-DICON_FILE=$ico"
+Run cmake --build (Join-Path $stage "launcher") --config Release
+Copy-Item (Join-Path $stage "launcher\Release\Star Effects Lab.exe") $app
+
+Write-Host "== plug-in"
+Run powershell -NoProfile -ExecutionPolicy Bypass -File (Join-Path $repo "photoshop\build.ps1") -Sdk $Sdk `
+    -App "C:\Program Files\Star Effects Lab\Star Effects Lab.exe"
+# build.ps1 only self-tests against a dev .venv; test against the bundled runtime instead (from $repo: see build.ps1).
+Run (Join-Path $repo "photoshop\build\Release\bridge_selftest.exe") (Join-Path $py "python.exe")
+$plugin = Join-Path $repo "photoshop\build\Release\StarEffectsLab.8bf"
+
+Write-Host "== setup"
+$out = Join-Path $repo "dist"
+Run $Iscc "/DAppVersion=$ver" "/DStageDir=$app" "/DPluginFile=$plugin" "/DOutDir=$out" "/DIconFile=$ico" (Join-Path $here "windows\star-effects-lab.iss")
+$setup = Join-Path $out "Star Effects Lab $ver Setup.exe"
+"`nBuilt: $setup ({0:N1} MB)" -f ((Get-Item $setup).Length / 1MB)
