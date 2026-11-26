@@ -18,13 +18,13 @@ bundle_id="com.starlab.StarEffectsLab"   # branding.py APPLICATION_ID is not rev
 app_id="${SIGN_APP-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application[^"]*\)".*/\1/p' | head -1)}"
 pkg_id="${SIGN_PKG-$(security find-identity -v | sed -n 's/.*"\(Developer ID Installer[^"]*\)".*/\1/p' | head -1)}"
 notary="${NOTARY_PROFILE:-starlab-notary}"
-# Sign inside out (loose Mach-O files, frameworks, then the bundle): notarization checks every binary.
+# Sign every Mach-O file, then the bundle: notarization checks every binary. PySide6 wheels ship flattened
+# frameworks (no symlinks), so signing a .framework folder would seal only its Info.plist: sign the binaries.
 sign() {
     if [ -z "$app_id" ]; then codesign --force --deep -s - "$1"; return; fi
     local opts=(--force --timestamp --options runtime --entitlements "$here/entitlements.plist" -s "$app_id")
-    find "$1" -type f ! -path "*.framework/*" -print0 | xargs -0 file | grep ': .*Mach-O' | sed 's/: .*//' \
+    find "$1" -type f -print0 | xargs -0 file | grep ': .*Mach-O' | sed 's/: .*//' \
         | tr '\n' '\0' | xargs -0 -n 20 -P 8 codesign "${opts[@]}"
-    find "$1" -type d -name "*.framework" -prune -print0 | xargs -0 -n 20 -P 8 codesign "${opts[@]}"
     codesign "${opts[@]}" "$1"
     codesign --verify --deep --strict "$1"
 }
