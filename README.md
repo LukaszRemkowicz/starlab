@@ -88,10 +88,9 @@ anything else.
   **More info → Run anyway**. Leave **Photoshop filter** ticked if you use
   Photoshop.
 - **macOS (Apple Silicon, M1 or newer):** open
-  `StarEffectsLab-<version>-macOS-arm64.pkg`. The package is not signed, so
-  macOS may refuse to open it. Then open **System Settings → Privacy &
-  Security**, scroll down and click **Open Anyway**. Intel Macs are not
-  supported by the installer; use the steps below.
+  `StarEffectsLab-<version>-macOS-arm64.pkg` and follow the steps. The
+  package is signed and notarized by Apple. Intel Macs are not supported by
+  the installer; use the steps below.
 
 The app appears as **Star Effects Lab** in the Start menu or in Applications.
 
